@@ -69,6 +69,29 @@ export class SessionRouter {
     return `${msg.channel_id ?? ''}:${msg.from_uid}`;
   }
 
+  /**
+   * Execute fn under the per-session lock. Ensures only one pipeline runs
+   * at a time per session key, preventing history interleaving.
+   */
+  async withSessionLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.inboundQueues.get(key) ?? Promise.resolve();
+    let resolveGate!: () => void;
+    const gate = new Promise<void>((r) => {
+      resolveGate = r;
+    });
+    this.inboundQueues.set(key, gate);
+
+    try {
+      await prev;
+      return await fn();
+    } finally {
+      resolveGate();
+      if (this.inboundQueues.get(key) === gate) {
+        this.inboundQueues.delete(key);
+      }
+    }
+  }
+
   private isBlockedBot(uid: string): boolean {
     return this.config.botBlocklist?.includes(uid) ?? false;
   }

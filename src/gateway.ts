@@ -103,24 +103,13 @@ export class OctoGateway {
     }
   }
 
-  // --- Bot registration + WS connection ---
+  // --- Socket factory ---
 
-  private async registerAndConnect(): Promise<void> {
-    const reg = await registerBot({
-      apiUrl: this.config.apiUrl,
-      botToken: this.config.botToken,
-      agentPlatform: 'cc-channel-octo',
-      agentVersion: '0.1.0',
-    });
-
-    this.robotId = reg.robot_id;
-
-    console.log(`Bot registered: robot_id=${reg.robot_id}`);
-
-    this.socket = new WKSocket({
-      wsUrl: reg.ws_url,
-      uid: reg.robot_id,
-      token: reg.im_token,
+  private createSocket(wsUrl: string, uid: string, token: string): WKSocket {
+    return new WKSocket({
+      wsUrl,
+      uid,
+      token,
       onMessage: (msg) => this.handleMessage(msg),
       onConnected: () => {
         console.log('WS connected');
@@ -136,7 +125,22 @@ export class OctoGateway {
         }
       },
     });
+  }
 
+  // --- Bot registration + WS connection ---
+
+  private async registerAndConnect(): Promise<void> {
+    const reg = await registerBot({
+      apiUrl: this.config.apiUrl,
+      botToken: this.config.botToken,
+      agentPlatform: 'cc-channel-octo',
+      agentVersion: '0.1.0',
+    });
+
+    this.robotId = reg.robot_id;
+    console.log(`Bot registered: robot_id=${reg.robot_id}`);
+
+    this.socket = this.createSocket(reg.ws_url, reg.robot_id, reg.im_token);
     this.socket.connect();
   }
 
@@ -179,26 +183,7 @@ export class OctoGateway {
       this.robotId = reg.robot_id;
       console.log('Token refreshed, reconnecting...');
 
-      this.socket = new WKSocket({
-        wsUrl: reg.ws_url,
-        uid: reg.robot_id,
-        token: reg.im_token,
-        onMessage: (msg) => this.handleMessage(msg),
-        onConnected: () => {
-          console.log('WS reconnected after token refresh');
-          this.heartbeatFailCount = 0;
-        },
-        onDisconnected: () => {
-          console.log('WS disconnected');
-        },
-        onError: (err) => {
-          console.error('WS error:', err.message);
-          if (err.message.includes('Kicked') || err.message.includes('Connect failed')) {
-            void this.attemptTokenRefresh();
-          }
-        },
-      });
-
+      this.socket = this.createSocket(reg.ws_url, reg.robot_id, reg.im_token);
       this.socket.connect();
     } catch (err) {
       console.error('Token refresh failed:', err);

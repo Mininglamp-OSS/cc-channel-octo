@@ -4,7 +4,30 @@
  */
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
+import type { PermissionMode, SettingSource } from '@anthropic-ai/claude-agent-sdk';
 import type { Config } from './config.js';
+
+const VALID_PERMISSION_MODES: Set<string> = new Set([
+  'default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto',
+]);
+
+const VALID_SETTING_SOURCES: Set<string> = new Set(['user', 'project', 'local']);
+
+function toPermissionMode(value: string): PermissionMode {
+  if (!VALID_PERMISSION_MODES.has(value)) {
+    throw new Error(`Invalid permissionMode: ${value}`);
+  }
+  return value as PermissionMode;
+}
+
+function toSettingSources(values: string[]): SettingSource[] {
+  for (const v of values) {
+    if (!VALID_SETTING_SOURCES.has(v)) {
+      throw new Error(`Invalid settingSource: ${v}`);
+    }
+  }
+  return values as SettingSource[];
+}
 
 /**
  * Build the prompt string from history, group context, and current message.
@@ -40,17 +63,20 @@ export function buildPrompt(historyPrefix: string, groupContext: string, message
  * @yields string chunks of assistant text output
  */
 export async function* queryAgent(prompt: string, config: Config): AsyncIterable<string> {
+  const permissionMode = toPermissionMode(config.sdk.permissionMode);
+  const settingSources = toSettingSources(config.sdk.settingSources);
+
   const stream = sdkQuery({
     prompt,
     options: {
       cwd: config.cwd,
       systemPrompt: config.sdk.systemPrompt,
       allowedTools: config.sdk.allowedTools,
-      permissionMode: config.sdk.permissionMode as any,
+      permissionMode,
       maxTurns: config.sdk.maxTurns,
       model: config.sdk.model,
-      settingSources: config.sdk.settingSources as any[],
-      allowDangerouslySkipPermissions: config.sdk.permissionMode === 'bypassPermissions',
+      settingSources,
+      allowDangerouslySkipPermissions: permissionMode === 'bypassPermissions',
     },
   });
 
@@ -64,9 +90,7 @@ export async function* queryAgent(prompt: string, config: Config): AsyncIterable
         }
       } else if (message.type === 'result') {
         if (message.subtype !== 'success') {
-          const errorResult = message as any;
-          const errorMsg = errorResult.error || errorResult.subtype || 'Processing failed';
-          yield `\n[Error: ${errorMsg}]`;
+          yield `\n[Error: ${message.subtype}]`;
         }
       }
     }
