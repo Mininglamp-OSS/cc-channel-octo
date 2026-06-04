@@ -21,8 +21,9 @@ const REFRESH_INTERVAL_MS = 60 * 60 * 1000;
 
 export class GroupContext {
   private readonly messageCache = new Map<string, GroupMessage[]>();
-  private readonly memberMap = new Map<string, string>();
-  private readonly nameToUid = new Map<string, string>();
+  // Per-channel member maps to avoid cross-group name collisions
+  private readonly memberMapByChannel = new Map<string, Map<string, string>>(); // channelId → uid → name
+  private readonly nameToUidByChannel = new Map<string, Map<string, string>>(); // channelId → name → uid
   private readonly lastRefresh = new Map<string, number>();
 
   private readonly adapter: DbAdapter;
@@ -48,6 +49,24 @@ export class GroupContext {
     );
   }
 
+  private getMemberMap(channelId: string): Map<string, string> {
+    let m = this.memberMapByChannel.get(channelId);
+    if (!m) {
+      m = new Map();
+      this.memberMapByChannel.set(channelId, m);
+    }
+    return m;
+  }
+
+  private getNameToUid(channelId: string): Map<string, string> {
+    let m = this.nameToUidByChannel.get(channelId);
+    if (!m) {
+      m = new Map();
+      this.nameToUidByChannel.set(channelId, m);
+    }
+    return m;
+  }
+
   pushMessage(
     channelId: string,
     fromUid: string,
@@ -69,10 +88,16 @@ export class GroupContext {
 
   learnMember(channelId: string, uid: string, name: string): void {
     if (!uid || !name) return;
-    const existing = this.memberMap.get(uid);
+    const memberMap = this.getMemberMap(channelId);
+    const nameMap = this.getNameToUid(channelId);
+    const existing = memberMap.get(uid);
     if (existing !== name) {
-      this.memberMap.set(uid, name);
-      this.nameToUid.set(name, uid);
+      // Remove old reverse mapping before updating
+      if (existing) {
+        nameMap.delete(existing);
+      }
+      memberMap.set(uid, name);
+      nameMap.set(name, uid);
       try {
         this.upsertMember.run(channelId, uid, name, Date.now());
       } catch (err) {
@@ -85,14 +110,21 @@ export class GroupContext {
     const now = Date.now();
     const last = this.lastRefresh.get(channelId) ?? 0;
     if (now - last < REFRESH_INTERVAL_MS) return;
-    this.lastRefresh.set(channelId, now);
+    // Don't set lastRefresh here — only on success
 
     try {
       const members = await getGroupMembers({ apiUrl, botToken, groupNo: channelId });
+      this.lastRefresh.set(channelId, now); // Record only on success
+      const memberMap = this.getMemberMap(channelId);
+      const nameMap = this.getNameToUid(channelId);
       for (const m of members) {
         if (!m.uid || !m.name) continue;
-        this.memberMap.set(m.uid, m.name);
-        this.nameToUid.set(m.name, m.uid);
+        const oldName = memberMap.get(m.uid);
+        if (oldName && oldName !== m.name) {
+          nameMap.delete(oldName);
+        }
+        memberMap.set(m.uid, m.name);
+        nameMap.set(m.name, m.uid);
         try {
           this.upsertMember.run(channelId, m.uid, m.name, now);
         } catch (err) {
@@ -101,17 +133,23 @@ export class GroupContext {
       }
     } catch (err) {
       console.error(`group-context: refreshMembers(${channelId}) failed: ${String(err)}`);
+      // Don't update lastRefresh on failure — allow retry
     }
   }
 
-  async fetchAndLearnUser(uid: string, apiUrl: string, botToken: string): Promise<string | undefined> {
-    const cached = this.memberMap.get(uid);
+  async fetchAndLearnUser(
+    uid: string,
+    channelId: string,
+    apiUrl: string,
+    botToken: string,
+  ): Promise<string | undefined> {
+    const memberMap = this.getMemberMap(channelId);
+    const cached = memberMap.get(uid);
     if (cached) return cached;
     try {
       const info = await fetchUserInfo({ apiUrl, botToken, uid });
       if (info?.name) {
-        this.memberMap.set(uid, info.name);
-        this.nameToUid.set(info.name, uid);
+        this.learnMember(channelId, uid, info.name);
         return info.name;
       }
     } catch (err) {
@@ -144,20 +182,22 @@ export class GroupContext {
     return `${header}${selected.join('\n')}${trailer}`;
   }
 
-  resolveMentions(text: string): string[] {
+  resolveMentions(text: string, channelId: string): string[] {
     const uids: string[] = [];
     const seen = new Set<string>();
-    const regex = /@(\S+)/g;
+    const nameMap = this.nameToUidByChannel.get(channelId);
+    if (!nameMap) return uids;
+
+    // Match @name where name is a run of word-like characters (letters, digits, underscores,
+    // CJK ideographs, Hangul, Kana, etc.) — stops at punctuation and whitespace.
+    const regex = /@([\w\u4e00-\u9fff\u3400-\u4dbf\uac00-\ud7af\u3040-\u309f\u30a0-\u30ff]+)/g;
     let match: RegExpExecArray | null;
     while ((match = regex.exec(text)) !== null) {
-      const name = match[1];
-      let uid = this.nameToUid.get(name);
-      if (!uid) {
-        // Try progressively shorter prefixes — handles trailing punctuation.
-        for (let end = name.length - 1; end > 0 && !uid; end--) {
-          uid = this.nameToUid.get(name.slice(0, end));
-        }
-      }
+      // Strip known trailing punctuation that might stick to names
+      let name = match[1];
+      name = name.replace(/[,.!?;:，。！？；：、)\]]+$/, '');
+      if (!name) continue;
+      const uid = nameMap.get(name);
       if (uid && !seen.has(uid)) {
         seen.add(uid);
         uids.push(uid);
@@ -166,17 +206,19 @@ export class GroupContext {
     return uids;
   }
 
-  getName(uid: string): string | undefined {
-    return this.memberMap.get(uid);
+  getName(uid: string, channelId: string): string | undefined {
+    return this.getMemberMap(channelId).get(uid);
   }
 
   loadMembersFromDb(channelId: string): void {
     try {
       const rows = this.selectMembers.all(channelId) as MemberRow[];
+      const memberMap = this.getMemberMap(channelId);
+      const nameMap = this.getNameToUid(channelId);
       for (const r of rows) {
         if (!r.uid || !r.name) continue;
-        this.memberMap.set(r.uid, r.name);
-        this.nameToUid.set(r.name, r.uid);
+        memberMap.set(r.uid, r.name);
+        nameMap.set(r.name, r.uid);
       }
     } catch (err) {
       console.error(`group-context: loadMembersFromDb(${channelId}) failed: ${String(err)}`);

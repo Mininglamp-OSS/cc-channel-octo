@@ -18,6 +18,8 @@ interface TokenBucket {
   lastRefill: number;
 }
 
+const BUCKET_STALE_MS = 5 * 60 * 1000; // 5 minutes
+
 export class SessionRouter {
   private readonly config: Config;
   private readonly robotId: string;
@@ -49,7 +51,7 @@ export class SessionRouter {
     }
   }
 
-  private sessionKey(msg: BotMessage): string {
+  sessionKey(msg: BotMessage): string {
     if (msg.channel_type === ChannelType.DM) {
       return msg.from_uid;
     }
@@ -68,7 +70,7 @@ export class SessionRouter {
     const mention = msg.payload.mention;
     if (!mention) return false;
     if (mention.uids?.includes(this.robotId)) return true;
-    if (mention.all) return true;
+    // Note: mention.all is a humans-only signal (@所有人), bots do NOT respond.
     if (mention.ais) return true;
     return false;
   }
@@ -92,6 +94,9 @@ export class SessionRouter {
       return null;
     }
 
+    // Skip system events (group join/leave, etc.) — no user-facing reply needed.
+    if (msg.payload.event) return null;
+
     // Non-text message → reply with notice.
     if (msg.payload.type !== MessageType.Text) {
       await this.replySafe(msg, '暂不支持此类消息，请发送文字');
@@ -108,6 +113,8 @@ export class SessionRouter {
   }
 
   private checkRateLimit(key: string): boolean {
+    this.cleanStaleBuckets();
+
     const now = Date.now();
     const maxPerMinute = this.config.rateLimit.maxPerMinute;
     let bucket = this.tokenBuckets.get(key);
@@ -123,6 +130,16 @@ export class SessionRouter {
     if (bucket.tokens < 1) return false;
     bucket.tokens -= 1;
     return true;
+  }
+
+  /** Remove token buckets that haven't been used in 5 minutes. */
+  private cleanStaleBuckets(): void {
+    const now = Date.now();
+    for (const [key, bucket] of this.tokenBuckets) {
+      if (now - bucket.lastRefill > BUCKET_STALE_MS) {
+        this.tokenBuckets.delete(key);
+      }
+    }
   }
 
   private async replySafe(msg: BotMessage, content: string): Promise<void> {
