@@ -157,6 +157,9 @@ export class StreamRelay {
       if (accumulated.length === lastSentLength) return; // Nothing new since last send.
 
       isFlushing = true;
+      // Snapshot length before await — new chunks may extend accumulated
+      // during the async send; we must record only what was actually sent.
+      const snapshotLen = accumulated.length;
       const payload = encodeStreamPayload(accumulated);
 
       try {
@@ -179,7 +182,7 @@ export class StreamRelay {
             payload,
           });
         }
-        lastSentLength = accumulated.length;
+        lastSentLength = snapshotLen;
         lastFlushTime = Date.now();
       } catch {
         // Stream API unavailable — mark failed so we fall back after iteration.
