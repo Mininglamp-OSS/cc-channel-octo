@@ -1,0 +1,23 @@
+{
+  "botToken": "bf_YOUR_BOT_TOKEN",
+  "apiUrl": "https://your-octo-instance.com",
+  "cwd": "/path/to/your/project",
+  "dataDir": "./data",
+
+  "sdk": {
+    "allowedTools": ["Read", "Glob", "Grep", "WebFetch", "WebSearch"],
+    "permissionMode": "bypassPermissions",
+    "settingSources": ["user", "project"]
+  },
+
+  "rateLimit": {
+    "maxPerMinute": 5
+  },
+
+  "context": {
+    "maxContextChars": 6000,
+    "historyLimit": 40
+  },
+
+  "botBlocklist": []
+}

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+*.db
+*.db-journal
+config.json
+.env
+*.lock.pid
+.DS_Store
+*.log
