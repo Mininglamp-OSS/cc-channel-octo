@@ -79,26 +79,14 @@ async function handleMessage(
   const channelType = msg.channel_type ?? ChannelType.DM;
   const isGroup = channelType === ChannelType.Group || channelType === ChannelType.CommunityTopic;
 
-  // --- Route: filter, mention gate, rate limit ---
-  const result = await router.route(msg);
-  if (!result || !result.shouldProcess) {
-    // Not processed — still cache group text messages for context
-    if (isGroup && msg.payload.type === MessageType.Text && msg.payload.content) {
-      groupContext.pushMessage(
-        channelId,
-        msg.from_uid,
-        msg.from_name ?? msg.from_uid,
-        msg.payload.content,
-        msg.timestamp,
-      );
-    }
-    return;
-  }
+  // --- Route + pipeline under single session lock (no gap between route and processing) ---
+  // For non-processed messages, routeAndHandle returns without calling handler.
+  // We still need to cache group text messages for context.
+  let wasProcessed = false;
+  await router.routeAndHandle(msg, async (result) => {
+    wasProcessed = true;
+    const { sessionKey } = result;
 
-  const { sessionKey } = result;
-
-  // --- Entire agent pipeline under session lock to prevent history interleaving ---
-  await router.withSessionLock(sessionKey, async () => {
     try {
       // --- Session ---
       store.getOrCreate(sessionKey, channelId, channelType);
@@ -148,14 +136,8 @@ async function handleMessage(
         store.appendAssistant(sessionKey, fullResponse);
       }
 
-      // --- Resolve mentions in group reply (wired to sendMessage) ---
-      // NOTE: Mention resolution is deferred to v0.2 when StreamRelay gains
-      // mention-aware delivery. For now the response is already sent via stream.
-      // resolveMentions would need to be called before delivery, which requires
-      // buffering the full response first (conflicts with streaming). TODO v0.2.
-
     } catch (err) {
-      console.error(`[cc-channel-octo] Error processing message (session=${sessionKey}):`, err);
+      console.error(`[cc-channel-octo] Error processing message (session=${result.sessionKey}):`, err);
       // Best-effort error reply
       try {
         await sendMessage({
@@ -170,6 +152,17 @@ async function handleMessage(
       }
     }
   });
+
+  // Cache non-processed group text messages for context
+  if (!wasProcessed && isGroup && msg.payload.type === MessageType.Text && msg.payload.content) {
+    groupContext.pushMessage(
+      channelId,
+      msg.from_uid,
+      msg.from_name ?? msg.from_uid,
+      msg.payload.content,
+      msg.timestamp,
+    );
+  }
 }
 
 main().catch((err) => {

@@ -225,6 +225,7 @@ export class StreamRelay {
       // Source iterable threw — close any started stream to prevent leak.
       if (streamNo !== null) {
         await streamEnd({ apiUrl, botToken, streamNo, channelId, channelType }).catch(() => {});
+        streamNo = null; // Prevent finally/pendingFlush from send-after-end
       }
       throw err;
     } finally {
@@ -233,10 +234,16 @@ export class StreamRelay {
         clearTimeout(flushTimer);
         flushTimer = null;
       }
-      // Await any in-flight timer-triggered flush.
+      // Await any in-flight timer-triggered flush before proceeding.
       if (pendingFlush) {
         await pendingFlush;
         pendingFlush = null;
+      }
+      // If pendingFlush completed a streamStart after catch closed the old
+      // stream, close the new one too.
+      if (streamNo !== null && streamFailed) {
+        await streamEnd({ apiUrl, botToken, streamNo, channelId, channelType }).catch(() => {});
+        streamNo = null;
       }
     }
 
