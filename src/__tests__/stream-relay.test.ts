@@ -78,16 +78,20 @@ interface ApiCall {
 const mockState = vi.hoisted(() => {
   const calls: ApiCall[] = [];
   let streamStartFail = false;
+  let streamSendFailAfter = -1; // Fail streamSend after N successful calls.
   let sendMessageFail = false;
   return {
     calls,
     get streamStartFail() { return streamStartFail; },
     set streamStartFail(v: boolean) { streamStartFail = v; },
+    get streamSendFailAfter() { return streamSendFailAfter; },
+    set streamSendFailAfter(v: number) { streamSendFailAfter = v; },
     get sendMessageFail() { return sendMessageFail; },
     set sendMessageFail(v: boolean) { sendMessageFail = v; },
     reset() {
       calls.length = 0;
       streamStartFail = false;
+      streamSendFailAfter = -1;
       sendMessageFail = false;
     },
   };
@@ -109,6 +113,12 @@ vi.mock("../octo/api.js", () => ({
   }),
   streamSend: vi.fn(async (params: Record<string, unknown>) => {
     mockState.calls.push({ fn: "streamSend", args: params });
+    if (mockState.streamSendFailAfter >= 0) {
+      const sendCount = mockState.calls.filter((c) => c.fn === "streamSend").length;
+      if (sendCount > mockState.streamSendFailAfter) {
+        throw new Error("streamSend failed");
+      }
+    }
   }),
   streamEnd: vi.fn(async (params: Record<string, unknown>) => {
     mockState.calls.push({ fn: "streamEnd", args: params });
@@ -295,5 +305,38 @@ describe("StreamRelay", () => {
     const payload = (startCalls[0].args as { payload: string }).payload;
     const decoded = JSON.parse(Buffer.from(payload, "base64").toString("utf-8")) as { content: string };
     expect(decoded.content).toBe("test data");
+  });
+
+  // ── Review fix: mid-stream failure calls streamEnd ─────────────────────
+
+  it("calls streamEnd on mid-stream failure before fallback", async () => {
+    // First streamSend succeeds (via streamStart), then streamSend fails on the next flush.
+    mockState.streamSendFailAfter = 0; // Fail from the 1st streamSend
+
+    // Yield two chunks: first triggers streamStart, second triggers a streamSend that fails.
+    const chunks = asyncChunks(["first", " second"]);
+    const promise = relay.deliver(CH_ID, CH_TYPE, chunks, API_URL, BOT_TOKEN);
+    await vi.runAllTimersAsync();
+    await promise;
+
+    // streamEnd should be called to close the dangling stream.
+    const endCalls = mockState.calls.filter((c) => c.fn === "streamEnd");
+    expect(endCalls.length).toBeGreaterThanOrEqual(1);
+
+    // Fallback sendMessage should deliver the content.
+    const sendCalls = mockState.calls.filter((c) => c.fn === "sendMessage");
+    expect(sendCalls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // ── Review fix: splitMessage maxChars guard ────────────────────────────
+
+  it("splitMessage throws on maxChars <= 0", async () => {
+    expect(() => splitMessage("hello", 0)).toThrow("maxChars must be >= 1");
+    expect(() => splitMessage("hello", -5)).toThrow("maxChars must be >= 1");
+  });
+
+  it("splitMessage works with maxChars = 1", () => {
+    const segments = splitMessage("abc", 1);
+    expect(segments).toEqual(["a", "b", "c"]);
   });
 });

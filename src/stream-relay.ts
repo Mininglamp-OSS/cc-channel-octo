@@ -40,6 +40,9 @@ const MAX_SEGMENT_CHARS = 3_500;
  * Each segment is at most `maxChars` characters.
  */
 export function splitMessage(text: string, maxChars: number = MAX_SEGMENT_CHARS): string[] {
+  if (maxChars < 1) {
+    throw new Error(`splitMessage: maxChars must be >= 1, got ${maxChars}`);
+  }
   if (text.length <= maxChars) return [text];
 
   const segments: string[] = [];
@@ -141,15 +144,19 @@ export class StreamRelay {
     let accumulated = "";
     let streamNo: string | null = null;
     let lastFlushTime = 0;
+    let lastSentLength = 0; // Track how much text was last sent to skip duplicate final sends.
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
     let streamFailed = false;
+    let isFlushing = false; // Mutex guard — prevents timer flush and loop flush from racing.
 
     // Pending flush promise so we can await the final timer-triggered flush.
     let pendingFlush: Promise<void> | null = null;
 
     const flush = async (): Promise<void> => {
-      if (accumulated.length === 0) return;
+      if (accumulated.length === 0 || isFlushing) return;
+      if (accumulated.length === lastSentLength) return; // Nothing new since last send.
 
+      isFlushing = true;
       const payload = encodeStreamPayload(accumulated);
 
       try {
@@ -172,10 +179,13 @@ export class StreamRelay {
             payload,
           });
         }
+        lastSentLength = accumulated.length;
         lastFlushTime = Date.now();
       } catch {
         // Stream API unavailable — mark failed so we fall back after iteration.
         streamFailed = true;
+      } finally {
+        isFlushing = false;
       }
     };
 
@@ -220,13 +230,17 @@ export class StreamRelay {
     }
 
     if (streamFailed) {
+      // Close the dangling stream before falling back.
+      if (streamNo !== null) {
+        await streamEnd({ apiUrl, botToken, streamNo, channelId, channelType }).catch(() => {});
+      }
       // Fallback: deliver entire accumulated text via plain messages.
       await this._deliverFallback(channelId, channelType, accumulated, apiUrl, botToken);
       return;
     }
 
-    // Flush any remaining buffered text.
-    if (accumulated.length > 0 && streamNo !== null) {
+    // Flush any remaining buffered text (only if new content since last send).
+    if (accumulated.length > lastSentLength && streamNo !== null) {
       const payload = encodeStreamPayload(accumulated);
       try {
         await streamSend({
