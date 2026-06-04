@@ -157,8 +157,8 @@ export class StreamRelay {
       if (accumulated.length === lastSentLength) return; // Nothing new since last send.
 
       isFlushing = true;
-      // Snapshot the length before awaiting — new chunks may extend `accumulated`
-      // during the async send, and we must record only what was actually sent.
+      // Snapshot length before await — new chunks may extend accumulated
+      // during the async send; we must record only what was actually sent.
       const snapshotLen = accumulated.length;
       const payload = encodeStreamPayload(accumulated);
 
@@ -202,9 +202,8 @@ export class StreamRelay {
       }, delay);
     };
 
-    // --- Entire body wrapped in try/finally for cleanup on any error path ---
+    // --- Consume chunks (wrapped in try/catch/finally to clean up on source error) ---
     try {
-      // --- Consume chunks ---
       for await (const chunk of chunks) {
         if (streamFailed) {
           // Keep accumulating for fallback delivery.
@@ -222,72 +221,70 @@ export class StreamRelay {
           scheduleFlush();
         }
       }
-
-      // --- Post-loop: cancel pending timer flush ---
+    } catch (err) {
+      // Source iterable threw — close any started stream to prevent leak.
+      if (streamNo !== null) {
+        await streamEnd({ apiUrl, botToken, streamNo, channelId, channelType }).catch(() => {});
+        streamNo = null; // Prevent finally/pendingFlush from send-after-end
+      }
+      throw err;
+    } finally {
+      // Always clean up timer, even if source iterable throws.
       if (flushTimer !== null) {
         clearTimeout(flushTimer);
         flushTimer = null;
       }
+      // Await any in-flight timer-triggered flush before proceeding.
       if (pendingFlush) {
         await pendingFlush;
         pendingFlush = null;
       }
+      // If pendingFlush completed a streamStart after catch closed the old
+      // stream, close the new one too.
+      if (streamNo !== null && streamFailed) {
+        await streamEnd({ apiUrl, botToken, streamNo, channelId, channelType }).catch(() => {});
+        streamNo = null;
+      }
+    }
 
-      if (streamFailed) {
-        // Close the dangling stream before falling back.
-        if (streamNo !== null) {
-          await streamEnd({ apiUrl, botToken, streamNo, channelId, channelType }).catch(() => {});
-          streamNo = null; // Mark closed so finally won't double-close.
-        }
-        // Fallback: deliver entire accumulated text via plain messages.
+    if (streamFailed) {
+      // Close the dangling stream before falling back.
+      if (streamNo !== null) {
+        await streamEnd({ apiUrl, botToken, streamNo, channelId, channelType }).catch(() => {});
+      }
+      // Fallback: deliver entire accumulated text via plain messages.
+      await this._deliverFallback(channelId, channelType, accumulated, apiUrl, botToken);
+      return;
+    }
+
+    // Flush any remaining buffered text (only if new content since last send).
+    if (accumulated.length > lastSentLength && streamNo !== null) {
+      const payload = encodeStreamPayload(accumulated);
+      try {
+        await streamSend({
+          apiUrl,
+          botToken,
+          streamNo,
+          channelId,
+          channelType,
+          payload,
+        });
+      } catch {
+        // If the final send fails, fall back to plain messages.
+        await streamEnd({ apiUrl, botToken, streamNo, channelId, channelType }).catch(() => {});
         await this._deliverFallback(channelId, channelType, accumulated, apiUrl, botToken);
         return;
       }
-
-      // Flush any remaining buffered text (only if new content since last send).
-      if (accumulated.length > lastSentLength && streamNo !== null) {
-        const payload = encodeStreamPayload(accumulated);
-        try {
-          await streamSend({
-            apiUrl,
-            botToken,
-            streamNo,
-            channelId,
-            channelType,
-            payload,
-          });
-        } catch {
-          // If the final send fails, fall back to plain messages.
-          await streamEnd({ apiUrl, botToken, streamNo, channelId, channelType }).catch(() => {});
-          streamNo = null;
-          await this._deliverFallback(channelId, channelType, accumulated, apiUrl, botToken);
-          return;
-        }
-      }
-
-      // End the stream normally.
-      if (streamNo !== null) {
-        await streamEnd({ apiUrl, botToken, streamNo, channelId, channelType }).catch(() => {});
-        streamNo = null;
-      } else if (accumulated.length > 0) {
-        // Never started a stream (no flush happened) — send as plain message.
-        await this._deliverFallback(channelId, channelType, accumulated, apiUrl, botToken);
-      }
-      // If accumulated is empty and no stream started, the agent produced no output — nothing to send.
-    } finally {
-      // Always clean up timer + pending flush + dangling stream, even if source throws.
-      if (flushTimer !== null) {
-        clearTimeout(flushTimer);
-        flushTimer = null;
-      }
-      if (pendingFlush) {
-        await pendingFlush;
-        pendingFlush = null;
-      }
-      if (streamNo !== null) {
-        await streamEnd({ apiUrl, botToken, streamNo, channelId, channelType }).catch(() => {});
-      }
     }
+
+    // End the stream.
+    if (streamNo !== null) {
+      await streamEnd({ apiUrl, botToken, streamNo, channelId, channelType }).catch(() => {});
+    } else if (accumulated.length > 0) {
+      // Never started a stream (no flush happened) — send as plain message.
+      await this._deliverFallback(channelId, channelType, accumulated, apiUrl, botToken);
+    }
+    // If accumulated is empty and no stream started, the agent produced no output — nothing to send.
   }
 
   // ── Fallback: plain sendMessage with splitting ──────────────────────────

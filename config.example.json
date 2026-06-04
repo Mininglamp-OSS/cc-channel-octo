@@ -1,13 +1,13 @@
 {
-  "_comment_safe": "Safe mode (default): read-only tools, settingSources=['user'] only. This is the recommended starting point.",
-  "_comment_full": "Full mode: add Write, Edit, Bash to allowedTools. Adding 'project' to settingSources loads cwd/.claude/settings.json — WARNING: malicious repos can override allowedTools via project settings hooks. Only use 'project' with trusted codebases.",
+  "_comment": "Default: full tool set + bypassPermissions (headless automation). Security relies on allowedTools whitelist, not permissionMode. IMPORTANT: set cwd to an isolated working directory — do NOT point it at a directory containing config.json, tokens, or other secrets.",
+  "_comment_safe_mode": "Optional safe downgrade: set allowedTools to ['Read', 'Glob', 'Grep'] and remove Bash/Write/Edit/WebFetch/WebSearch to restrict to read-only operations. Remove WebFetch/WebSearch to eliminate SSRF risk.",
   "botToken": "bf_YOUR_BOT_TOKEN",
   "apiUrl": "https://your-octo-instance.com",
-  "cwd": "/path/to/your/project",
+  "cwd": "/path/to/isolated/project",
   "dataDir": "./data",
 
   "sdk": {
-    "allowedTools": ["Read", "Glob", "Grep", "WebFetch", "WebSearch"],
+    "allowedTools": ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebFetch", "WebSearch"],
     "permissionMode": "bypassPermissions",
     "settingSources": ["user"]
   },

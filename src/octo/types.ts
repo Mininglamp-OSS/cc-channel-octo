@@ -42,6 +42,7 @@ export interface BotMessage {
   message_id: string;
   message_seq: number;
   from_uid: string;
+  from_name?: string;
   channel_id?: string;
   channel_type?: ChannelType;
   timestamp: number;

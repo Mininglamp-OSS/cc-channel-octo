@@ -57,6 +57,24 @@ export class SessionRouter {
     }
   }
 
+  /**
+   * Route a message and, if it should be processed, run the handler callback
+   * under the same per-session lock. This ensures no gap between route decision
+   * and pipeline execution — concurrent same-session messages cannot interleave.
+   */
+  async routeAndHandle(
+    msg: BotMessage,
+    handler: (result: RouteResult) => Promise<void>,
+  ): Promise<void> {
+    const key = this.sessionKey(msg);
+    await this.withSessionLock(key, async () => {
+      const result = await this.processMessage(msg, key);
+      if (result && result.shouldProcess) {
+        await handler(result);
+      }
+    });
+  }
+
   async route(msg: BotMessage): Promise<RouteResult | null> {
     const key = this.sessionKey(msg);
     return this.withSessionLock(key, () => this.processMessage(msg, key));
