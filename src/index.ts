@@ -79,20 +79,21 @@ async function handleMessage(
   const channelType = msg.channel_type ?? ChannelType.DM;
   const isGroup = channelType === ChannelType.Group || channelType === ChannelType.CommunityTopic;
 
-  // --- Cache group messages for context (all messages, not just @bot) ---
-  if (isGroup && msg.payload.type === MessageType.Text && msg.payload.content) {
-    groupContext.pushMessage(
-      channelId,
-      msg.from_uid,
-      msg.from_name ?? msg.from_uid,
-      msg.payload.content,
-      msg.timestamp,
-    );
-  }
-
   // --- Route: filter, mention gate, rate limit ---
   const result = await router.route(msg);
-  if (!result || !result.shouldProcess) return;
+  if (!result || !result.shouldProcess) {
+    // Not processed — still cache group text messages for context
+    if (isGroup && msg.payload.type === MessageType.Text && msg.payload.content) {
+      groupContext.pushMessage(
+        channelId,
+        msg.from_uid,
+        msg.from_name ?? msg.from_uid,
+        msg.payload.content,
+        msg.timestamp,
+      );
+    }
+    return;
+  }
 
   const { sessionKey } = result;
 
@@ -107,6 +108,17 @@ async function handleMessage(
       if (isGroup) {
         await groupContext.refreshMembers(channelId, config.apiUrl, config.botToken);
         contextStr = groupContext.buildContext(channelId);
+        // Cache current message AFTER buildContext so it only appears in
+        // [Current message], not duplicated in [Group context].
+        if (msg.payload.type === MessageType.Text && msg.payload.content) {
+          groupContext.pushMessage(
+            channelId,
+            msg.from_uid,
+            msg.from_name ?? msg.from_uid,
+            msg.payload.content,
+            msg.timestamp,
+          );
+        }
       }
 
       // --- Build history prefix BEFORE appending current message ---
