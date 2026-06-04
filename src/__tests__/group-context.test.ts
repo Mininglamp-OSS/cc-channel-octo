@@ -104,6 +104,31 @@ describe('GroupContext', () => {
     expect(ctx.resolveMentions('@NewName hello', 'ch1')).toEqual(['u1']);
   });
 
+  it('rename does not clobber another user with the same old display name', () => {
+    // Both users start with different names
+    ctx.learnMember('ch1', 'u1', 'Alice');
+    ctx.learnMember('ch1', 'u2', 'Alice'); // u2 takes over 'Alice'
+
+    // Now u2 renames — should NOT delete 'Alice' → u2 if still valid,
+    // but since u2 owns 'Alice', it should be cleaned up
+    ctx.learnMember('ch1', 'u2', 'Bob');
+    // 'Alice' is no longer mapped to anyone (u1 was overwritten by u2,
+    // u2 renamed to Bob)
+    // But u1's memberMap entry still says 'Alice'
+    expect(ctx.getName('u1', 'ch1')).toBe('Alice');
+    expect(ctx.getName('u2', 'ch1')).toBe('Bob');
+  });
+
+  it('duplicate display name: rename does not delete mapping owned by other uid', () => {
+    ctx.learnMember('ch1', 'u1', 'SharedName');
+    ctx.learnMember('ch1', 'u2', 'SharedName'); // u2 takes over reverse mapping
+    // Now u1 renames — should NOT delete 'SharedName' because it points to u2
+    ctx.learnMember('ch1', 'u1', 'UniqueName');
+    // SharedName should still resolve to u2
+    expect(ctx.resolveMentions('@SharedName', 'ch1')).toEqual(['u2']);
+    expect(ctx.resolveMentions('@UniqueName', 'ch1')).toEqual(['u1']);
+  });
+
   // --- resolveMentions ---
 
   it('resolveMentions strips trailing punctuation', () => {

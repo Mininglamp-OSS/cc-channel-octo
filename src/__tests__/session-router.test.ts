@@ -189,9 +189,48 @@ describe('SessionRouter', () => {
     await router.route(makeMsg({ message_id: '1', channel_type: ChannelType.DM }));
     await router.route(makeMsg({ message_id: '2', channel_type: ChannelType.DM }));
 
-    // Should be rate limited
+    // Should be rate limited — first rejection sends notification
     const result = await router.route(makeMsg({ message_id: '3', channel_type: ChannelType.DM }));
     expect(result!.shouldProcess).toBe(false);
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ content: '请稍后再试' }),
+    );
+  });
+
+  it('rate limit debounce: only notifies once per window', async () => {
+    const cfg = makeConfig({ rateLimit: { maxPerMinute: 1 } });
+    router = new SessionRouter(cfg, ROBOT_ID);
+
+    // Consume the single token
+    await router.route(makeMsg({ message_id: '1', channel_type: ChannelType.DM }));
+    vi.mocked(sendMessage).mockClear();
+
+    // First rejection — notified
+    await router.route(makeMsg({ message_id: '2', channel_type: ChannelType.DM }));
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+
+    // Subsequent rejections — debounced, no additional notification
+    await router.route(makeMsg({ message_id: '3', channel_type: ChannelType.DM }));
+    await router.route(makeMsg({ message_id: '4', channel_type: ChannelType.DM }));
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('rate limit applies to non-text messages too', async () => {
+    const cfg = makeConfig({ rateLimit: { maxPerMinute: 1 } });
+    router = new SessionRouter(cfg, ROBOT_ID);
+
+    // Consume the single token with a text message
+    await router.route(makeMsg({ message_id: '1', channel_type: ChannelType.DM }));
+
+    // Non-text message should be rate limited, not replied with "暂不支持"
+    vi.mocked(sendMessage).mockClear();
+    const result = await router.route(makeMsg({
+      message_id: '2',
+      channel_type: ChannelType.DM,
+      payload: { type: MessageType.Image },
+    }));
+    expect(result!.shouldProcess).toBe(false);
+    // Should get rate limit notification, not the non-text notice
     expect(sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({ content: '请稍后再试' }),
     );

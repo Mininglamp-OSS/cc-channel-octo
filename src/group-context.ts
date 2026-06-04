@@ -92,8 +92,9 @@ export class GroupContext {
     const nameMap = this.getNameToUid(channelId);
     const existing = memberMap.get(uid);
     if (existing !== name) {
-      // Remove old reverse mapping before updating
-      if (existing) {
+      // Remove old reverse mapping only if it still points to THIS uid.
+      // If another user already claimed the same display name, don't clobber.
+      if (existing && nameMap.get(existing) === uid) {
         nameMap.delete(existing);
       }
       memberMap.set(uid, name);
@@ -120,7 +121,7 @@ export class GroupContext {
       for (const m of members) {
         if (!m.uid || !m.name) continue;
         const oldName = memberMap.get(m.uid);
-        if (oldName && oldName !== m.name) {
+        if (oldName && oldName !== m.name && nameMap.get(oldName) === m.uid) {
           nameMap.delete(oldName);
         }
         memberMap.set(m.uid, m.name);

@@ -16,6 +16,8 @@ export interface RouteResult {
 interface TokenBucket {
   tokens: number;
   lastRefill: number;
+  /** Whether the user has already been notified of rate limiting in this window. */
+  notified: boolean;
 }
 
 const BUCKET_STALE_MS = 5 * 60 * 1000; // 5 minutes
@@ -31,8 +33,12 @@ export class SessionRouter {
     this.robotId = robotId;
   }
 
-  async route(msg: BotMessage): Promise<RouteResult | null> {
-    const key = this.sessionKey(msg);
+  /**
+   * Acquire a per-session lock for the full message handling pipeline.
+   * Callers (e.g. index.ts) use this to ensure the entire handleMessage
+   * chain — not just routing — runs serially per session key.
+   */
+  async withSessionLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.inboundQueues.get(key) ?? Promise.resolve();
     let resolveGate!: () => void;
     const gate = new Promise<void>((r) => {
@@ -42,13 +48,18 @@ export class SessionRouter {
 
     try {
       await prev;
-      return await this.processMessage(msg, key);
+      return await fn();
     } finally {
       resolveGate();
       if (this.inboundQueues.get(key) === gate) {
         this.inboundQueues.delete(key);
       }
     }
+  }
+
+  async route(msg: BotMessage): Promise<RouteResult | null> {
+    const key = this.sessionKey(msg);
+    return this.withSessionLock(key, () => this.processMessage(msg, key));
   }
 
   sessionKey(msg: BotMessage): string {
@@ -97,15 +108,21 @@ export class SessionRouter {
     // Skip system events (group join/leave, etc.) — no user-facing reply needed.
     if (msg.payload.event) return null;
 
-    // Non-text message → reply with notice.
-    if (msg.payload.type !== MessageType.Text) {
-      await this.replySafe(msg, '暂不支持此类消息，请发送文字');
+    // Rate limit check BEFORE non-text check — prevents DM spam of non-text
+    // messages from bypassing rate limiting entirely.
+    if (!this.checkRateLimit(key)) {
+      // Debounce: only notify once per rate-limit window to avoid reply spam.
+      const bucket = this.tokenBuckets.get(key);
+      if (bucket && !bucket.notified) {
+        bucket.notified = true;
+        await this.replySafe(msg, '请稍后再试');
+      }
       return { sessionKey: key, shouldProcess: false, message: msg };
     }
 
-    // Rate limit.
-    if (!this.checkRateLimit(key)) {
-      await this.replySafe(msg, '请稍后再试');
+    // Non-text message → reply with notice.
+    if (msg.payload.type !== MessageType.Text) {
+      await this.replySafe(msg, '暂不支持此类消息，请发送文字');
       return { sessionKey: key, shouldProcess: false, message: msg };
     }
 
@@ -119,13 +136,18 @@ export class SessionRouter {
     const maxPerMinute = this.config.rateLimit.maxPerMinute;
     let bucket = this.tokenBuckets.get(key);
     if (!bucket) {
-      bucket = { tokens: maxPerMinute, lastRefill: now };
+      bucket = { tokens: maxPerMinute, lastRefill: now, notified: false };
       this.tokenBuckets.set(key, bucket);
     }
     const elapsed = now - bucket.lastRefill;
     const refill = (elapsed / 60_000) * maxPerMinute;
     bucket.tokens = Math.min(maxPerMinute, bucket.tokens + refill);
     bucket.lastRefill = now;
+
+    // Reset notification flag when tokens have been refilled above threshold
+    if (bucket.tokens >= 1) {
+      bucket.notified = false;
+    }
 
     if (bucket.tokens < 1) return false;
     bucket.tokens -= 1;
