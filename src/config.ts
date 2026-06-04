@@ -48,7 +48,7 @@ function defaults(): Config {
     sdk: {
       allowedTools: ['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'],
       permissionMode: 'bypassPermissions',
-      settingSources: ['user', 'project'],
+      settingSources: ['user'],
     },
     rateLimit: {
       maxPerMinute: 5,
@@ -60,12 +60,18 @@ function defaults(): Config {
   };
 }
 
-function readConfigFile(path: string): PartialConfig {
-  if (!existsSync(path)) {
+function readConfigFile(configFilePath: string): PartialConfig {
+  if (!existsSync(configFilePath)) {
     return {};
   }
-  const raw = readFileSync(path, 'utf-8');
-  const parsed = JSON.parse(raw) as Record<string, unknown> & PartialConfig;
+  const raw = readFileSync(configFilePath, 'utf-8');
+  let parsed: Record<string, unknown> & PartialConfig;
+  try {
+    parsed = JSON.parse(raw) as Record<string, unknown> & PartialConfig;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to parse config file ${configFilePath}: ${msg}`);
+  }
   // Strip top-level keys starting with "_" (e.g. _comment).
   const cleaned: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(parsed)) {
@@ -104,9 +110,12 @@ function parseCsv(value: string): string[] {
 }
 
 function parseIntStrict(value: string, name: string): number {
-  const n = Number(value);
-  if (!Number.isFinite(n) || !Number.isInteger(n)) {
+  if (!/^\d+$/.test(value)) {
     throw new Error(`Invalid integer for ${name}: ${value}`);
+  }
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 1) {
+    throw new Error(`Invalid integer for ${name}: ${value} (must be >= 1)`);
   }
   return n;
 }
@@ -136,6 +145,9 @@ function applyEnv(cfg: Config): Config {
     next.sdk.maxTurns = parseIntStrict(env.CC_OCTO_SDK_MAX_TURNS, 'CC_OCTO_SDK_MAX_TURNS');
   }
   if (env.CC_OCTO_SDK_SYSTEM_PROMPT) next.sdk.systemPrompt = env.CC_OCTO_SDK_SYSTEM_PROMPT;
+  if (env.CC_OCTO_SDK_SETTING_SOURCES) {
+    next.sdk.settingSources = parseCsv(env.CC_OCTO_SDK_SETTING_SOURCES);
+  }
 
   if (env.CC_OCTO_RATE_LIMIT_MAX_PER_MINUTE) {
     next.rateLimit.maxPerMinute = parseIntStrict(

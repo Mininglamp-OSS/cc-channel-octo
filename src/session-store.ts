@@ -50,9 +50,10 @@ CREATE TABLE IF NOT EXISTS group_members (
   updated_at INTEGER NOT NULL,
   PRIMARY KEY(group_id, uid)
 );
+
+CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id, id);
 `;
 
-const DEFAULT_HISTORY_LIMIT = 40;
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 function rowToSession(row: SessionRow): Session {
@@ -129,7 +130,7 @@ export class SessionStore {
     this.touchSession.run(now, sessionId);
   }
 
-  buildHistoryPrefix(sessionId: string, limit: number = DEFAULT_HISTORY_LIMIT): string {
+  buildHistoryPrefix(sessionId: string, limit: number): string {
     const rows = this.selectRecentMessages.all(sessionId, limit) as MessageRow[];
     // Rows are DESC; reverse to chronological order.
     const ordered = rows.slice().reverse();
