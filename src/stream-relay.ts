@@ -157,6 +157,9 @@ export class StreamRelay {
       if (accumulated.length === lastSentLength) return; // Nothing new since last send.
 
       isFlushing = true;
+      // Snapshot the length before awaiting — new chunks may extend `accumulated`
+      // during the async send, and we must record only what was actually sent.
+      const snapshotLen = accumulated.length;
       const payload = encodeStreamPayload(accumulated);
 
       try {
@@ -179,7 +182,7 @@ export class StreamRelay {
             payload,
           });
         }
-        lastSentLength = accumulated.length;
+        lastSentLength = snapshotLen;
         lastFlushTime = Date.now();
       } catch {
         // Stream API unavailable — mark failed so we fall back after iteration.
@@ -199,74 +202,92 @@ export class StreamRelay {
       }, delay);
     };
 
-    // --- Consume chunks ---
-    for await (const chunk of chunks) {
-      if (streamFailed) {
-        // Keep accumulating for fallback delivery.
+    // --- Entire body wrapped in try/finally for cleanup on any error path ---
+    try {
+      // --- Consume chunks ---
+      for await (const chunk of chunks) {
+        if (streamFailed) {
+          // Keep accumulating for fallback delivery.
+          accumulated += chunk;
+          continue;
+        }
+
         accumulated += chunk;
-        continue;
+
+        const elapsed = Date.now() - lastFlushTime;
+        if (elapsed >= FLUSH_INTERVAL_MS) {
+          // Enough time has passed — flush immediately.
+          await flush();
+        } else {
+          scheduleFlush();
+        }
       }
 
-      accumulated += chunk;
-
-      const elapsed = Date.now() - lastFlushTime;
-      if (elapsed >= FLUSH_INTERVAL_MS) {
-        // Enough time has passed — flush immediately.
-        await flush();
-      } else {
-        scheduleFlush();
+      // --- Post-loop: cancel pending timer flush ---
+      if (flushTimer !== null) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
       }
-    }
-
-    // --- Final flush ---
-    if (flushTimer !== null) {
-      clearTimeout(flushTimer);
-      flushTimer = null;
-    }
-    // Await any in-flight timer-triggered flush before the final one.
-    if (pendingFlush) {
-      await pendingFlush;
-      pendingFlush = null;
-    }
-
-    if (streamFailed) {
-      // Close the dangling stream before falling back.
-      if (streamNo !== null) {
-        await streamEnd({ apiUrl, botToken, streamNo, channelId, channelType }).catch(() => {});
+      if (pendingFlush) {
+        await pendingFlush;
+        pendingFlush = null;
       }
-      // Fallback: deliver entire accumulated text via plain messages.
-      await this._deliverFallback(channelId, channelType, accumulated, apiUrl, botToken);
-      return;
-    }
 
-    // Flush any remaining buffered text (only if new content since last send).
-    if (accumulated.length > lastSentLength && streamNo !== null) {
-      const payload = encodeStreamPayload(accumulated);
-      try {
-        await streamSend({
-          apiUrl,
-          botToken,
-          streamNo,
-          channelId,
-          channelType,
-          payload,
-        });
-      } catch {
-        // If the final send fails, fall back to plain messages.
-        await streamEnd({ apiUrl, botToken, streamNo, channelId, channelType }).catch(() => {});
+      if (streamFailed) {
+        // Close the dangling stream before falling back.
+        if (streamNo !== null) {
+          await streamEnd({ apiUrl, botToken, streamNo, channelId, channelType }).catch(() => {});
+          streamNo = null; // Mark closed so finally won't double-close.
+        }
+        // Fallback: deliver entire accumulated text via plain messages.
         await this._deliverFallback(channelId, channelType, accumulated, apiUrl, botToken);
         return;
       }
-    }
 
-    // End the stream.
-    if (streamNo !== null) {
-      await streamEnd({ apiUrl, botToken, streamNo, channelId, channelType }).catch(() => {});
-    } else if (accumulated.length > 0) {
-      // Never started a stream (no flush happened) — send as plain message.
-      await this._deliverFallback(channelId, channelType, accumulated, apiUrl, botToken);
+      // Flush any remaining buffered text (only if new content since last send).
+      if (accumulated.length > lastSentLength && streamNo !== null) {
+        const payload = encodeStreamPayload(accumulated);
+        try {
+          await streamSend({
+            apiUrl,
+            botToken,
+            streamNo,
+            channelId,
+            channelType,
+            payload,
+          });
+        } catch {
+          // If the final send fails, fall back to plain messages.
+          await streamEnd({ apiUrl, botToken, streamNo, channelId, channelType }).catch(() => {});
+          streamNo = null;
+          await this._deliverFallback(channelId, channelType, accumulated, apiUrl, botToken);
+          return;
+        }
+      }
+
+      // End the stream normally.
+      if (streamNo !== null) {
+        await streamEnd({ apiUrl, botToken, streamNo, channelId, channelType }).catch(() => {});
+        streamNo = null;
+      } else if (accumulated.length > 0) {
+        // Never started a stream (no flush happened) — send as plain message.
+        await this._deliverFallback(channelId, channelType, accumulated, apiUrl, botToken);
+      }
+      // If accumulated is empty and no stream started, the agent produced no output — nothing to send.
+    } finally {
+      // Always clean up timer + pending flush + dangling stream, even if source throws.
+      if (flushTimer !== null) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      if (pendingFlush) {
+        await pendingFlush;
+        pendingFlush = null;
+      }
+      if (streamNo !== null) {
+        await streamEnd({ apiUrl, botToken, streamNo, channelId, channelType }).catch(() => {});
+      }
     }
-    // If accumulated is empty and no stream started, the agent produced no output — nothing to send.
   }
 
   // ── Fallback: plain sendMessage with splitting ──────────────────────────

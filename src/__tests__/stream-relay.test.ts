@@ -339,4 +339,33 @@ describe("StreamRelay", () => {
     const segments = splitMessage("abc", 1);
     expect(segments).toEqual(["a", "b", "c"]);
   });
+
+  // ── P0 fix: source iterable exception cleans up timer + stream ───────
+
+  it("cleans up flushTimer and stream when source iterable throws", async () => {
+    // Create an iterable that yields one chunk then throws.
+    async function* throwingChunks(): AsyncIterable<string> {
+      yield "partial";
+      throw new Error("source exploded");
+    }
+
+    const chunks = throwingChunks();
+    const promise = relay.deliver(CH_ID, CH_TYPE, chunks, API_URL, BOT_TOKEN);
+    const guarded = promise.catch(() => {});
+    await vi.runAllTimersAsync();
+    await guarded;
+
+    // Verify it rejected with the source error.
+    await expect(promise).rejects.toThrow("source exploded");
+
+    // streamEnd should have been called to close the started stream.
+    const endCalls = mockState.calls.filter((c) => c.fn === "streamEnd");
+    expect(endCalls.length).toBeGreaterThanOrEqual(1);
+
+    // Typing timer should be cleaned up (no more typing calls after error).
+    const countAfter = mockState.calls.filter((c) => c.fn === "sendTyping").length;
+    await vi.advanceTimersByTimeAsync(30_000);
+    const countLater = mockState.calls.filter((c) => c.fn === "sendTyping").length;
+    expect(countLater).toBe(countAfter);
+  });
 });
