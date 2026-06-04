@@ -72,7 +72,7 @@ describe("SessionStore CRUD", () => {
     store.appendUser("s1", "hello");
     store.appendAssistant("s1", "hi there");
 
-    const history = store.buildHistoryPrefix("s1");
+    const history = store.buildHistoryPrefix("s1", 40);
     expect(history).toContain("[user]: hello");
     expect(history).toContain("[assistant]: hi there");
   });
@@ -83,7 +83,7 @@ describe("SessionStore CRUD", () => {
     store.appendAssistant("s1", "msg2");
     store.appendUser("s1", "msg3");
 
-    const history = store.buildHistoryPrefix("s1");
+    const history = store.buildHistoryPrefix("s1", 40);
     const lines = history.split("\n");
     expect(lines[0]).toBe("[user]: msg1");
     expect(lines[1]).toBe("[assistant]: msg2");
@@ -98,7 +98,7 @@ describe("SessionStore CRUD", () => {
     store.deleteSession("s1");
 
     // History should be empty after deletion
-    const history = store.buildHistoryPrefix("s1");
+    const history = store.buildHistoryPrefix("s1", 40);
     expect(history).toBe("");
   });
 
@@ -113,8 +113,8 @@ describe("SessionStore CRUD", () => {
     store.appendUser("s1", "s1-msg");
     store.appendUser("s2", "s2-msg");
 
-    const h1 = store.buildHistoryPrefix("s1");
-    const h2 = store.buildHistoryPrefix("s2");
+    const h1 = store.buildHistoryPrefix("s1", 40);
+    const h2 = store.buildHistoryPrefix("s2", 40);
 
     expect(h1).toBe("[user]: s1-msg");
     expect(h2).toBe("[user]: s2-msg");
@@ -129,13 +129,13 @@ describe("History window truncation", () => {
   beforeEach(setup);
   afterEach(teardown);
 
-  it("default limit is 40 messages", () => {
+  it("limit=40 returns most recent 40 messages", () => {
     store.getOrCreate("s1", "ch1", 1);
     for (let i = 0; i < 50; i++) {
       store.appendUser("s1", `msg-${i}`);
     }
 
-    const history = store.buildHistoryPrefix("s1");
+    const history = store.buildHistoryPrefix("s1", 40);
     const lines = history.split("\n");
     expect(lines.length).toBe(40);
     // Should contain most recent 40 messages (msg-10 through msg-49)
@@ -169,12 +169,12 @@ describe("History window truncation", () => {
 
   it("empty history returns empty string", () => {
     store.getOrCreate("s1", "ch1", 1);
-    const history = store.buildHistoryPrefix("s1");
+    const history = store.buildHistoryPrefix("s1", 40);
     expect(history).toBe("");
   });
 
   it("history for nonexistent session returns empty string", () => {
-    const history = store.buildHistoryPrefix("nonexistent");
+    const history = store.buildHistoryPrefix("nonexistent", 40);
     expect(history).toBe("");
   });
 });
@@ -205,11 +205,11 @@ describe("Expired session cleanup", () => {
     expect(cleaned).toBe(1);
 
     // Old session's messages should be gone (CASCADE)
-    const oldHistory = store.buildHistoryPrefix("old-session");
+    const oldHistory = store.buildHistoryPrefix("old-session", 40);
     expect(oldHistory).toBe("");
 
     // Fresh session should still exist
-    const freshHistory = store.buildHistoryPrefix("fresh-session");
+    const freshHistory = store.buildHistoryPrefix("fresh-session", 40);
     expect(freshHistory).toBe("[user]: fresh message");
   });
 
@@ -390,7 +390,7 @@ describe("Edge cases", () => {
     const specialContent = '中文消息 🎉\n"quotes"\t\ttabs\\backslash';
     store.appendUser("s1", specialContent);
 
-    const history = store.buildHistoryPrefix("s1");
+    const history = store.buildHistoryPrefix("s1", 40);
     expect(history).toBe(`[user]: ${specialContent}`);
   });
 
@@ -399,7 +399,7 @@ describe("Edge cases", () => {
     const longMsg = "x".repeat(100_000);
     store.appendUser("s1", longMsg);
 
-    const history = store.buildHistoryPrefix("s1");
+    const history = store.buildHistoryPrefix("s1", 40);
     expect(history).toBe(`[user]: ${longMsg}`);
   });
 
@@ -443,7 +443,7 @@ describe("Edge cases", () => {
 
     store.appendUser("s1", "msg-4");
 
-    const history = store.buildHistoryPrefix("s1");
+    const history = store.buildHistoryPrefix("s1", 40);
     const lines = history.split("\n");
     expect(lines).toEqual([
       "[user]: msg-1",
@@ -459,6 +459,6 @@ describe("Edge cases", () => {
     // Verify it still works
     store.getOrCreate("s1", "ch1", 1);
     store.appendUser("s1", "test");
-    expect(store.buildHistoryPrefix("s1")).toBe("[user]: test");
+    expect(store.buildHistoryPrefix("s1", 40)).toBe("[user]: test");
   });
 });
