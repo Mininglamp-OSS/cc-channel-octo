@@ -1,4 +1,5 @@
 {
+  "_comment": "Safe mode (default): allowedTools restricted to read-only tools. Full mode: add Write, Edit, Bash to allowedTools. Env vars (CC_OCTO_*) override these values. See README.md.",
   "botToken": "bf_YOUR_BOT_TOKEN",
   "apiUrl": "https://your-octo-instance.com",
   "cwd": "/path/to/your/project",
