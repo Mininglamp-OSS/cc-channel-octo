@@ -46,8 +46,8 @@ function defaults(): Config {
     cwd: process.cwd(),
     dataDir: './data',
     sdk: {
-      allowedTools: ['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'],
-      permissionMode: 'bypassPermissions',
+      allowedTools: ['Read', 'Glob', 'Grep'],
+      permissionMode: 'default',
       settingSources: ['user'],
     },
     rateLimit: {
