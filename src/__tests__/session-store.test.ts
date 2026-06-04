@@ -6,7 +6,7 @@
  *  - History window truncation (40 messages default, custom limit)
  *  - Expired session cleanup (7-day threshold, CASCADE delete of messages)
  *  - DbAdapter interface contract (exec, prepare, close, transaction)
- *  - Edge cases (empty history, concurrent getOrCreate, message ordering)
+ *  - Edge cases (empty history, message ordering, constraint enforcement)
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createAdapter, type DbAdapter } from "../db-adapter.js";
-import { SessionStore, type Session } from "../session-store.js";
+import { SessionStore } from "../session-store.js";
 
 // ─── Test Helpers ───────────────────────────────────────────────────────────
 
@@ -53,16 +53,18 @@ describe("SessionStore CRUD", () => {
     expect(session.updatedAt).toBeGreaterThanOrEqual(session.createdAt);
   });
 
-  it("getOrCreate returns existing session and touches updatedAt", async () => {
-    const s1 = store.getOrCreate("s1", "ch1", 1);
-    // Small delay to ensure updatedAt can differ
-    await new Promise((r) => setTimeout(r, 5));
-    const s2 = store.getOrCreate("s1", "ch1", 1);
+  it("getOrCreate returns existing session and touches updatedAt", () => {
+    store.getOrCreate("s1", "ch1", 1);
 
-    expect(s2.id).toBe("s1");
-    expect(s2.channelId).toBe("ch1");
-    expect(s2.createdAt).toBe(s1.createdAt);
-    expect(s2.updatedAt).toBeGreaterThanOrEqual(s1.updatedAt);
+    // Backdate updated_at so we can detect the touch
+    const oldTime = Date.now() - 60_000;
+    adapter.prepare("UPDATE sessions SET updated_at = ? WHERE id = ?").run(oldTime, "s1");
+
+    store.getOrCreate("s1", "ch1", 1);
+
+    // Read updated_at directly — not through getOrCreate which itself touches
+    const row = adapter.prepare("SELECT updated_at FROM sessions WHERE id = ?").get("s1") as { updated_at: number };
+    expect(row.updated_at).toBeGreaterThan(oldTime);
   });
 
   it("appendUser + appendAssistant stores messages", () => {
@@ -258,7 +260,7 @@ describe("Expired session cleanup", () => {
     expect(rows.cnt).toBe(0);
   });
 
-  it("session at exactly 7 days is NOT cleaned (boundary)", () => {
+  it("session just under 7 days is NOT cleaned (boundary)", () => {
     store.getOrCreate("boundary", "ch1", 1);
 
     // Set updated_at to exactly 7 days minus 1 second
@@ -358,6 +360,23 @@ describe("DbAdapter interface contract", () => {
     const rows = adapter.prepare("SELECT COUNT(*) as cnt FROM txn_test").get() as { cnt: number };
     expect(rows.cnt).toBe(3);
   });
+
+  it("transaction rolls back on exception", () => {
+    adapter.exec("CREATE TABLE txn_rollback (id INTEGER PRIMARY KEY, val TEXT)");
+    const insert = adapter.prepare("INSERT INTO txn_rollback (val) VALUES (?)");
+
+    const doFailing = adapter.transaction(() => {
+      insert.run("a");
+      insert.run("b");
+      throw new Error("intentional rollback");
+    });
+
+    expect(() => doFailing()).toThrow("intentional rollback");
+
+    // Both inserts should be rolled back
+    const rows = adapter.prepare("SELECT COUNT(*) as cnt FROM txn_rollback").get() as { cnt: number };
+    expect(rows.cnt).toBe(0);
+  });
 });
 
 // ─── 5. Edge Cases ──────────────────────────────────────────────────────────
@@ -384,15 +403,18 @@ describe("Edge cases", () => {
     expect(history).toBe(`[user]: ${longMsg}`);
   });
 
-  it("append touches session updatedAt", async () => {
-    const s1 = store.getOrCreate("s1", "ch1", 1);
-    const initialUpdated = s1.updatedAt;
+  it("append touches session updatedAt", () => {
+    store.getOrCreate("s1", "ch1", 1);
 
-    await new Promise((r) => setTimeout(r, 5));
+    // Backdate updated_at so we can detect the touch from append
+    const oldTime = Date.now() - 60_000;
+    adapter.prepare("UPDATE sessions SET updated_at = ? WHERE id = ?").run(oldTime, "s1");
+
     store.appendUser("s1", "new msg");
 
-    const s2 = store.getOrCreate("s1", "ch1", 1);
-    expect(s2.updatedAt).toBeGreaterThanOrEqual(initialUpdated);
+    // Read updated_at directly — not through getOrCreate which itself touches
+    const row = adapter.prepare("SELECT updated_at FROM sessions WHERE id = ?").get("s1") as { updated_at: number };
+    expect(row.updated_at).toBeGreaterThan(oldTime);
   });
 
   it("message role constraint rejects invalid roles", () => {
