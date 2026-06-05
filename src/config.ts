@@ -4,6 +4,7 @@
  */
 
 import { readFileSync, existsSync, statSync } from 'node:fs';
+import { isAllowedApiUrl } from './url-policy.js';
 
 export interface Config {
   botToken: string;
@@ -227,22 +228,10 @@ function applyEnv(cfg: Config): Config {
 }
 
 /**
- * SSRF protection: only allow https:// URLs and http://localhost or http://127.0.0.1
- * for local development. Rejects http:// to arbitrary hosts, file://, etc.
+ * SSRF protection for apiUrl: implemented in url-policy.ts (isAllowedApiUrl).
+ * S6 fix: now rejects https://127.0.0.1 too — https doesn't make a private
+ * address safe (could be a self-signed mitmproxy).
  */
-function isAllowedApiUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol === 'https:') return true;
-    if (parsed.protocol === 'http:') {
-      const host = parsed.hostname.toLowerCase();
-      return host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
-    }
-    return false;
-  } catch {
-    return false;
-  }
-}
 
 export function loadConfig(configPath?: string): Config {
   const path = configPath ?? './config.json';

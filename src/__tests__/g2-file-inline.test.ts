@@ -1,8 +1,24 @@
 /**
  * G2 (file inlining) + G4 (history backfill) integration tests.
+ *
+ * DNS isolation: `tryResolveFile` calls `assertPublicUrl(url)` which performs
+ * a DNS lookup for non-IP-literal hosts. These tests use fictitious
+ * `api.example.com` hostnames; without a DNS mock the lookup hits the real
+ * resolver (NXDOMAIN locally, ENOTFOUND in GitHub Actions) and bypasses the
+ * mocked fetch — producing a "拒绝下载" description that fails the test.
+ * Same fix pattern as inbound-ssrf.test.ts / url-policy-redirect.test.ts.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+vi.mock('node:dns/promises', () => ({
+  lookup: vi.fn(async (hostname: string) => {
+    if (hostname.includes('example.com')) {
+      return [{ address: '203.0.113.42', family: 4 }];
+    }
+    throw new Error(`Test DNS mock: unexpected hostname ${hostname}`);
+  }),
+}));
 
 describe('G2: file inlining via tryResolveFile', () => {
   let originalFetch: typeof globalThis.fetch;
@@ -36,6 +52,7 @@ describe('G2: file inlining via tryResolveFile', () => {
     const result = await tryResolveFile({
       url: 'https://api.example.com/file/hello.py',
       botToken: 'tok',
+      apiUrl: 'https://api.example.com',
       filename: 'hello.py',
     });
 
@@ -51,6 +68,7 @@ describe('G2: file inlining via tryResolveFile', () => {
     const result = await tryResolveFile({
       url: 'https://api.example.com/file/photo.jpg',
       botToken: 'tok',
+      apiUrl: 'https://api.example.com',
       filename: 'photo.jpg',
       knownSize: 5_000,
     });
@@ -68,6 +86,7 @@ describe('G2: file inlining via tryResolveFile', () => {
     const result = await tryResolveFile({
       url: 'https://api.example.com/file/big.md',
       botToken: 'tok',
+      apiUrl: 'https://api.example.com',
       filename: 'big.md',
       knownSize: 10 * 1024 * 1024, // 10 MB > 5MB cap
     });
@@ -90,6 +109,7 @@ describe('G2: file inlining via tryResolveFile', () => {
     const result = await tryResolveFile({
       url: 'https://api.example.com/file/missing.md',
       botToken: 'tok',
+      apiUrl: 'https://api.example.com',
       filename: 'missing.md',
     });
 
@@ -107,6 +127,7 @@ describe('G2: file inlining via tryResolveFile', () => {
     const result = await tryResolveFile({
       url: 'https://api.example.com/file/foo.md',
       botToken: 'tok',
+      apiUrl: 'https://api.example.com',
       filename: 'foo.md',
     });
 
@@ -133,6 +154,7 @@ describe('G2: file inlining via tryResolveFile', () => {
     const result = await tryResolveFile({
       url: 'https://api.example.com/file/something.md',
       botToken: 'tok',
+      apiUrl: 'https://api.example.com',
       filename: 'something', // no extension
     });
 
@@ -171,6 +193,7 @@ describe('G2: file inlining via tryResolveFile', () => {
     const result = await tryResolveFile({
       url: 'https://api.example.com/file/big.txt',
       botToken: 'tok',
+      apiUrl: 'https://api.example.com',
       filename: 'big.txt',
     });
 

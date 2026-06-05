@@ -166,6 +166,7 @@ async function handleMessage(
           const fileResult = await tryResolveFile({
             url: resolved.mediaUrl,
             botToken: config.botToken,
+            apiUrl: config.apiUrl,
             filename,
             knownSize,
           });

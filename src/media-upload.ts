@@ -14,8 +14,6 @@ import path from "node:path";
 import { mkdir, open, unlink } from "node:fs/promises";
 import { createReadStream, createWriteStream, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { lookup as dnsLookup } from "node:dns/promises";
-import { isIP } from "node:net";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import COS from "cos-nodejs-sdk-v5";
@@ -35,98 +33,12 @@ import {
   sendMediaMessage,
   sendRichTextMessage,
 } from "./octo/api.js";
+import { assertPublicUrl, fetchWithRedirectGuard } from "./url-policy.js";
 
 const MAX_UPLOAD_SIZE = 500 * 1024 * 1024; // 500 MB
 const UPLOAD_TEMP_DIR = path.join("/tmp", "cc-octo-upload");
 
-// ─── SSRF defense (P0.2 from PR#34 review) ─────────────────────────
-
-/**
- * Reject IP literals/resolved IPs in private/loopback/link-local/CGN ranges.
- * Caller must check returned addresses against this list before fetching.
- *
- * NOTE: DNS rebinding is a residual risk — we validate at lookup time, but
- * the OS resolver may return a different IP at fetch time. Mitigated in
- * practice by short TTLs and the fact that an attacker would need to control
- * authoritative DNS for a domain we trust. For full protection, callers can
- * resolve once, pin the IP, and connect by IP (not done here to keep COS/CDN
- * URL semantics intact).
- */
-function isPrivateOrLocalAddress(address: string): boolean {
-  const fam = isIP(address);
-  if (fam === 4) {
-    const parts = address.split(".").map(Number);
-    const [a, b] = parts;
-    // 127.0.0.0/8 loopback
-    if (a === 127) return true;
-    // 10.0.0.0/8 private
-    if (a === 10) return true;
-    // 172.16.0.0/12 private
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    // 192.168.0.0/16 private
-    if (a === 192 && b === 168) return true;
-    // 169.254.0.0/16 link-local (includes AWS/GCP metadata 169.254.169.254)
-    if (a === 169 && b === 254) return true;
-    // 100.64.0.0/10 CGN (carrier-grade NAT, shared address space)
-    if (a === 100 && b >= 64 && b <= 127) return true;
-    // 0.0.0.0/8 unspecified / current network
-    if (a === 0) return true;
-    return false;
-  }
-  if (fam === 6) {
-    const lower = address.toLowerCase();
-    // ::1 loopback
-    if (lower === "::1" || lower === "0:0:0:0:0:0:0:1") return true;
-    // :: unspecified
-    if (lower === "::" || lower === "0:0:0:0:0:0:0:0") return true;
-    // fc00::/7 unique local addresses (fc.. and fd..)
-    if (lower.startsWith("fc") || lower.startsWith("fd")) return true;
-    // fe80::/10 link-local
-    if (lower.startsWith("fe8") || lower.startsWith("fe9") ||
-        lower.startsWith("fea") || lower.startsWith("feb")) return true;
-    // ::ffff:<v4-mapped> — reject mapped IPv4 in private ranges
-    const v4MappedMatch = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (v4MappedMatch) return isPrivateOrLocalAddress(v4MappedMatch[1]);
-    return false;
-  }
-  // Not a valid IP literal — caller should resolve via DNS first.
-  return false;
-}
-
-/**
- * Validate a URL's host is publicly routable. Throws on any private/loopback/
- * link-local IP literal, or when DNS resolution returns any such IP.
- *
- * Defense against LLM-driven SSRF to internal services (AWS/GCP metadata,
- * Redis, internal admin panels, etc.).
- */
-async function assertPublicUrl(rawUrl: string): Promise<void> {
-  const u = new URL(rawUrl);
-  const host = u.hostname;
-  // IPv6 hostnames come bracketed in URL.hostname — strip for isIP/dns.
-  const bareHost = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
-
-  // Reject IP literals in private/loopback/link-local ranges immediately.
-  if (isIP(bareHost)) {
-    if (isPrivateOrLocalAddress(bareHost)) {
-      throw new Error(`Refusing to fetch private/local address: ${bareHost}`);
-    }
-    return;
-  }
-
-  // Resolve hostname — reject if ANY resolved address is private/local.
-  const addresses = await dnsLookup(bareHost, { all: true });
-  if (addresses.length === 0) {
-    throw new Error(`DNS resolution returned no addresses for: ${bareHost}`);
-  }
-  for (const { address } of addresses) {
-    if (isPrivateOrLocalAddress(address)) {
-      throw new Error(
-        `Refusing to fetch ${bareHost}: resolves to private/local address ${address}`,
-      );
-    }
-  }
-}
+// SSRF defense lives in url-policy.ts (assertPublicUrl + fetchWithRedirectGuard).
 
 // ─── Content type inference ────────────────────────────────────────────────
 
@@ -338,21 +250,27 @@ async function downloadToTempFile(
   filename: string,
   signal?: AbortSignal,
 ): Promise<{ tempPath: string; contentType: string | undefined }> {
-  // P0.2: SSRF defense — reject private/loopback/link-local targets BEFORE fetching.
+  // S1: SSRF defense — reject private/loopback/link-local targets BEFORE fetching.
+  // S2: fetchWithRedirectGuard re-validates on every redirect hop.
   await assertPublicUrl(url);
 
   await mkdir(UPLOAD_TEMP_DIR, { recursive: true });
   const safeName = sanitizeFilename(filename);
   const tempPath = path.join(UPLOAD_TEMP_DIR, `${randomUUID()}-${safeName}`);
 
-  // HEAD first to check size.
-  const head = await fetch(url, { method: "HEAD", signal: signal ?? AbortSignal.timeout(30_000) });
+  // HEAD first to check size. fetchWithRedirectGuard validates each hop.
+  const head = await fetchWithRedirectGuard(url, {
+    method: "HEAD",
+    signal: signal ?? AbortSignal.timeout(30_000),
+  });
   const contentLength = Number(head.headers.get("content-length") || 0);
   if (contentLength > MAX_UPLOAD_SIZE) {
     throw new Error(`File too large (${contentLength} bytes, max ${MAX_UPLOAD_SIZE})`);
   }
 
-  const resp = await fetch(url, { signal: signal ?? AbortSignal.timeout(300_000) });
+  const resp = await fetchWithRedirectGuard(url, {
+    signal: signal ?? AbortSignal.timeout(300_000),
+  });
   if (!resp.ok) throw new Error(`Failed to download media from ${url}: ${resp.status}`);
   const contentType = resp.headers.get("content-type") ?? undefined;
 

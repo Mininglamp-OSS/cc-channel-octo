@@ -25,9 +25,18 @@ describe('buildMediaUrl', () => {
     expect(buildMediaUrl('', API_URL)).toBeUndefined();
   });
 
-  it('passes through absolute http(s) URLs', () => {
-    expect(buildMediaUrl('https://cdn.x.com/a.jpg', API_URL)).toBe('https://cdn.x.com/a.jpg');
-    expect(buildMediaUrl('http://cdn.x.com/a.jpg', API_URL)).toBe('http://cdn.x.com/a.jpg');
+  it('only passes through absolute http(s) URLs when host matches apiUrl (S1)', () => {
+    // Same host — allowed
+    expect(buildMediaUrl('https://api.example.com/file/x.jpg', API_URL))
+      .toBe('https://api.example.com/file/x.jpg');
+    // Different host — rejected (was the SSRF + botToken leak vector)
+    expect(buildMediaUrl('https://cdn.x.com/a.jpg', API_URL)).toBeUndefined();
+    expect(buildMediaUrl('http://attacker.com/log', API_URL)).toBeUndefined();
+    expect(buildMediaUrl('http://169.254.169.254/meta', API_URL)).toBeUndefined();
+  });
+
+  it('rejects protocol downgrade (https apiUrl + http target)', () => {
+    expect(buildMediaUrl('http://api.example.com/file/x.jpg', API_URL)).toBeUndefined();
   });
 
   it('strips file/preview/ prefix', () => {
@@ -43,6 +52,95 @@ describe('buildMediaUrl', () => {
   it('handles raw storage path', () => {
     expect(buildMediaUrl('abc/img.png', API_URL))
       .toBe('https://api.example.com/file/abc/img.png');
+  });
+
+  // ─── S1 + P1.2 path traversal + smuggling defense ───────────────
+
+  it.each([
+    ['../v1/admin'],
+    ['file/../v1/admin'],
+    ['../../etc/passwd'],
+    ['file/a/../../v1/admin'],
+    ['./hidden'],
+  ])('rejects path traversal: %s', (input) => {
+    expect(buildMediaUrl(input, API_URL)).toBeUndefined();
+  });
+
+  it('rejects scheme-relative URL (//attacker.com)', () => {
+    expect(buildMediaUrl('//attacker.com/log', API_URL)).toBeUndefined();
+  });
+
+  it('rejects backslash injection (Windows-style traversal)', () => {
+    expect(buildMediaUrl('a\\..\\v1\\admin', API_URL)).toBeUndefined();
+    expect(buildMediaUrl('file\\backslash', API_URL)).toBeUndefined();
+  });
+
+  it('rejects leading-slash relative path (avoids double-slash output)', () => {
+    expect(buildMediaUrl('/abs/path/x.png', API_URL)).toBeUndefined();
+  });
+
+  // ─── S4 follow-up: encoded path traversal (PR#38 round-3) ──────────────
+  //
+  // Bug: literal `..`/`.` check bypassed by percent-encoded variants.
+  // WHATWG URL parser decodes `%2e` for dot-segment purposes:
+  //   `<apiHost>/file/%2e%2e/internal/secret.env`
+  //   .pathname → `/internal/secret.env` (escapes /file/ sandbox!)
+  //
+  // Combined with same-host Authorization scoping, attacker reads internal
+  // bot-authenticated paths via the bot's token. Independently reported by
+  // Yujiawei automated review + 李飞飞.
+  //
+  // Fix: WHATWG-canonical sandbox check (new URL().pathname.startsWith('/file/')).
+
+  it.each([
+    // Classic encoded dot-segments at top of file path — escape /file/
+    '%2e%2e/internal/secret.env',
+    '%2E%2E/internal/secret.env',       // uppercase hex
+    // Mixed encoded + literal at top — escape /file/
+    '%2e./internal/secret.env',
+    '.%2e/internal/secret.env',
+  ])('rejects encoded path traversal: %s', (input) => {
+    expect(buildMediaUrl(input, API_URL)).toBeUndefined();
+  });
+
+  it.each([
+    // These ARE normalised by WHATWG but STAY under /file/ — safe.
+    ['%2e/foo.env', 'https://api.example.com/file/%2e/foo.env'],
+    ['%2E/foo.env', 'https://api.example.com/file/%2E/foo.env'],
+    // sub/.. cancels within /file/ — final pathname still starts with /file/.
+    ['sub/%2e%2e/escape.env', 'https://api.example.com/file/sub/%2e%2e/escape.env'],
+    // %2f (encoded slash) is NOT decoded by WHATWG pathname — stays literal.
+    // Server sees /file/..%2f..%2finternal which is a single path segment.
+    ['..%2f..%2finternal/secret.env', 'https://api.example.com/file/..%2f..%2finternal/secret.env'],
+    // Double-encoded `%252e%252e` decodes to literal `%2e%2e` in the URL,
+    // not to `..` — stays under /file/ at the HTTP layer.
+    ['%252e%252e/internal/secret.env', 'https://api.example.com/file/%252e%252e/internal/secret.env'],
+  ])('accepts encoded traversal that stays under /file/: %s', (input, expected) => {
+    // The candidate URL is returned as-is; what matters is that
+    // `new URL(result).pathname.startsWith('/file/')` is true — the WHATWG
+    // sandbox check verifies this. fetch sends the literal bytes; server
+    // sees a path still rooted under /file/.
+    expect(buildMediaUrl(input, API_URL)).toBe(expected);
+  });
+
+  it('verifies WHATWG sandbox check catches all escape variants', () => {
+    // Direct check that the assertion holds for the rejected cases.
+    const escapeCases = [
+      'https://api.example.com/file/%2e%2e/internal/secret.env',
+      'https://api.example.com/file/%2E%2E/internal/secret.env',
+      'https://api.example.com/file/%2e./internal/secret.env',
+      'https://api.example.com/file/.%2e/internal/secret.env',
+    ];
+    for (const c of escapeCases) {
+      const p = new URL(c).pathname;
+      expect(p.startsWith('/file/')).toBe(false);
+    }
+  });
+
+  it('accepts benign paths that happen to contain encoded characters', () => {
+    // %20 (space) and other benign encoded chars should still pass.
+    expect(buildMediaUrl('My%20File.png', API_URL))
+      .toBe('https://api.example.com/file/My%20File.png');
   });
 });
 
