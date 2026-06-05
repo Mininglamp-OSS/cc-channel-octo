@@ -21,6 +21,8 @@ export interface BotMessage {
   channel_type?: ChannelType;
   timestamp: number;
   payload: MessagePayload;
+  /** True when this message is part of a streaming sequence (WuKongIM settingByte bit 1). */
+  streamOn?: boolean;
 }
 
 /**

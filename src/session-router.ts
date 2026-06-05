@@ -88,10 +88,42 @@ export class SessionRouter {
   }
 
   sessionKey(msg: BotMessage): string {
+    const spaceId = this.extractSpaceId(msg);
     if (msg.channel_type === ChannelType.DM) {
-      return msg.from_uid;
+      return spaceId ? `${spaceId}:${msg.from_uid}` : msg.from_uid;
     }
     return `${msg.channel_id ?? ''}:${msg.from_uid}`;
+  }
+
+  /**
+   * Extract spaceId from channel_id.
+   * DM format: s{spaceId}_{uid1}@s{spaceId}_{uid2}
+   * Group format: s{spaceId}_{groupNo} (but groups already use channel_id in key)
+   */
+  private extractSpaceId(msg: BotMessage): string {
+    // For groups, channel_id already provides isolation
+    if (this.isGroupLike(msg.channel_type)) return "";
+    // DM: try from_uid first (format: s{spaceId}_{peerId})
+    const uid = msg.from_uid;
+    if (uid.startsWith("s")) {
+      const lastUnderscore = uid.lastIndexOf("_");
+      if (lastUnderscore > 0) {
+        return uid.substring(1, lastUnderscore);
+      }
+    }
+    // DM compound: s{spaceId}_{uid1}@s{spaceId}_{uid2}
+    const channelId = msg.channel_id;
+    if (channelId && channelId.startsWith("s")) {
+      const atIdx = channelId.indexOf("@");
+      const firstPart = atIdx > 0 ? channelId.substring(0, atIdx) : channelId;
+      if (firstPart.startsWith("s")) {
+        const lastUnderscore = firstPart.lastIndexOf("_");
+        if (lastUnderscore > 0) {
+          return firstPart.substring(1, lastUnderscore);
+        }
+      }
+    }
+    return "";
   }
 
   private isBlockedBot(uid: string): boolean {
@@ -114,6 +146,11 @@ export class SessionRouter {
   private async processMessage(msg: BotMessage, key: string): Promise<RouteResult | null> {
     // Skip messages from self.
     if (msg.from_uid === this.robotId) return null;
+
+    // Skip stream update messages (G21) — only process final (non-stream) messages.
+    // When streamOn is true, this is a partial update of an ongoing stream; the final
+    // message arrives with streamOn=false and contains the complete content.
+    if (msg.streamOn) return null;
 
     // DM blocklist filter.
     if (msg.channel_type === ChannelType.DM && this.isBlockedBot(msg.from_uid)) {

@@ -77,6 +77,9 @@ export class SessionStore {
   private deleteExpired!: PreparedStatement;
   private deleteSessionStmt!: PreparedStatement;
 
+  /** Tracks the last message_seq at which the bot replied, per group session key. */
+  private lastBotReplySeq = new Map<string, number>();
+
   constructor(adapter: DbAdapter) {
     this.adapter = adapter;
   }
@@ -149,5 +152,60 @@ export class SessionStore {
 
   close(): void {
     this.adapter.close();
+  }
+
+  /** Record the message_seq at which the bot last replied for a session. */
+  setLastBotReplySeq(sessionId: string, seq: number): void {
+    this.lastBotReplySeq.set(sessionId, seq);
+  }
+
+  /** Get the message_seq at which the bot last replied for a session. */
+  getLastBotReplySeq(sessionId: string): number | undefined {
+    return this.lastBotReplySeq.get(sessionId);
+  }
+
+  /**
+   * Build history prefix with answered/new segmentation (G10).
+   * Messages before lastBotReplySeq are labeled [answered history],
+   * messages after are labeled [new messages].
+   */
+  buildSegmentedHistoryPrefix(sessionId: string, limit: number): string {
+    const rows = this.selectRecentMessages.all(sessionId, limit) as MessageRow[];
+    const ordered = rows.slice().reverse();
+    if (ordered.length === 0) return '';
+
+    const lastReplySeq = this.lastBotReplySeq.get(sessionId);
+    if (lastReplySeq === undefined) {
+      // No segmentation info — return flat history
+      return ordered.map((r) => `[${r.role}]: ${r.content}`).join('\n');
+    }
+
+    // Find the split point: the last assistant message is the boundary
+    let splitIdx = -1;
+    for (let i = ordered.length - 1; i >= 0; i--) {
+      if (ordered[i].role === 'assistant') {
+        splitIdx = i;
+        break;
+      }
+    }
+
+    if (splitIdx === -1) {
+      // No assistant messages → all are new
+      return '[new messages]\n' + ordered.map((r) => `[${r.role}]: ${r.content}`).join('\n');
+    }
+
+    const answered = ordered.slice(0, splitIdx + 1);
+    const newMsgs = ordered.slice(splitIdx + 1);
+
+    const parts: string[] = [];
+    if (answered.length > 0) {
+      parts.push('[answered history]');
+      parts.push(...answered.map((r) => `[${r.role}]: ${r.content}`));
+    }
+    if (newMsgs.length > 0) {
+      parts.push('[new messages]');
+      parts.push(...newMsgs.map((r) => `[${r.role}]: ${r.content}`));
+    }
+    return parts.join('\n');
   }
 }
