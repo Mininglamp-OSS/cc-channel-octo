@@ -383,4 +383,110 @@ describe("StreamRelay", () => {
     expect(args.mentionEntities).toBeUndefined();
     expect(args.mentionAll).toBeUndefined();
   });
+
+  // ─── C2 P0-1: splitMessage must not break @[uid:name] across segments ─────
+  //
+  // Repro: text where the LAST space within the first maxChars chunk falls
+  // INSIDE the displayName of an @[uid:John Smith Junior] mention. The space-
+  // priority split would cut at "John " — leaving seg0 = "...@[uid:John " and
+  // seg1 = "Smith Junior]..." — both unparseable, user sees raw text in chat
+  // and never receives the @-notification.
+  //
+  // Fix verifies: resolve mentions globally first, THEN splitMessage on the
+  // already-resolved @name text. @[uid:John Smith Junior] becomes
+  // @John Smith Junior before split, so split can never cut inside `[...]`.
+  it("P0-1: splitMessage cannot break structured @[uid:name] across segments", async () => {
+    // Build text where without the fix, the space inside `John Smith Junior`
+    // would be the LAST space within the first 3500 chars and splitMessage
+    // would cut there.
+    const prefix = "a".repeat(3490);
+    const mention = "@[uid_x:John Smith Junior]";
+    const trailing = "continuestextwithoutspacelongenoughtopastthehardlimit" + "x".repeat(150);
+    const text = prefix + mention + " " + trailing;
+
+    const chunks = asyncChunks([text]);
+    const promise = relay.deliver(CH_ID, CH_TYPE, chunks, API_URL, BOT_TOKEN);
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const sendCalls = mockState.calls.filter((c) => c.fn === "sendMessage");
+    // No segment may contain a broken structured mention:
+    for (const call of sendCalls) {
+      const args = call.args as { content: string };
+      expect(args.content).not.toContain("@[uid_x:");
+      expect(args.content).not.toMatch(/Smith Junior\][^@]/);
+    }
+
+    // At least one segment must carry the resolved @John Smith Junior
+    // + correctly mapped entity.
+    const carryingCall = sendCalls.find(c => {
+      const args = c.args as { content: string; mentionUids?: string[] };
+      return args.content.includes("@John Smith Junior")
+        && (args.mentionUids ?? []).includes("uid_x");
+    });
+    expect(carryingCall).toBeDefined();
+
+    const args = carryingCall!.args as {
+      content: string;
+      mentionEntities?: Array<{ uid: string; offset: number; length: number }>;
+    };
+    const ent = (args.mentionEntities ?? []).find(e => e.uid === "uid_x");
+    expect(ent).toBeDefined();
+    // Entity offset is segment-local and points to the @ in this segment.
+    expect(args.content.slice(ent!.offset, ent!.offset + ent!.length))
+      .toBe("@John Smith Junior");
+  });
+
+  it("P0-1: mentionAll applied to first segment only (no notification spam)", async () => {
+    // Force a multi-segment send with @all in the prefix. mentionAll must
+    // fire on exactly one segment (the first) to avoid spamming @所有人
+    // notifications when a reply is long enough to span chunks.
+    const text = "@all please review:\n\n" + "x".repeat(3490) + "\n\n" + "y".repeat(500);
+    const chunks = asyncChunks([text]);
+    const promise = relay.deliver(CH_ID, CH_TYPE, chunks, API_URL, BOT_TOKEN);
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const sendCalls = mockState.calls.filter((c) => c.fn === "sendMessage");
+    expect(sendCalls.length).toBeGreaterThan(1);
+    const mentionAllFlags = sendCalls.map(
+      c => (c.args as { mentionAll?: boolean }).mentionAll === true,
+    );
+    const trueCount = mentionAllFlags.filter(x => x).length;
+    expect(trueCount).toBe(1);
+    expect(mentionAllFlags[0]).toBe(true);
+  });
+
+  // ─── C2 P1-6: truncation must not split a surrogate pair ──────────────
+  it("P1-6: truncation does not split surrogate pair", async () => {
+    // emoji 😀 = high+low surrogate (2 code units). Position the high
+    // surrogate exactly at index (N-1) so unguarded slice(0, N) would leave
+    // an orphan high surrogate.
+    const N = 100;
+    const filler = "a".repeat(N - 1);
+    const emoji = "\uD83D\uDE00";
+    const text = filler + emoji + "more text afterwards";
+
+    const chunks = asyncChunks([text]);
+    const promise = relay.deliver(
+      CH_ID, CH_TYPE, chunks, API_URL, BOT_TOKEN, N,
+    );
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const sendCalls = mockState.calls.filter((c) => c.fn === "sendMessage");
+    expect(sendCalls.length).toBeGreaterThan(0);
+    const combined = sendCalls
+      .map(c => (c.args as { content: string }).content)
+      .join("");
+    // Verify no orphan high surrogate anywhere in sent content.
+    for (let i = 0; i < combined.length; i++) {
+      const code = combined.charCodeAt(i);
+      if (code >= 0xD800 && code <= 0xDBFF) {
+        const next = combined.charCodeAt(i + 1);
+        expect(next).toBeGreaterThanOrEqual(0xDC00);
+        expect(next).toBeLessThanOrEqual(0xDFFF);
+      }
+    }
+  });
 });
