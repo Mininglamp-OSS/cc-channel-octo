@@ -3,7 +3,7 @@
  */
 
 import type { Config } from './config.js';
-import type { BotMessage } from './octo/types.js';
+import type { BotMessage, MentionEntity } from './octo/types.js';
 import { ChannelType, MessageType } from './octo/types.js';
 import { sendMessage } from './octo/api.js';
 
@@ -11,6 +11,8 @@ export interface RouteResult {
   sessionKey: string;
   shouldProcess: boolean;
   message: BotMessage;
+  /** User content with leading @botname stripped (for LLM input). */
+  cleanContent?: string;
 }
 
 interface TokenBucket {
@@ -209,9 +211,13 @@ export class SessionRouter {
     // @-mentioned. The mention gate below already enforces this, but bots in
     // the blocklist (above) get hard-dropped without even checking mentions.
 
-    // Group mention gate.
+    // Group mention gate — skip unless mentioned OR in mention-free group (G12).
     if (this.isGroupLike(msg.channel_type) && !this.isMentioned(msg)) {
-      return null;
+      // G12: Check if this group is in the mention-free list
+      const isMentionFree = this.config.mentionFreeGroups?.includes(msg.channel_id ?? '') ?? false;
+      if (!isMentionFree) {
+        return null;
+      }
     }
 
     // Skip system events (group join/leave, etc.) — no user-facing reply needed.
@@ -244,7 +250,38 @@ export class SessionRouter {
       return { sessionKey: key, shouldProcess: false, message: msg };
     }
 
-    return { sessionKey: key, shouldProcess: true, message: msg };
+    // G13: Strip leading @botname from group messages for cleaner LLM input.
+    //
+    // Only strip when we have positive evidence the leading @token IS the bot.
+    // The regex fallback used to strip *any* leading @word, which corrupts
+    // messages like "@alice please check" (especially in G12 mention-free
+    // groups, where the bot wasn't even @'d and would still lose the @alice
+    // context). We now only strip when:
+    //   1. entities precisely identify the bot at offset 0, OR
+    //   2. the bot is mentioned AND the leading @token resolves to its robotId.
+    let cleanContent = content;
+    if (this.isGroupLike(msg.channel_type)) {
+      const mention = msg.payload.mention;
+      // Path 1: entities-based removal (precise offset/length).
+      if (mention?.entities && Array.isArray(mention.entities)) {
+        const botEntity = mention.entities.find(
+          (e: MentionEntity) => e.uid === this.robotId && e.offset === 0,
+        );
+        if (botEntity && typeof botEntity.length === 'number') {
+          cleanContent = content.substring(botEntity.length).trimStart();
+        }
+      }
+      // Path 2: regex fallback — only when the bot was explicitly @mentioned.
+      // In mention-free groups (G12) where the bot wasn't @'d, do NOT touch
+      // the message — a leading @ is addressed to someone else.
+      if (cleanContent === content && this.isMentioned(msg)) {
+        cleanContent = content.replace(/^@\S+\s*/, '').trimStart();
+      }
+      // If stripping emptied the content, keep original.
+      if (!cleanContent) cleanContent = content;
+    }
+
+    return { sessionKey: key, shouldProcess: true, message: msg, cleanContent };
   }
 
   /**

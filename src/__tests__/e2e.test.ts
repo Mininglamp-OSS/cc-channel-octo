@@ -10,6 +10,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('../octo/api.js', () => ({
   sendMessage: vi.fn().mockResolvedValue(undefined),
   sendTyping: vi.fn().mockResolvedValue(undefined),
+  sendReadReceipt: vi.fn().mockResolvedValue(undefined),
   getGroupMembers: vi.fn().mockResolvedValue([]),
   sendHeartbeat: vi.fn().mockResolvedValue(undefined),
   registerBot: vi.fn().mockResolvedValue({
@@ -45,6 +46,7 @@ import { createAdapter, type DbAdapter } from '../db-adapter.js';
 import { queryAgent } from '../agent-bridge.js';
 import {
   sendMessage,
+  sendReadReceipt,
 } from '../octo/api.js';
 import { ChannelType, MessageType } from '../octo/types.js';
 import type { BotMessage } from '../octo/types.js';
@@ -161,10 +163,33 @@ async function simulateMessage(
     }
 
     const userContent = msg.payload.content ?? '';
+
+    // G3: Extract quoted/replied message content for LLM context (truncated to 4KB).
+    let quotePrefix = '';
+    const replyData = msg.payload?.reply;
+    if (replyData) {
+      const replyPayload = replyData?.payload;
+      const rawReplyContent = replyPayload?.content ?? '';
+      const replyFrom = replyData.from_name ?? replyData.from_uid ?? 'unknown';
+      if (rawReplyContent) {
+        const QUOTE_MAX_BYTES = 4_096;
+        let truncated = rawReplyContent;
+        if (Buffer.byteLength(rawReplyContent, 'utf-8') > QUOTE_MAX_BYTES) {
+          truncated = rawReplyContent.slice(0, QUOTE_MAX_BYTES);
+          while (Buffer.byteLength(truncated, 'utf-8') > QUOTE_MAX_BYTES) {
+            truncated = truncated.slice(0, -1);
+          }
+          truncated += '…[truncated]';
+        }
+        quotePrefix = `[Quoted message from ${replyFrom}]: ${truncated}\n---\n`;
+      }
+    }
+    const userContentForLLM = quotePrefix + (result.cleanContent ?? userContent);
+
     const historyPrefix = store.buildSegmentedHistoryPrefix(sessionKey, config.context.historyLimit);
     store.appendUser(sessionKey, userContent, msg.message_seq);
 
-    const rawChunks = queryAgent(userContent, historyPrefix, contextStr, config);
+    const rawChunks = queryAgent(userContentForLLM, historyPrefix, contextStr, config);
 
     const collected: string[] = [];
     async function* teeChunks(): AsyncIterable<string> {
@@ -180,7 +205,19 @@ async function simulateMessage(
       teeChunks(),
       config.apiUrl,
       config.botToken,
+      config.maxResponseChars,
     );
+
+    // G8: Send read receipt after processing (fire-and-forget)
+    if (msg.message_id && msg.channel_id && msg.channel_type !== undefined) {
+      sendReadReceipt({
+        apiUrl: config.apiUrl,
+        botToken: config.botToken,
+        channelId: msg.channel_id,
+        channelType: msg.channel_type,
+        messageIds: [msg.message_id],
+      }).catch((err) => console.error(`readReceipt failed: ${String(err)}`));
+    }
 
     const fullResponse = collected.join('');
     if (fullResponse) {
@@ -496,5 +533,74 @@ describe('E2E smoke tests', () => {
     expect(segHistory).toContain('first answer');
     expect(segHistory).toContain('[new messages]');
     expect(segHistory).toContain('follow-up question');
+  });
+
+  // --- G3: Reply quote context ---
+
+  it('G3: quoted message context is prepended to user message for LLM', async () => {
+    const msg = makeDmMsg('what does this mean', {
+      payload: {
+        type: MessageType.Text,
+        content: 'what does this mean',
+        reply: {
+          from_uid: 'other-user',
+          from_name: 'Alice',
+          payload: { type: MessageType.Text, content: 'the original code' },
+        },
+      },
+    });
+    await simulateMessage(msg, config, store, router, groupContext, streamRelay);
+
+    expect(queryAgent).toHaveBeenCalledTimes(1);
+    const userMsg = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(userMsg).toContain('[Quoted message from Alice]');
+    expect(userMsg).toContain('the original code');
+    expect(userMsg).toContain('what does this mean');
+  });
+
+  // P1 regression: oversized reply payload is truncated before being prepended
+  // to user content. Without this guard, a small current message could carry
+  // an unbounded payload.reply.payload.content into queryAgent, bypassing the
+  // 32KB content guard in session-router.
+  it('G3 P1: truncates oversized quoted reply to ~4KB', async () => {
+    const hugeReply = 'X'.repeat(50_000);
+    const msg = makeDmMsg('tell me about this', {
+      payload: {
+        type: MessageType.Text,
+        content: 'tell me about this',
+        reply: {
+          from_uid: 'other-user',
+          from_name: 'Alice',
+          payload: { type: MessageType.Text, content: hugeReply },
+        },
+      },
+    });
+    await simulateMessage(msg, config, store, router, groupContext, streamRelay);
+
+    expect(queryAgent).toHaveBeenCalledTimes(1);
+    const userMsg = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    // Truncation marker present.
+    expect(userMsg).toContain('[truncated]');
+    // Total prompt size is bounded (4KB cap + small framing overhead).
+    expect(userMsg.length).toBeLessThan(5_000);
+    expect(userMsg).toContain('tell me about this');
+  });
+
+  // --- G8: Read receipt ---
+
+  it('G8: read receipt is sent after processing', async () => {
+    vi.clearAllMocks();
+    mockQueryYield('response');
+    const msg = makeDmMsg('test read receipt', { message_id: 'msg-123' });
+    await simulateMessage(msg, config, store, router, groupContext, streamRelay);
+
+    // Allow microtasks to flush (fire-and-forget)
+    await Promise.resolve();
+
+    expect(sendReadReceipt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messageIds: ['msg-123'],
+      }),
+    );
   });
 });

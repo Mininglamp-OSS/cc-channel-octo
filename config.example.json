@@ -21,5 +21,8 @@
     "historyLimit": 40
   },
 
-  "botBlocklist": []
+  "botBlocklist": [],
+
+  "_comment_mention_free": "G12: group_ids listed here process every text message without requiring an @bot mention. Use group channel IDs as strings. Env override: CC_OCTO_MENTION_FREE_GROUPS (csv).",
+  "mentionFreeGroups": []
 }

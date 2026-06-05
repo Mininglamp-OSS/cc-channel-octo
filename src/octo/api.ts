@@ -205,6 +205,23 @@ async function getJson<T>(
   return parseOctoJson<T>(text);
 }
 
+// ─── Read Receipt ──────────────────────────────────────────────────────────
+
+export async function sendReadReceipt(params: {
+  apiUrl: string;
+  botToken: string;
+  channelId: string;
+  channelType: ChannelType;
+  messageIds: string[];
+  signal?: AbortSignal;
+}): Promise<void> {
+  await postJson(params.apiUrl, params.botToken, '/v1/bot/readReceipt', {
+    channel_id: params.channelId,
+    channel_type: params.channelType,
+    message_ids: params.messageIds,
+  }, params.signal);
+}
+
 // ─── Group Members ──────────────────────────────────────────────────────────
 
 export interface GroupMember {
