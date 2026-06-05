@@ -58,6 +58,11 @@ export class SessionRouter {
     if (uid) this.knownBotUids.add(uid);
   }
 
+  /** G18: owner_uid stored from registerBot. Used by future permission model. */
+  getOwnerUid(): string {
+    return this.ownerUid;
+  }
+
   /**
    * Acquire a per-session lock for the full message handling pipeline.
    * Callers (e.g. index.ts) use this to ensure the entire handleMessage
