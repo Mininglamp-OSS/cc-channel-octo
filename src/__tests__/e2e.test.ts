@@ -28,6 +28,8 @@ vi.mock('../agent-bridge.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('../agent-bridge.js')>();
   return {
     ...original,
+    buildSystemPrompt: original.buildSystemPrompt,
+    sanitizeForSystemPrompt: original.sanitizeForSystemPrompt,
     buildPrompt: original.buildPrompt,
     queryAgent: vi.fn(),
   };
@@ -40,7 +42,7 @@ import { SessionRouter } from '../session-router.js';
 import { GroupContext } from '../group-context.js';
 import { StreamRelay } from '../stream-relay.js';
 import { createAdapter, type DbAdapter } from '../db-adapter.js';
-import { buildPrompt, queryAgent } from '../agent-bridge.js';
+import { queryAgent } from '../agent-bridge.js';
 import {
   sendMessage,
   sendTyping,
@@ -162,8 +164,7 @@ async function simulateMessage(
     const historyPrefix = store.buildHistoryPrefix(sessionKey, config.context.historyLimit);
     store.appendUser(sessionKey, userContent);
 
-    const prompt = buildPrompt(historyPrefix, contextStr, userContent);
-    const rawChunks = queryAgent(prompt, config);
+    const rawChunks = queryAgent(userContent, historyPrefix, contextStr, config);
 
     const collected: string[] = [];
     async function* teeChunks(): AsyncIterable<string> {
@@ -237,10 +238,10 @@ describe('E2E smoke tests', () => {
     const msg = makeDmMsg('Hi there');
     await simulateMessage(msg, config, store, router, groupContext, streamRelay);
 
-    // queryAgent was called
+    // queryAgent was called with user message as first arg (user role)
     expect(queryAgent).toHaveBeenCalledTimes(1);
-    const prompt = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
-    expect(prompt).toContain('[Current message]\nHi there');
+    const userMsg = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(userMsg).toBe('Hi there');
 
     // Output was sent via sendMessage
     expect(sendMessage).toHaveBeenCalled();
@@ -257,8 +258,10 @@ describe('E2E smoke tests', () => {
     const msg = makeGroupMsg('What is this code?', true);
     await simulateMessage(msg, config, store, router, groupContext, streamRelay);
 
-    // queryAgent was called
+    // queryAgent was called with user message in user role
     expect(queryAgent).toHaveBeenCalledTimes(1);
+    const userMsg2 = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(userMsg2).toBe('What is this code?');
 
     // Output was sent to group channel
     expect(sendMessage).toHaveBeenCalled();
@@ -341,12 +344,12 @@ describe('E2E smoke tests', () => {
 
     expect(queryAgent).toHaveBeenCalledTimes(2);
 
-    // Second call should include history from first turn
-    const secondPrompt = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[1][0] as string;
-    expect(secondPrompt).toContain('[Conversation history]');
-    expect(secondPrompt).toContain('[user]: Hello');
-    expect(secondPrompt).toContain('[assistant]: First reply');
-    expect(secondPrompt).toContain('[Current message]\nFollow up');
+    // Second call: user message is separate (first arg), history is in second arg
+    const secondUserMsg = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[1][0] as string;
+    expect(secondUserMsg).toBe('Follow up');
+    const secondHistory = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[1][1] as string;
+    expect(secondHistory).toContain('[user]: Hello');
+    expect(secondHistory).toContain('[assistant]: First reply');
 
     // Full history stored
     const history = store.buildHistoryPrefix(USER_UID, 40);
@@ -375,15 +378,14 @@ describe('E2E smoke tests', () => {
     const msg = makeGroupMsg('My question', true);
     await simulateMessage(msg, config, store, router, groupContext, streamRelay);
 
-    const prompt = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
-    // Group context should have the previous message but NOT the current one
-    expect(prompt).toContain('[Group context]');
-    expect(prompt).toContain('Alice：Previous message');
-    // Current message appears only in [Current message]
-    expect(prompt).toContain('[Current message]\nMy question');
+    // User message is passed as first arg (user role), NOT concatenated
+    const userMsg3 = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(userMsg3).toBe('My question');
 
-    // Count occurrences of "My question" — should appear exactly once
-    const occurrences = prompt.split('My question').length - 1;
-    expect(occurrences).toBe(1);
+    // Group context is passed as third arg (goes into system prompt)
+    const groupCtx = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][2] as string;
+    expect(groupCtx).toContain('Alice：Previous message');
+    // Current message should NOT be in group context
+    expect(groupCtx).not.toContain('My question');
   });
 });

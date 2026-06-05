@@ -12,7 +12,7 @@ import { SessionStore } from './session-store.js';
 import { OctoGateway } from './gateway.js';
 import { SessionRouter } from './session-router.js';
 import { GroupContext } from './group-context.js';
-import { buildPrompt, queryAgent } from './agent-bridge.js';
+import { queryAgent } from './agent-bridge.js';
 import { StreamRelay } from './stream-relay.js';
 import { sendMessage } from './octo/api.js';
 import { ChannelType, MessageType } from './octo/types.js';
@@ -114,9 +114,9 @@ async function handleMessage(
       const historyPrefix = store.buildHistoryPrefix(sessionKey, config.context.historyLimit);
       store.appendUser(sessionKey, userContent);
 
-      // --- Build prompt + query agent ---
-      const prompt = buildPrompt(historyPrefix, contextStr, userContent);
-      const rawChunks = queryAgent(prompt, config);
+      // --- Query agent with structural role separation (Q3 fix) ---
+      // userContent → user role (prompt), history + context → system role (systemPrompt)
+      const rawChunks = queryAgent(userContent, historyPrefix, contextStr, config);
 
       // Tee the generator: collect full text while streaming to Octo
       const collected: string[] = [];
