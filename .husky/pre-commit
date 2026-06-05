@@ -1,0 +1,5 @@
+# Pre-commit gate — keep fast, defer full test run to CI.
+# 1. ESLint on staged files (zero warnings — gates `as any` and unused vars).
+# 2. tsc --noEmit to catch type regressions.
+npx lint-staged
+npm run type-check

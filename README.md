@@ -166,11 +166,14 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full design document.
 ## Development
 
 ```bash
-# Install dependencies
+# Install dependencies (sets up husky pre-commit hook via `prepare` script)
 npm install
 
 # Type-check
 npm run type-check
+
+# Lint (zero warnings enforced)
+npm run lint
 
 # Run tests
 npm test
@@ -178,12 +181,25 @@ npm test
 # Watch mode
 npm run test:watch
 
+# Coverage report (HTML + lcov in coverage/)
+npm run test:coverage
+
 # Build
 npm run build
 
 # Start (after build)
 npm start
 ```
+
+### Quality gates
+
+This repo enforces three layers of automated checks:
+
+1. **Pre-commit (`.husky/pre-commit`)** — runs `lint-staged` (ESLint on staged files with `--max-warnings 0`) and `tsc --noEmit`. Set up automatically by `npm install`.
+2. **CI (`.github/workflows/ci.yml`)** — every PR runs `type-check`, `lint`, `test`, and `test:coverage` as separate jobs. PRs cannot merge if any job fails.
+3. **Strict TypeScript** — `noUnusedLocals`, `noUnusedParameters`, and full `strict` mode are on. Dead code fails the build.
+
+Coverage artifacts are uploaded per CI run (retained 14 days). No hard threshold yet — baselines are being established.
 
 ### Project Structure
 

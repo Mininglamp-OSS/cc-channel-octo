@@ -2,7 +2,27 @@
  * Tests for G9 (Space isolation), G10 (history segmentation), G21 (streamOn filter).
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import type { Config } from "../config.js";
+
+// Shared minimal Config helper — typed instead of `as any` so refactors that
+// add Config fields break loud and these tests get updated explicitly.
+function makeTestConfig(): Config {
+  return {
+    botToken: "test",
+    apiUrl: "https://test",
+    cwd: "/tmp",
+    dataDir: "/tmp/data",
+    sdk: {
+      allowedTools: [],
+      permissionMode: "bypassPermissions",
+      settingSources: ["user"],
+    },
+    rateLimit: { maxPerMinute: 100 },
+    context: { maxContextChars: 6000, historyLimit: 40 },
+    maxResponseChars: 524288,
+  };
+}
 
 // ─── G9: Space isolation in session key ────────────────────────────────────
 
@@ -11,11 +31,7 @@ describe("SessionRouter Space isolation (G9)", () => {
     const { SessionRouter } = await import("../session-router.js");
     const { ChannelType, MessageType } = await import("../octo/types.js");
 
-    const config = {
-      botToken: "test",
-      apiUrl: "https://test",
-      rateLimit: { maxPerMinute: 100 },
-    } as any;
+    const config = makeTestConfig();
 
     const router = new SessionRouter(config, "bot_id");
 
@@ -39,11 +55,7 @@ describe("SessionRouter Space isolation (G9)", () => {
     const { SessionRouter } = await import("../session-router.js");
     const { ChannelType, MessageType } = await import("../octo/types.js");
 
-    const config = {
-      botToken: "test",
-      apiUrl: "https://test",
-      rateLimit: { maxPerMinute: 100 },
-    } as any;
+    const config = makeTestConfig();
 
     const router = new SessionRouter(config, "bot_id");
 
@@ -72,11 +84,7 @@ describe("SessionRouter Space isolation (G9)", () => {
     const { SessionRouter } = await import("../session-router.js");
     const { ChannelType, MessageType } = await import("../octo/types.js");
 
-    const config = {
-      botToken: "test",
-      apiUrl: "https://test",
-      rateLimit: { maxPerMinute: 100 },
-    } as any;
+    const config = makeTestConfig();
 
     const router = new SessionRouter(config, "bot_id");
 
@@ -170,11 +178,7 @@ describe("SessionRouter streamOn filter (G21)", () => {
     const { SessionRouter } = await import("../session-router.js");
     const { ChannelType, MessageType } = await import("../octo/types.js");
 
-    const config = {
-      botToken: "test",
-      apiUrl: "https://test",
-      rateLimit: { maxPerMinute: 100 },
-    } as any;
+    const config = makeTestConfig();
 
     const router = new SessionRouter(config, "bot_id");
     let handlerCalled = false;
@@ -207,11 +211,7 @@ describe("SessionRouter streamOn filter (G21)", () => {
     const { SessionRouter } = await import("../session-router.js");
     const { ChannelType, MessageType } = await import("../octo/types.js");
 
-    const config = {
-      botToken: "test",
-      apiUrl: "https://test",
-      rateLimit: { maxPerMinute: 100 },
-    } as any;
+    const config = makeTestConfig();
 
     const router = new SessionRouter(config, "bot_id");
     let handlerCount = 0;
