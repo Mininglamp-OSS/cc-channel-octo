@@ -5,9 +5,24 @@
  *   - SSRF defense: rejects private/loopback addresses without fetching
  *   - Token scoping: Authorization header sent ONLY when URL host matches apiUrl
  *   - Redirect guard: redirects to private hosts are blocked (via fetchWithRedirectGuard)
+ *
+ * DNS isolation: same rationale as url-policy-redirect.test.ts.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+vi.mock('node:dns/promises', () => ({
+  lookup: vi.fn(async (hostname: string) => {
+    // Map all fictitious test hosts to a public IP so assertPublicUrl passes.
+    // Anything else throws to surface as a clear test bug.
+    const publicHosts = ['api.example.com', 'cdn.public-host.com', 'attacker.public.example.com'];
+    if (publicHosts.includes(hostname) || hostname.includes('public')) {
+      return [{ address: '203.0.113.42', family: 4 }];
+    }
+    throw new Error(`Test DNS mock: unexpected hostname ${hostname}`);
+  }),
+}));
+
 import { tryResolveFile } from '../inbound.js';
 
 const API_URL = 'https://api.example.com';

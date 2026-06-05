@@ -2,9 +2,29 @@
  * S2 fetchWithRedirectGuard regression tests.
  *
  * Verifies that HTTP redirects to private addresses are blocked, NOT followed.
+ *
+ * DNS isolation: all hostnames in this file are fictitious. We mock
+ * node:dns/promises.lookup to return a public IP for any "*.public.*"
+ * hostname so the tests don't depend on the runner's resolver behavior
+ * (local machine returns NXDOMAIN, CI gets ENOTFOUND — different error
+ * shapes leak through assertPublicUrl and break unrelated assertions).
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+vi.mock('node:dns/promises', () => ({
+  lookup: vi.fn(async (hostname: string) => {
+    // Mock: any hostname containing 'public' resolves to a public IP
+    // (TEST-NET-3, 203.0.113.0/24 — reserved for docs but treated as public
+    // by isPrivateOrLocalAddress). Anything else throws like a real DNS
+    // failure to surface as a clear test bug rather than a silent pass.
+    if (hostname.includes('public')) {
+      return [{ address: '203.0.113.42', family: 4 }];
+    }
+    throw new Error(`Test DNS mock: unexpected hostname ${hostname}`);
+  }),
+}));
+
 import { fetchWithRedirectGuard } from '../url-policy.js';
 
 describe('fetchWithRedirectGuard (S2)', () => {
