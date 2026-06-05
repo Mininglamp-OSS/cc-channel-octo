@@ -101,3 +101,140 @@ describe('SessionStore', () => {
     expect(store.cleanExpired()).toBe(0);
   });
 });
+
+// Q1-2: Migration tests for the G10 message_seq column.
+// Stage 5 added ALTER TABLE messages ADD COLUMN message_seq INTEGER in init(),
+// but the pre-Q1 test suite never exercised the migration path on a populated
+// v0.1.0 schema. Prior to Q1, the migration error path was wrapped in a silent
+// console.warn that would hide real failures.
+describe('SessionStore G10 message_seq migration (Q1-2)', () => {
+  it('migrates a populated v0.1.0 schema (no message_seq column) without throwing', () => {
+    const adapter = createAdapter(':memory:');
+    // Simulate v0.1.0 schema: messages table WITHOUT message_seq column.
+    adapter.exec(`
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        channel_id TEXT NOT NULL,
+        channel_type INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        timestamp INTEGER NOT NULL
+      );
+      INSERT INTO sessions VALUES ('s1', 'ch1', 2, 0, 0);
+      INSERT INTO messages (session_id, role, content, timestamp)
+        VALUES ('s1', 'user', 'pre-migration question', 0);
+      INSERT INTO messages (session_id, role, content, timestamp)
+        VALUES ('s1', 'assistant', 'pre-migration answer', 0);
+    `);
+
+    const store = new SessionStore(adapter);
+    // init() must run the ALTER TABLE migration cleanly on populated data.
+    expect(() => store.init()).not.toThrow();
+
+    // Pre-existing rows survive with NULL message_seq.
+    const cols = adapter
+      .prepare("PRAGMA table_info(messages)")
+      .all() as Array<{ name: string }>;
+    expect(cols.some((c) => c.name === 'message_seq')).toBe(true);
+
+    // Appending new rows post-migration works with the new column.
+    store.appendUser('s1', 'post-migration question', 99);
+    store.appendAssistant('s1', 'post-migration answer', 99);
+
+    // History preserves both pre- and post-migration content.
+    const history = store.buildHistoryPrefix('s1', 40);
+    expect(history).toContain('pre-migration question');
+    expect(history).toContain('pre-migration answer');
+    expect(history).toContain('post-migration question');
+    expect(history).toContain('post-migration answer');
+
+    store.close();
+  });
+
+  it('buildSegmentedHistoryPrefix handles pre-migration NULL message_seq rows gracefully', () => {
+    const adapter = createAdapter(':memory:');
+    // Same v0.1.0 simulation, then migrate.
+    adapter.exec(`
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        channel_id TEXT NOT NULL,
+        channel_type INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        timestamp INTEGER NOT NULL
+      );
+      INSERT INTO sessions VALUES ('s1', 'ch1', 2, 0, 0);
+      INSERT INTO messages (session_id, role, content, timestamp)
+        VALUES ('s1', 'user', 'legacy q', 100);
+      INSERT INTO messages (session_id, role, content, timestamp)
+        VALUES ('s1', 'assistant', 'legacy a', 100);
+    `);
+
+    const store = new SessionStore(adapter);
+    store.init(); // runs migration; legacy rows now have NULL message_seq
+
+    // Without lastBotReplySeq set, buildSegmentedHistoryPrefix returns flat
+    // history regardless of NULL seq — must NOT throw.
+    const flat = store.buildSegmentedHistoryPrefix('s1', 40);
+    expect(flat).toContain('legacy q');
+    expect(flat).toContain('legacy a');
+
+    // Set lastBotReplySeq and add a new seq-aware row.
+    store.setLastBotReplySeq('s1', 100);
+    store.appendUser('s1', 'new q', 200);
+    const seg = store.buildSegmentedHistoryPrefix('s1', 40);
+    // Legacy NULL-seq rows attach to the answered side per the seenNew flag.
+    expect(seg).toContain('[new messages]');
+    expect(seg).toContain('new q');
+    // Legacy content is still reachable in the segmented output.
+    expect(seg).toContain('legacy q');
+
+    store.close();
+  });
+
+  it('throws with clear error when migration cannot run (Q1-2 fail-loud guarantee)', () => {
+    // Build an adapter that pretends to be a SessionStore-compatible DB but
+    // has a `messages` table missing the `session_id` column entirely — a
+    // genuinely broken schema. CREATE TABLE IF NOT EXISTS in init() will
+    // succeed (the table exists with whatever shape), then ALTER TABLE will
+    // also succeed because column add doesn't care about existing columns.
+    // To actually force a failure, we shadow PRAGMA to return a column with
+    // type mismatch — the most robust trigger is to make adapter.exec throw.
+    const adapter = createAdapter(':memory:');
+    // Pre-create messages WITHOUT the message_seq column AND lock the DB by
+    // shadowing exec to throw on ALTER TABLE.
+    adapter.exec(`
+      CREATE TABLE messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        timestamp INTEGER NOT NULL
+      );
+    `);
+    const originalExec = adapter.exec.bind(adapter);
+    adapter.exec = (sql: string) => {
+      if (sql.includes('ALTER TABLE messages ADD COLUMN message_seq')) {
+        throw new Error('simulated migration failure');
+      }
+      return originalExec(sql);
+    };
+
+    const store = new SessionStore(adapter);
+    // Pre-Q1: this would silently console.warn and continue with a broken DB.
+    // Post-Q1: must throw with a clear error mentioning G10 migration.
+    expect(() => store.init()).toThrow(/G10 message_seq migration failed/);
+  });
+});

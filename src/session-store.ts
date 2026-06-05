@@ -90,6 +90,13 @@ export class SessionStore {
     this.adapter.exec(SCHEMA);
 
     // Migration: add message_seq column if missing (for DBs created before G10).
+    //
+    // Q1-2: previously this was wrapped in try/catch + console.warn (silent fail).
+    // The audit found that a real migration failure would silently leave the
+    // database in a broken state — every subsequent INSERT/SELECT against
+    // message_seq would fail with cryptic SQL errors far from the root cause.
+    // Wrap any migration error in a clear startup-time exception so the
+    // operator sees the failure immediately, not 50 messages in.
     try {
       const cols = this.adapter
         .prepare("PRAGMA table_info(messages)")
@@ -98,7 +105,9 @@ export class SessionStore {
         this.adapter.exec('ALTER TABLE messages ADD COLUMN message_seq INTEGER');
       }
     } catch (err) {
-      console.warn(`session-store: migration check failed: ${String(err)}`);
+      throw new Error(
+        `session-store: G10 message_seq migration failed — database is in an unknown state. Underlying error: ${String(err)}`,
+      );
     }
 
     this.selectSession = this.adapter.prepare('SELECT * FROM sessions WHERE id = ?');

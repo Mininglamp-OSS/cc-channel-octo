@@ -132,6 +132,107 @@ describe('parseImageDimensions', () => {
     const buf = Buffer.alloc(100);
     expect(parseImageDimensions(buf, 'image/tiff')).toBeNull();
   });
+
+  // Q1-1: JPEG SOF marker scan. Production scans for 0xFFC0/0xFFC2 markers,
+  // reads height at offset+5 and width at offset+7 (both 2 bytes BE).
+  // Pre-Q1 this code path was entirely untested; a parse failure silently
+  // falls back to 800x600 defaults in uploadImageForRichText.
+  it('parses JPEG dimensions via SOF0 marker', () => {
+    // Minimal JPEG: SOI (FFD8) + APP0 segment + SOF0 segment.
+    const buf = Buffer.alloc(40);
+    // SOI
+    buf[0] = 0xFF; buf[1] = 0xD8;
+    // APP0 marker at offset 2
+    buf[2] = 0xFF; buf[3] = 0xE0;
+    // APP0 segment length: 16 bytes (includes the length field itself)
+    buf.writeUInt16BE(16, 4);
+    // SOF0 marker at offset 20 (2 marker + 2 + 16 APP0 segment = offset 20)
+    buf[20] = 0xFF; buf[21] = 0xC0;
+    // SOF0 segment length: 17 bytes
+    buf.writeUInt16BE(17, 22);
+    // SOF0 data layout: precision (1) + height (2 BE) + width (2 BE) + ...
+    buf[24] = 8;                  // precision (offset+4 from marker start)
+    buf.writeUInt16BE(720, 25);  // height at offset 25 (= marker+5)
+    buf.writeUInt16BE(1280, 27); // width at offset 27 (= marker+7)
+    const result = parseImageDimensions(buf, 'image/jpeg');
+    expect(result).toEqual({ width: 1280, height: 720 });
+  });
+
+  it('parses JPEG dimensions via SOF2 marker (progressive)', () => {
+    // Same shape but using SOF2 (0xFFC2) instead of SOF0.
+    const buf = Buffer.alloc(40);
+    buf[0] = 0xFF; buf[1] = 0xD8;
+    buf[2] = 0xFF; buf[3] = 0xE0;
+    buf.writeUInt16BE(16, 4);
+    buf[20] = 0xFF; buf[21] = 0xC2; // SOF2
+    buf.writeUInt16BE(17, 22);
+    buf[24] = 8;
+    buf.writeUInt16BE(480, 25);  // height
+    buf.writeUInt16BE(640, 27);  // width
+    const result = parseImageDimensions(buf, 'image/jpeg');
+    expect(result).toEqual({ width: 640, height: 480 });
+  });
+
+  it('accepts image/jpg mime alias for JPEG (some uploads use .jpg → image/jpg)', () => {
+    const buf = Buffer.alloc(40);
+    buf[0] = 0xFF; buf[1] = 0xD8;
+    buf[2] = 0xFF; buf[3] = 0xE0;
+    buf.writeUInt16BE(16, 4);
+    buf[20] = 0xFF; buf[21] = 0xC0;
+    buf.writeUInt16BE(17, 22);
+    buf[24] = 8;
+    buf.writeUInt16BE(100, 25);
+    buf.writeUInt16BE(200, 27);
+    const result = parseImageDimensions(buf, 'image/jpg');
+    expect(result).toEqual({ width: 200, height: 100 });
+  });
+
+  it('returns null for JPEG with no SOF marker (truncated after SOI)', () => {
+    // SOI only, no SOF marker reachable before end of buffer
+    const buf = Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]);
+    expect(parseImageDimensions(buf, 'image/jpeg')).toBeNull();
+  });
+
+  // Q1-1: WebP VP8 RIFF header. Production checks `VP8 ` (with trailing
+  // space) at offset 12-16, then reads width/height as 2-byte LE with
+  // 0x3FFF mask. The mask is a VP8 quirk; wrong mask = wrong dimensions.
+  it('parses WebP VP8 dimensions from RIFF header', () => {
+    const buf = Buffer.alloc(40);
+    buf.write('RIFF', 0);
+    buf.writeUInt32LE(32, 4);   // file size minus 8
+    buf.write('WEBP', 8);
+    buf.write('VP8 ', 12);      // VP8 chunk fourcc (with trailing space!)
+    buf.writeUInt32LE(20, 16);  // VP8 chunk size
+    // VP8 bitstream: 6-byte tag/keyframe (offsets 20-25) we don't validate,
+    // then width at offset 26 (2 LE), height at offset 28 (2 LE), both masked 0x3FFF.
+    buf.writeUInt16LE(640, 26);
+    buf.writeUInt16LE(480, 28);
+    const result = parseImageDimensions(buf, 'image/webp');
+    expect(result).toEqual({ width: 640, height: 480 });
+  });
+
+  it('applies 0x3FFF mask to WebP VP8 dimensions (high bits = scaling, not dim)', () => {
+    const buf = Buffer.alloc(40);
+    buf.write('RIFF', 0);
+    buf.writeUInt32LE(32, 4);
+    buf.write('WEBP', 8);
+    buf.write('VP8 ', 12);
+    buf.writeUInt32LE(20, 16);
+    // Set high bits (scaling flags in VP8) that must be masked OUT.
+    buf.writeUInt16LE(640 | 0xC000, 26);  // raw value 0xC280, masked = 0x0280 = 640
+    buf.writeUInt16LE(480 | 0xC000, 28);  // raw value 0xC1E0, masked = 0x01E0 = 480
+    const result = parseImageDimensions(buf, 'image/webp');
+    // Mask must drop top 2 bits.
+    expect(result).toEqual({ width: 640, height: 480 });
+  });
+
+  it('returns null for WebP with missing VP8 chunk marker', () => {
+    const buf = Buffer.alloc(40);
+    buf.write('RIFF', 0);
+    buf.write('WEBP', 8);
+    buf.write('VP8L', 12); // VP8L (lossless) not handled by current parser → null
+    expect(parseImageDimensions(buf, 'image/webp')).toBeNull();
+  });
 });
 
 describe('parseImageDimensionsFromFile', () => {
