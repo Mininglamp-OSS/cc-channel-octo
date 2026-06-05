@@ -133,10 +133,10 @@ async function handleMessage(
         }
       }
 
-      // --- Build history prefix BEFORE appending current message ---
+      // --- Build history prefix BEFORE appending current message (G10: segmented) ---
       const userContent = msg.payload.content ?? '';
-      const historyPrefix = store.buildHistoryPrefix(sessionKey, config.context.historyLimit);
-      store.appendUser(sessionKey, userContent);
+      const historyPrefix = store.buildSegmentedHistoryPrefix(sessionKey, config.context.historyLimit);
+      store.appendUser(sessionKey, userContent, msg.message_seq);
 
       // --- Query agent with structural role separation (Q3 fix) ---
       // userContent → user role (prompt), history + context → system role (systemPrompt)
@@ -157,7 +157,10 @@ async function handleMessage(
       // --- Store assistant response in history ---
       const fullResponse = collected.join('');
       if (fullResponse) {
-        store.appendAssistant(sessionKey, fullResponse);
+        store.appendAssistant(sessionKey, fullResponse, msg.message_seq);
+        // G10: mark this message_seq as the last one we replied to. Next turn's
+        // segmented history will treat messages with seq <= this as [answered].
+        store.setLastBotReplySeq(sessionKey, msg.message_seq);
       } else {
         // Agent produced no output — send a feedback message so user isn't left hanging
         await sendMessage({
@@ -186,8 +189,9 @@ async function handleMessage(
     }
   });
 
-  // Cache non-processed group text messages for context
-  if (!wasProcessed && isGroup && msg.payload.type === MessageType.Text && msg.payload.content) {
+  // Cache non-processed group text messages for context.
+  // G21: skip stream update messages — only cache the final (non-stream) message.
+  if (!wasProcessed && isGroup && !msg.streamOn && msg.payload.type === MessageType.Text && msg.payload.content) {
     groupContext.pushMessage(
       channelId,
       msg.from_uid,
