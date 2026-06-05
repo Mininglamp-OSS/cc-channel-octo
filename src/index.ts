@@ -199,6 +199,6 @@ async function handleMessage(
 }
 
 main().catch((err) => {
-  console.error('[cc-channel-octo] Fatal error:', err instanceof Error ? err.message : err);
+  console.error('[cc-channel-octo] Fatal error:', String(err));
   process.exit(1);
 });
