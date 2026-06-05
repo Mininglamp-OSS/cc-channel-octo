@@ -182,17 +182,13 @@ export class SessionRouter {
 
     // Rate limit check BEFORE non-text check — prevents DM spam of non-text
     // messages from bypassing rate limiting entirely.
-    // G20: enforce both per-session and per-user limits. Per-user prevents a
-    // single user from circumventing the limit by messaging across groups.
-    if (
-      !this.checkGlobalRateLimit() ||
-      !this.checkRateLimit(key) ||
-      !this.checkUserRateLimit(msg.from_uid)
-    ) {
-      // Debounce: only notify once per rate-limit window to avoid reply spam.
-      const bucket = this.tokenBuckets.get(key);
-      if (bucket && !bucket.notified) {
-        bucket.notified = true;
+    // G20 fix: peek all three buckets without consuming; only consume on full
+    // pass. On block, attach notified state to the actual blocking bucket so
+    // the debounce reply doesn't spam when a different bucket has tokens.
+    const blocker = this.checkAllRateLimits(key, msg.from_uid);
+    if (blocker) {
+      if (!blocker.notified) {
+        blocker.notified = true;
         await this.replySafe(msg, '请稍后再试');
       }
       return { sessionKey: key, shouldProcess: false, message: msg };
@@ -214,67 +210,76 @@ export class SessionRouter {
     return { sessionKey: key, shouldProcess: true, message: msg };
   }
 
-  private checkRateLimit(key: string): boolean {
+  /**
+   * G20 fix: Check all three rate limits (global, per-session, per-user) in
+   * one pass. Refills all three buckets, then either consumes 1 token from
+   * each (when all pass) or returns the blocking bucket (when any fails).
+   *
+   * Returns null on success (tokens consumed), or the blocking bucket on
+   * failure (no tokens consumed). The caller uses the blocking bucket's
+   * `notified` flag to debounce the "请稍后再试" reply per-bucket, so a user
+   * blocked by per-user limit doesn't get spammed when their per-session
+   * bucket still has tokens.
+   */
+  private checkAllRateLimits(key: string, uid: string): TokenBucket | null {
     this.cleanStaleBuckets();
 
     const now = Date.now();
     const maxPerMinute = this.config.rateLimit.maxPerMinute;
-    let bucket = this.tokenBuckets.get(key);
-    if (!bucket) {
-      bucket = { tokens: maxPerMinute, lastRefill: now, notified: false };
-      this.tokenBuckets.set(key, bucket);
-    }
-    const elapsed = now - bucket.lastRefill;
-    const refill = (elapsed / 60_000) * maxPerMinute;
-    bucket.tokens = Math.min(maxPerMinute, bucket.tokens + refill);
-    bucket.lastRefill = now;
+    const globalMax = maxPerMinute * GLOBAL_RATE_MULTIPLIER;
 
-    // Reset notification flag when tokens have been refilled above threshold
-    if (bucket.tokens >= 1) {
-      bucket.notified = false;
-    }
+    const globalBucket = this.getOrCreateGlobalBucket(now, globalMax);
+    const sessionBucket = this.getOrCreateBucket(this.tokenBuckets, key, now, maxPerMinute);
+    const userBucket = this.getOrCreateBucket(this.userBuckets, uid, now, maxPerMinute);
 
-    if (bucket.tokens < 1) return false;
-    bucket.tokens -= 1;
-    return true;
+    this.refillBucket(globalBucket, now, globalMax);
+    this.refillBucket(sessionBucket, now, maxPerMinute);
+    this.refillBucket(userBucket, now, maxPerMinute);
+
+    // Check in priority order: global → per-user → per-session.
+    // Per-user before per-session so a user blocked across groups gets a
+    // consistent debounce target instead of one per session bucket.
+    if (globalBucket.tokens < 1) return globalBucket;
+    if (userBucket.tokens < 1) return userBucket;
+    if (sessionBucket.tokens < 1) return sessionBucket;
+
+    // All pass — consume one token from each, and clear notified flags so
+    // future blocks get a fresh debounce window.
+    globalBucket.tokens -= 1;
+    sessionBucket.tokens -= 1;
+    userBucket.tokens -= 1;
+    globalBucket.notified = false;
+    sessionBucket.notified = false;
+    userBucket.notified = false;
+    return null;
   }
 
-  /**
-   * G20: Per-user rate limit independent of channel. Same limit as per-session
-   * — prevents a user from multiplying their effective quota by spreading
-   * messages across groups.
-   */
-  private checkUserRateLimit(uid: string): boolean {
-    const now = Date.now();
-    const maxPerMinute = this.config.rateLimit.maxPerMinute;
-    let bucket = this.userBuckets.get(uid);
+  private getOrCreateBucket(
+    map: Map<string, TokenBucket>,
+    key: string,
+    now: number,
+    capacity: number,
+  ): TokenBucket {
+    let bucket = map.get(key);
     if (!bucket) {
-      bucket = { tokens: maxPerMinute, lastRefill: now, notified: false };
-      this.userBuckets.set(uid, bucket);
+      bucket = { tokens: capacity, lastRefill: now, notified: false };
+      map.set(key, bucket);
     }
-    const elapsed = now - bucket.lastRefill;
-    const refill = (elapsed / 60_000) * maxPerMinute;
-    bucket.tokens = Math.min(maxPerMinute, bucket.tokens + refill);
-    bucket.lastRefill = now;
-    if (bucket.tokens < 1) return false;
-    bucket.tokens -= 1;
-    return true;
+    return bucket;
   }
 
-  /** Global rate limit across all sessions (10x per-session limit). */
-  private checkGlobalRateLimit(): boolean {
-    const now = Date.now();
-    const globalMax = this.config.rateLimit.maxPerMinute * GLOBAL_RATE_MULTIPLIER;
+  private getOrCreateGlobalBucket(now: number, capacity: number): TokenBucket {
     if (!this.globalBucket) {
-      this.globalBucket = { tokens: globalMax, lastRefill: now, notified: false };
+      this.globalBucket = { tokens: capacity, lastRefill: now, notified: false };
     }
-    const elapsed = now - this.globalBucket.lastRefill;
-    const refill = (elapsed / 60_000) * globalMax;
-    this.globalBucket.tokens = Math.min(globalMax, this.globalBucket.tokens + refill);
-    this.globalBucket.lastRefill = now;
-    if (this.globalBucket.tokens < 1) return false;
-    this.globalBucket.tokens -= 1;
-    return true;
+    return this.globalBucket;
+  }
+
+  private refillBucket(bucket: TokenBucket, now: number, capacity: number): void {
+    const elapsed = now - bucket.lastRefill;
+    const refill = (elapsed / 60_000) * capacity;
+    bucket.tokens = Math.min(capacity, bucket.tokens + refill);
+    bucket.lastRefill = now;
   }
 
   /** Remove token buckets that haven't been used in 5 minutes. */

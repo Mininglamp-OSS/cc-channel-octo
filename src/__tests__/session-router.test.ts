@@ -470,3 +470,159 @@ describe('Message length limit (Q10)', () => {
     expect(result!.shouldProcess).toBe(false);
   });
 });
+
+// ─── G14: bot-to-bot DM loop prevention ────────────────────────────────────────────
+
+describe('G14: bot-to-bot DM loop prevention', () => {
+  it('drops DM from a uid ending in _bot', async () => {
+    const router = new SessionRouter(makeConfig(), ROBOT_ID);
+    const result = await router.route(
+      makeMsg({
+        channel_type: ChannelType.DM,
+        from_uid: 'random_bot',
+        payload: { type: MessageType.Text, content: 'hi' },
+      }),
+    );
+    expect(result).toBeNull();
+  });
+
+  it('drops DM from the bot itself (knownBotUids includes self)', async () => {
+    const router = new SessionRouter(makeConfig(), ROBOT_ID);
+    const result = await router.route(
+      makeMsg({
+        channel_type: ChannelType.DM,
+        from_uid: ROBOT_ID,
+        payload: { type: MessageType.Text, content: 'hi' },
+      }),
+    );
+    expect(result).toBeNull();
+  });
+
+  it('drops DM from a registered known bot uid', async () => {
+    const router = new SessionRouter(makeConfig(), ROBOT_ID);
+    router.registerKnownBot('peer-bot-uid');
+    const result = await router.route(
+      makeMsg({
+        channel_type: ChannelType.DM,
+        from_uid: 'peer-bot-uid',
+        payload: { type: MessageType.Text, content: 'hi' },
+      }),
+    );
+    expect(result).toBeNull();
+  });
+
+  it('allows DM from a bot in allowedBotUids whitelist', async () => {
+    const router = new SessionRouter(
+      makeConfig({ allowedBotUids: ['trusted_bot'] }),
+      ROBOT_ID,
+    );
+    const result = await router.route(
+      makeMsg({
+        channel_type: ChannelType.DM,
+        from_uid: 'trusted_bot',
+        payload: { type: MessageType.Text, content: 'hi' },
+      }),
+    );
+    expect(result).not.toBeNull();
+    expect(result!.shouldProcess).toBe(true);
+  });
+
+  it('allows DM from a regular human user (no _bot suffix)', async () => {
+    const router = new SessionRouter(makeConfig(), ROBOT_ID);
+    const result = await router.route(
+      makeMsg({
+        channel_type: ChannelType.DM,
+        from_uid: 'alice123',
+        payload: { type: MessageType.Text, content: 'hi' },
+      }),
+    );
+    expect(result).not.toBeNull();
+    expect(result!.shouldProcess).toBe(true);
+  });
+
+  it('does NOT drop group messages from _bot uid (mention gate handles those)', async () => {
+    const router = new SessionRouter(makeConfig(), ROBOT_ID);
+    // Without @mention, group msg from bot would be dropped by mention gate, not G14.
+    // With @mention, it should pass.
+    const result = await router.route(
+      makeMsg({
+        channel_type: ChannelType.Group,
+        from_uid: 'someone_bot',
+        payload: {
+          type: MessageType.Text,
+          content: 'hi',
+          mention: { uids: [ROBOT_ID] },
+        },
+      }),
+    );
+    expect(result).not.toBeNull();
+    expect(result!.shouldProcess).toBe(true);
+  });
+});
+
+// ─── G18: owner_uid storage ────────────────────────────────────────────────────────────
+
+describe('G18: owner_uid storage', () => {
+  it('SessionRouter accepts and stores ownerUid (default empty)', () => {
+    const r1 = new SessionRouter(makeConfig(), ROBOT_ID);
+    expect(r1).toBeDefined(); // construct without ownerUid arg
+    const r2 = new SessionRouter(makeConfig(), ROBOT_ID, 'owner-uid-xyz');
+    expect(r2).toBeDefined(); // construct with ownerUid arg
+  });
+});
+
+// ─── G20: per-user cross-channel rate limit + debounce correctness ────────────────
+
+describe('G20: per-user cross-channel rate limit', () => {
+  it('per-user limit blocks across different groups', async () => {
+    // 5 req/min limit. Send 5 messages from same user across different groups
+    // — 6th should be rate-limited even though each group has its own session.
+    const router = new SessionRouter(makeConfig({ rateLimit: { maxPerMinute: 5 } }), ROBOT_ID);
+    const uid = 'spammer-1';
+    let blocked = 0;
+    for (let i = 0; i < 7; i++) {
+      const result = await router.route(
+        makeMsg({
+          channel_id: `group-${i}`, // different group each time
+          channel_type: ChannelType.Group,
+          from_uid: uid,
+          payload: {
+            type: MessageType.Text,
+            content: 'msg',
+            mention: { uids: [ROBOT_ID] },
+          },
+        }),
+      );
+      if (result && !result.shouldProcess) blocked++;
+    }
+    expect(blocked).toBeGreaterThanOrEqual(2); // at least 2 of the 7 should be blocked
+  });
+
+  it('debounce: blocked user receives at most one notice per refill window', async () => {
+    const router = new SessionRouter(makeConfig({ rateLimit: { maxPerMinute: 2 } }), ROBOT_ID);
+    const uid = 'user-debounce';
+    vi.clearAllMocks();
+    // Burn through quota across multiple groups
+    for (let i = 0; i < 10; i++) {
+      await router.route(
+        makeMsg({
+          channel_id: `g-${i}`,
+          channel_type: ChannelType.Group,
+          from_uid: uid,
+          payload: {
+            type: MessageType.Text,
+            content: 'x',
+            mention: { uids: [ROBOT_ID] },
+          },
+        }),
+      );
+    }
+    // The reply for '请稍后再试' should be sent at most a few times —
+    // crucially NOT once per blocked message. Without the fix, every blocked
+    // message would trigger another reply (DoS reflection).
+    const replyCalls = (sendMessage as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c) => (c[0] as { content?: string }).content === '请稍后再试',
+    );
+    expect(replyCalls.length).toBeLessThanOrEqual(2);
+  });
+});

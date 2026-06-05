@@ -278,3 +278,44 @@ describe('GroupContext', () => {
     expect(context2).toContain('Bob：world');
   });
 });
+
+// ─── G23: robot flag tracking ───────────────────────────────────────────────────────────────
+
+describe('G23: robot flag', () => {
+  let adapter: DbAdapter;
+  let ctx: GroupContext;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    adapter = createTestAdapter();
+    ctx = new GroupContext(adapter, 6000);
+  });
+
+  it('isRobot returns undefined for unknown channel/uid', () => {
+    expect(ctx.isRobot('ch-unknown', 'u-unknown')).toBeUndefined();
+  });
+
+  it('refreshMembers populates robot flags from GroupMember.robot field', async () => {
+    (getGroupMembers as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      { uid: 'alice', name: 'Alice', robot: 0 },
+      { uid: 'helper_bot', name: 'Helper', robot: 1 },
+      { uid: 'no-flag', name: 'NoFlag' }, // robot undefined — should NOT be stored
+    ]);
+    await ctx.refreshMembers('ch1', 'https://api', 'token');
+
+    expect(ctx.isRobot('ch1', 'alice')).toBe(false);
+    expect(ctx.isRobot('ch1', 'helper_bot')).toBe(true);
+    expect(ctx.isRobot('ch1', 'no-flag')).toBeUndefined();
+  });
+
+  it('robot flags are scoped per channel — no cross-channel leakage', async () => {
+    (getGroupMembers as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce([{ uid: 'shared', name: 'A', robot: 1 }])
+      .mockResolvedValueOnce([{ uid: 'shared', name: 'A', robot: 0 }]);
+    await ctx.refreshMembers('ch1', 'https://api', 'token');
+    // Force second refresh by clearing lastRefresh state — use a different channel
+    await ctx.refreshMembers('ch2', 'https://api', 'token');
+    expect(ctx.isRobot('ch1', 'shared')).toBe(true);
+    expect(ctx.isRobot('ch2', 'shared')).toBe(false);
+  });
+});
