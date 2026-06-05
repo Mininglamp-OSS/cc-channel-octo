@@ -1,11 +1,24 @@
 /**
  * Tests for media-upload — content type inference, image dimensions, upload pipeline.
+ *
+ * DNS isolation: downloadToTempFile calls assertPublicUrl which does a DNS
+ * lookup for non-IP hosts. Test URLs use fictitious `example.com` hostnames —
+ * without DNS mock these hit the real resolver and fail in CI (ENOTFOUND).
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { writeFile, unlink, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
+
+vi.mock('node:dns/promises', () => ({
+  lookup: vi.fn(async (hostname: string) => {
+    if (hostname.includes('example.com')) {
+      return [{ address: '203.0.113.42', family: 4 }];
+    }
+    throw new Error(`Test DNS mock: unexpected hostname ${hostname}`);
+  }),
+}));
 
 // Mock cos-nodejs-sdk-v5 BEFORE any imports of media-upload.
 const cosPutObjectMock = vi.fn();
