@@ -45,7 +45,6 @@ import { createAdapter, type DbAdapter } from '../db-adapter.js';
 import { queryAgent } from '../agent-bridge.js';
 import {
   sendMessage,
-  sendTyping,
 } from '../octo/api.js';
 import { ChannelType, MessageType } from '../octo/types.js';
 import type { BotMessage } from '../octo/types.js';
@@ -143,6 +142,7 @@ async function simulateMessage(
     wasProcessed = true;
     const { sessionKey } = result;
 
+    try {
     store.getOrCreate(sessionKey, channelId, channelType);
 
     let contextStr = '';
@@ -185,6 +185,20 @@ async function simulateMessage(
     const fullResponse = collected.join('');
     if (fullResponse) {
       store.appendAssistant(sessionKey, fullResponse);
+    }
+    } catch (err) {
+      console.error('simulateMessage error:', err);
+      try {
+        await sendMessage({
+          apiUrl: config.apiUrl,
+          botToken: config.botToken,
+          channelId,
+          channelType,
+          content: 'An error occurred while processing your message. Please try again.',
+        });
+      } catch {
+        /* swallow */
+      }
     }
   });
 
@@ -387,5 +401,47 @@ describe('E2E smoke tests', () => {
     expect(groupCtx).toContain('Alice：Previous message');
     // Current message should NOT be in group context
     expect(groupCtx).not.toContain('My question');
+  });
+
+  // --- 9. queryAgent error → best-effort error reply ---
+
+  it('handles queryAgent error with best-effort error reply', async () => {
+    (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(async function* () {
+      throw new Error('SDK exploded');
+    });
+
+    const msg = makeDmMsg('trigger error');
+    // simulateMessage should not throw — error is caught internally
+    await simulateMessage(msg, config, store, router, groupContext, streamRelay);
+
+    // Error reply should be sent
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: 'An error occurred while processing your message. Please try again.',
+      }),
+    );
+  });
+
+  it('swallows error reply failure silently', async () => {
+    (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(async function* () {
+      throw new Error('SDK exploded');
+    });
+    // Make sendMessage also fail
+    (sendMessage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('reply failed'));
+
+    const msg = makeDmMsg('double error');
+    // Should not throw even when error reply fails
+    await expect(simulateMessage(msg, config, store, router, groupContext, streamRelay)).resolves.toBeUndefined();
+  });
+
+  it('stores no assistant response when agent yields empty output', async () => {
+    mockQueryYield(); // yields nothing
+
+    const msg = makeDmMsg('empty response');
+    await simulateMessage(msg, config, store, router, groupContext, streamRelay);
+
+    const history = store.buildHistoryPrefix(USER_UID, 40);
+    expect(history).toContain('[user]: empty response');
+    expect(history).not.toContain('[assistant]');
   });
 });
