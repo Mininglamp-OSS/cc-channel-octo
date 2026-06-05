@@ -50,6 +50,7 @@ export async function postJson<T>(
   signal?: AbortSignal,
 ): Promise<T | undefined> {
   const url = `${apiUrl.replace(/\/+$/, "")}${path}`;
+  const effectiveSignal = signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
   const response = await fetch(url, {
     method: "POST",
     headers: {
@@ -57,7 +58,7 @@ export async function postJson<T>(
       Authorization: `Bearer ${botToken}`,
     },
     body: JSON.stringify(payload),
-    signal,
+    signal: effectiveSignal,
   });
 
   if (!response.ok) {
@@ -265,7 +266,7 @@ export async function getChannelMessages(params: {
         end_message_seq: params.endMessageSeq ?? 0,
         pull_mode: 1,
       }),
-      signal: params.signal,
+      signal: params.signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
     });
 
     if (!response.ok) {
