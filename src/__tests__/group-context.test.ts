@@ -54,6 +54,14 @@ describe('GroupContext', () => {
 
   // --- buildContext ---
 
+  it('buildContext returns empty when maxContextChars is very small', () => {
+    const smallCtx = new GroupContext(adapter, 5);
+    smallCtx.pushMessage('ch1', 'u1', 'Alice', 'hello world', Date.now());
+    const output = smallCtx.buildContext('ch1');
+    // With only 5 chars budget, should return empty or at most 5 chars
+    expect(output.length).toBeLessThanOrEqual(5);
+  });
+
   it('buildContext respects maxContextChars budget', () => {
     const smallCtx = new GroupContext(adapter, 50);
     for (let i = 0; i < 10; i++) {

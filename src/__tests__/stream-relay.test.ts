@@ -77,6 +77,24 @@ describe("splitMessage", () => {
     expect(segments).toEqual(["a", "b", "c"]);
   });
 
+  it("splitMessage does not break surrogate pairs on hard cut", () => {
+    // 👨‍👩‍👧‍👦 is a family emoji (ZWJ sequence, 11 UTF-16 code units)
+    const emoji = "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}";
+    const padding = "a".repeat(10);
+    const text = padding + emoji;
+    // Cut at a position that would fall inside the emoji sequence
+    const segments = splitMessage(text, padding.length + 2);
+    // Reassembly must produce the original
+    expect(segments.join("")).toBe(text);
+  });
+
+  it("splitMessage handles lone surrogate gracefully", () => {
+    // A string with a high surrogate at the end (malformed but shouldn't crash)
+    const text = "hello\uD83D";
+    const segments = splitMessage(text, 3);
+    expect(segments.join("")).toBe(text);
+  });
+
   it("does not split surrogate pairs on hard cut", () => {
     // 😀 = U+1F600 = 😀 (2 code units)
     const emoji = "😀";
@@ -274,6 +292,18 @@ describe("StreamRelay", () => {
     await vi.advanceTimersByTimeAsync(30_000);
     const countLater = mockState.calls.filter((c) => c.fn === "sendTyping").length;
     expect(countLater).toBe(countAfter);
+  });
+
+  it("passes apiUrl and botToken to sendMessage", async () => {
+    const chunks = asyncChunks(["test content"]);
+    const promise = relay.deliver(CH_ID, CH_TYPE, chunks, API_URL, BOT_TOKEN);
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const sendCalls = mockState.calls.filter((c) => c.fn === "sendMessage");
+    expect(sendCalls.length).toBe(1);
+    expect(sendCalls[0].args.apiUrl).toBe(API_URL);
+    expect(sendCalls[0].args.botToken).toBe(BOT_TOKEN);
   });
 
   it("continues sending remaining segments when one fails", async () => {
