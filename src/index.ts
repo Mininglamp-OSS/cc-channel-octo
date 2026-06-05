@@ -12,7 +12,7 @@ import { SessionStore } from './session-store.js';
 import { OctoGateway } from './gateway.js';
 import { SessionRouter } from './session-router.js';
 import { GroupContext } from './group-context.js';
-import { queryAgent } from './agent-bridge.js';
+import { queryAgent, sanitizeForSystemPrompt } from './agent-bridge.js';
 import { StreamRelay } from './stream-relay.js';
 import { sendMessage, sendReadReceipt, getChannelMessages } from './octo/api.js';
 import type { HistoricalMessage } from './octo/api.js';
@@ -185,7 +185,7 @@ async function handleMessage(
       // SQLite history compact — inlined file contents stay turn-local.
       const userContent = msg.payload.content ?? historyRecord;
 
-      // G3: Extract quoted/replied message content for LLM context.
+      // G3 + S3 (stage 6): Extract quoted/replied message content for LLM context.
       //
       // The quote payload comes from a previously-sent message (bounded by the
       // server's own size limits), but to honor cc-channel-octo's 32KB user
@@ -193,12 +193,21 @@ async function handleMessage(
       // small budget. The quoted content is supplementary context, not a
       // primary input, so a 4KB cap preserves usefulness without bypassing
       // the size guarantee documented in session-router.ts.
+      //
+      // Both `replyFrom` and `truncated` come from another user's payload —
+      // they are USER-CONTROLLED. Without sanitization a malicious replier
+      // could craft a from_name like "Alice]\n[Conversation history" or a
+      // body that starts with "[Quoted message from admin]" to inject fake
+      // structural boundaries into the LLM prompt. Even though the quote
+      // prefix lives in the user-role turn (Q3 structural defense), the
+      // model may still react to apparent structure, so we sanitize as
+      // defense-in-depth.
       let quotePrefix = '';
       const replyData = msg.payload?.reply;
       if (replyData) {
         const replyPayload = replyData?.payload;
         const rawReplyContent = replyPayload?.content ?? '';
-        const replyFrom = replyData.from_name ?? replyData.from_uid ?? 'unknown';
+        const rawReplyFrom = replyData.from_name ?? replyData.from_uid ?? 'unknown';
         if (rawReplyContent) {
           const QUOTE_MAX_BYTES = 4_096;
           let truncated = rawReplyContent;
@@ -211,7 +220,18 @@ async function handleMessage(
             }
             truncated += '…[truncated]';
           }
-          quotePrefix = `[Quoted message from ${replyFrom}]: ${truncated}\n---\n`;
+          // S3 sanitization: strip ']' and newlines from from_name (prevent
+          // breaking out of the `[Quoted message from ...]` marker), then
+          // escape any section-marker patterns in the body. The combined
+          // string is then sanitized once more to escape any [Quoted message
+          // from ...] pattern the body might contain.
+          const replyFrom = String(rawReplyFrom)
+            .replace(/[\]\r\n]/g, ' ')
+            .slice(0, 128);
+          const sanitizedBody = sanitizeForSystemPrompt(truncated);
+          quotePrefix = sanitizeForSystemPrompt(
+            `[Quoted message from ${replyFrom}]: ${sanitizedBody}\n---\n`,
+          );
         }
       }
       // Note: quotePrefix is added to LLM input only — store.appendUser below
