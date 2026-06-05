@@ -14,7 +14,11 @@ import { buildSystemPrompt } from '../agent-bridge.js';
 describe('buildSystemPrompt MAX_SYSTEM_PROMPT_CHARS (D1/P1-3)', () => {
   it('returns assembled prompt unchanged when under cap', () => {
     const out = buildSystemPrompt('history line', 'group chat', 'custom prompt');
-    expect(out.length).toBeLessThan(2_000);
+    // S2 (stage 6) added FILE ATTACHMENTS section to SECURITY_PROMPT_PREFIX,
+    // which pushed the minimum assembled prompt to ~2.1KiB. The point of this
+    // test is to verify the under-cap path returns the expected sections —
+    // a loose ceiling well under MAX_SYSTEM_PROMPT_CHARS (100KiB) is enough.
+    expect(out.length).toBeLessThan(5_000);
     expect(out).toContain('custom prompt');
     expect(out).toContain('[Group context]\ngroup chat');
     expect(out).toContain('[Conversation history]\nhistory line');
