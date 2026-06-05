@@ -110,7 +110,7 @@ async function handleMessage(
   // For non-processed messages, routeAndHandle returns without calling handler.
   // We still need to cache group text messages for context.
   let wasProcessed = false;
-  await router.routeAndHandle(msg, async (result) => {
+  const routeResult = await router.routeAndHandle(msg, async (result) => {
     wasProcessed = true;
     const { sessionKey } = result;
 
@@ -183,7 +183,18 @@ async function handleMessage(
       // --- Build history prefix BEFORE appending current message (G10: segmented) ---
       // Use historyRecord (metadata-only for files) instead of bodyText to keep
       // SQLite history compact — inlined file contents stay turn-local.
-      const userContent = msg.payload.content ?? historyRecord;
+      //
+      // P1.1 (Stage 6): RichText payload.content is an Array<RichTextBlock>,
+      // not a string. The previous `?? historyRecord` fallback only fired on
+      // null/undefined, so an array would pass through to store.appendUser()
+      // and SQLite would reject the non-string binding at runtime, crashing
+      // every RichText turn. Same risk for File payloads that ship a content
+      // field instead of using mediaUrl. Defense: only trust payload.content
+      // when it is actually a string; otherwise use the type-safe
+      // historyRecord we already built.
+      const userContent = typeof msg.payload.content === 'string'
+        ? msg.payload.content
+        : historyRecord;
 
       // G3 + S3 (stage 6): Extract quoted/replied message content for LLM context.
       //
@@ -341,7 +352,19 @@ async function handleMessage(
   // Cache non-processed group messages for context.
   // G21: skip stream update messages — only cache the final (non-stream) message.
   // G1: cache non-text payloads as type summaries so [Group context] shows them.
-  if (!wasProcessed && isGroup && !msg.streamOn) {
+  //
+  // C1 / P2.5 (Stage 6): do NOT cache messages that the router actively
+  // rejected (rate-limited, oversized). Without this guard a flooder who
+  // tripped the rate limit could still inject text the LLM would see on the
+  // next legitimate turn — the rate limit reply went out but the content
+  // still landed in [Group context]. Silently-dropped messages (not_mentioned,
+  // system_event, bot loop) still cache because they are legitimate group
+  // chatter the agent should be aware of when next addressed.
+  const SUPPRESS_GROUP_CACHE = new Set(['rate_limited', 'global_rate_limited', 'oversized']);
+  const suppressGroupCache =
+    !!routeResult?.rejectionReason && SUPPRESS_GROUP_CACHE.has(routeResult.rejectionReason);
+
+  if (!wasProcessed && isGroup && !msg.streamOn && !suppressGroupCache) {
     const summary = renderMessageForContext(msg, config.apiUrl);
     if (summary) {
       groupContext.pushMessage(

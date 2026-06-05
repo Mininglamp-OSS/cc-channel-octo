@@ -13,6 +13,24 @@ export interface RouteResult {
   message: BotMessage;
   /** User content with leading @botname stripped (for LLM input). */
   cleanContent?: string;
+  /**
+   * When shouldProcess is false, why the message was rejected. Allows the
+   * caller to skip downstream side-effects (group context caching, etc.)
+   * for messages that should not influence future turns.
+   *
+   * C1 / P2.5 (Stage 6): added to fix the channel where rate-limited or
+   * oversized messages still polluted the group context cache — a flooder
+   * could be limited at the router but still inject text the LLM would see
+   * in the next legitimate turn.
+   */
+  rejectionReason?:
+    | 'blocked_bot'
+    | 'self_message'
+    | 'system_event'
+    | 'rate_limited'
+    | 'global_rate_limited'
+    | 'oversized'
+    | 'not_mentioned';
 }
 
 interface TokenBucket {
@@ -92,16 +110,27 @@ export class SessionRouter {
    * under the same per-session lock. This ensures no gap between route decision
    * and pipeline execution — concurrent same-session messages cannot interleave.
    */
+  /**
+   * Route a message and, if it should be processed, run the handler callback
+   * under the same per-session lock. This ensures no gap between route decision
+   * and pipeline execution — concurrent same-session messages cannot interleave.
+   *
+   * Returns the RouteResult (or `null` for silent-drop cases) so the caller
+   * can inspect `rejectionReason` to decide whether the message should still
+   * influence downstream side-effects like group context caching
+   * (C1 / P2.5 — stage 6).
+   */
   async routeAndHandle(
     msg: BotMessage,
     handler: (result: RouteResult) => Promise<void>,
-  ): Promise<void> {
+  ): Promise<RouteResult | null> {
     const key = this.sessionKey(msg);
-    await this.withSessionLock(key, async () => {
+    return this.withSessionLock(key, async () => {
       const result = await this.processMessage(msg, key);
       if (result && result.shouldProcess) {
         await handler(result);
       }
+      return result;
     });
   }
 
@@ -239,7 +268,12 @@ export class SessionRouter {
         blocker.notified = true;
         await this.replySafe(msg, '请稍后再试');
       }
-      return { sessionKey: key, shouldProcess: false, message: msg };
+      return {
+        sessionKey: key,
+        shouldProcess: false,
+        message: msg,
+        rejectionReason: 'rate_limited',
+      };
     }
 
     // G1: All payload types are now resolved by inbound.resolveContent in
@@ -254,7 +288,12 @@ export class SessionRouter {
       Buffer.byteLength(content, 'utf-8') > MAX_CONTENT_BYTES
     ) {
       await this.replySafe(msg, '消息过长，请缩短后重试');
-      return { sessionKey: key, shouldProcess: false, message: msg };
+      return {
+        sessionKey: key,
+        shouldProcess: false,
+        message: msg,
+        rejectionReason: 'oversized',
+      };
     }
 
     // G13: Strip leading @botname from group TEXT messages for cleaner LLM input.

@@ -636,13 +636,44 @@ export async function getChannelMessages(params: {
       return {
         from_uid: String(m.from_uid ?? ''),
         from_name: typeof m.from_name === 'string' ? m.from_name : undefined,
-        content: typeof m.content === 'string' ? m.content : undefined,
+        // C1 / P1.5 (Stage 6): WuKongIM /v1/bot/messages/sync ships per-message
+        // content / type / url / name INSIDE the base64-encoded payload, not at
+        // the top level. Without merging the decoded payload up, every Text
+        // history row had `content: undefined`, so seedHistoryFromApi treated
+        // every backfilled message as empty and skipped the placeholder branch
+        // — G4 backfill was effectively a no-op for Text.
+        //
+        // Strategy: prefer the top-level field when it is a usable string /
+        // number, otherwise fall back to the decoded payload field. We never
+        // overwrite a populated top-level value with a payload value, so this
+        // is a strict superset of the previous behavior.
+        content:
+          typeof m.content === 'string' && m.content !== ''
+            ? m.content
+            : typeof payload?.content === 'string'
+              ? payload.content
+              : undefined,
         timestamp: typeof m.timestamp === 'number' ? m.timestamp : 0,
         message_id: typeof m.message_id === 'string' ? m.message_id : undefined,
         message_seq: typeof m.message_seq === 'number' ? m.message_seq : undefined,
-        type: typeof m.type === 'number' ? m.type : undefined,
-        url: typeof m.url === 'string' ? m.url : undefined,
-        name: typeof m.name === 'string' ? m.name : undefined,
+        type:
+          typeof m.type === 'number'
+            ? m.type
+            : typeof payload?.type === 'number'
+              ? payload.type
+              : undefined,
+        url:
+          typeof m.url === 'string'
+            ? m.url
+            : typeof payload?.url === 'string'
+              ? payload.url
+              : undefined,
+        name:
+          typeof m.name === 'string'
+            ? m.name
+            : typeof payload?.name === 'string'
+              ? payload.name
+              : undefined,
         payload,
       };
     });

@@ -148,7 +148,7 @@ async function simulateMessage(
     channelType === ChannelType.Group || channelType === ChannelType.CommunityTopic;
 
   let wasProcessed = false;
-  await router.routeAndHandle(msg, async (result) => {
+  const routeResult = await router.routeAndHandle(msg, async (result) => {
     wasProcessed = true;
     const { sessionKey } = result;
 
@@ -258,10 +258,15 @@ async function simulateMessage(
     }
   });
 
+  // C1 / P2.5 mirror: suppress group context cache for actively-rejected msgs
+  const SUPPRESS = new Set(['rate_limited', 'global_rate_limited', 'oversized']);
+  const suppressCache = !!routeResult?.rejectionReason && SUPPRESS.has(routeResult.rejectionReason);
+
   if (
     !wasProcessed &&
     isGroup &&
     !msg.streamOn &&
+    !suppressCache &&
     msg.payload.type === MessageType.Text &&
     msg.payload.content
   ) {
@@ -662,6 +667,98 @@ describe('E2E smoke tests', () => {
     expect(firstLine).not.toMatch(/\][\r\n]/); // no ] right before newline
     // The injected [Conversation history] never lands at a real line start.
     expect(userMsg).not.toMatch(/\n\[Conversation history\]/);
+  });
+
+  // --- C1 / P2.5: rate-limited group message must NOT pollute group context ---
+
+  it('C1 P2.5: rate-limited group message is not cached in group context', async () => {
+    vi.clearAllMocks();
+    // Tight per-session limit so the second message in same session hits the cap.
+    const tightConfig = { ...config, rateLimit: { maxPerMinute: 1 } };
+    const tightRouter = new SessionRouter(tightConfig, BOT_ID);
+    const groupId = 'g-flooder';
+
+    // First message: passes the gate
+    mockQueryYield('first reply');
+    await simulateMessage(
+      {
+        message_id: 'm1', message_seq: 1, from_uid: 'attacker',
+        channel_id: groupId, channel_type: ChannelType.Group,
+        timestamp: Date.now(),
+        payload: {
+          type: MessageType.Text, content: 'first message',
+          mention: { uids: [BOT_ID] },
+        },
+      },
+      tightConfig, store, tightRouter, groupContext, streamRelay,
+    );
+
+    // Second message: SAME group, SAME flooder, mention bot → hits rate limit
+    // BEFORE FIX: this content would still land in [Group context] cache via
+    //             the !wasProcessed branch, letting the flooder inject text
+    //             that the LLM sees on the next legitimate turn.
+    // AFTER FIX:  rejectionReason='rate_limited' suppresses the cache push.
+    await simulateMessage(
+      {
+        message_id: 'm2', message_seq: 2, from_uid: 'attacker',
+        channel_id: groupId, channel_type: ChannelType.Group,
+        timestamp: Date.now() + 1,
+        payload: {
+          type: MessageType.Text,
+          content: 'INJECTED CONTENT VIA RATE LIMIT BYPASS',
+          mention: { uids: [BOT_ID] },
+        },
+      },
+      tightConfig, store, tightRouter, groupContext, streamRelay,
+    );
+
+    const cached = groupContext.buildContext(groupId);
+    expect(cached).toContain('first message');
+    expect(cached).not.toContain('INJECTED CONTENT VIA RATE LIMIT BYPASS');
+  });
+
+  it('C1 P2.5: oversized group text is not cached in group context', async () => {
+    vi.clearAllMocks();
+    const tightRouter = new SessionRouter(config, BOT_ID);
+    const groupId = 'g-oversized';
+    const huge = 'X'.repeat(33 * 1024); // > 32 KB MAX_CONTENT_BYTES
+
+    await simulateMessage(
+      {
+        message_id: 'm1', message_seq: 1, from_uid: 'attacker',
+        channel_id: groupId, channel_type: ChannelType.Group,
+        timestamp: Date.now(),
+        payload: {
+          type: MessageType.Text, content: huge,
+          mention: { uids: [BOT_ID] },
+        },
+      },
+      config, store, tightRouter, groupContext, streamRelay,
+    );
+
+    const cached = groupContext.buildContext(groupId);
+    // Oversized message text is suppressed — the X-flood does not pollute context.
+    expect(cached).not.toContain('XXXXX');
+  });
+
+  it('C1 P2.5: non-mentioned group chatter STILL caches (legitimate context)', async () => {
+    vi.clearAllMocks();
+    const tightRouter = new SessionRouter(config, BOT_ID);
+    const groupId = 'g-chat';
+
+    // Non-mentioned group message — not_mentioned silent-drop; still cache.
+    await simulateMessage(
+      {
+        message_id: 'm1', message_seq: 1, from_uid: 'alice',
+        channel_id: groupId, channel_type: ChannelType.Group,
+        timestamp: Date.now(),
+        payload: { type: MessageType.Text, content: 'casual chat' },
+      },
+      config, store, tightRouter, groupContext, streamRelay,
+    );
+
+    const cached = groupContext.buildContext(groupId);
+    expect(cached).toContain('casual chat');
   });
 
   // --- G8: Read receipt ---
