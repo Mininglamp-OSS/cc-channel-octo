@@ -109,13 +109,13 @@ function parseCsv(value: string): string[] {
     .filter((s) => s.length > 0);
 }
 
-function parseIntStrict(value: string, name: string): number {
+function parseIntStrict(value: string, name: string, minValue = 1): number {
   if (!/^\d+$/.test(value)) {
     throw new Error(`Invalid integer for ${name}: ${value}`);
   }
   const n = Number(value);
-  if (!Number.isFinite(n) || n < 1) {
-    throw new Error(`Invalid integer for ${name}: ${value} (must be >= 1)`);
+  if (!Number.isFinite(n) || n < minValue) {
+    throw new Error(`Invalid integer for ${name}: ${value} (must be >= ${minValue})`);
   }
   return n;
 }
@@ -142,7 +142,7 @@ function applyEnv(cfg: Config): Config {
     next.sdk.permissionMode = env.CC_OCTO_SDK_PERMISSION_MODE;
   }
   if (env.CC_OCTO_SDK_MAX_TURNS) {
-    next.sdk.maxTurns = parseIntStrict(env.CC_OCTO_SDK_MAX_TURNS, 'CC_OCTO_SDK_MAX_TURNS');
+    next.sdk.maxTurns = parseIntStrict(env.CC_OCTO_SDK_MAX_TURNS, 'CC_OCTO_SDK_MAX_TURNS', 0);
   }
   if (env.CC_OCTO_SDK_SYSTEM_PROMPT) next.sdk.systemPrompt = env.CC_OCTO_SDK_SYSTEM_PROMPT;
   if (env.CC_OCTO_SDK_SETTING_SOURCES) {
@@ -153,6 +153,7 @@ function applyEnv(cfg: Config): Config {
     next.rateLimit.maxPerMinute = parseIntStrict(
       env.CC_OCTO_RATE_LIMIT_MAX_PER_MINUTE,
       'CC_OCTO_RATE_LIMIT_MAX_PER_MINUTE',
+      0,
     );
   }
 
@@ -160,12 +161,14 @@ function applyEnv(cfg: Config): Config {
     next.context.maxContextChars = parseIntStrict(
       env.CC_OCTO_CONTEXT_MAX_CHARS,
       'CC_OCTO_CONTEXT_MAX_CHARS',
+      0,
     );
   }
   if (env.CC_OCTO_CONTEXT_HISTORY_LIMIT) {
     next.context.historyLimit = parseIntStrict(
       env.CC_OCTO_CONTEXT_HISTORY_LIMIT,
       'CC_OCTO_CONTEXT_HISTORY_LIMIT',
+      0,
     );
   }
 

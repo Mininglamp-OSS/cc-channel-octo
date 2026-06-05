@@ -22,11 +22,15 @@ interface TokenBucket {
 
 const BUCKET_STALE_MS = 5 * 60 * 1000; // 5 minutes
 
+/** Global rate limit: 10x per-session limit, shared across all sessions. */
+const GLOBAL_RATE_MULTIPLIER = 10;
+
 export class SessionRouter {
   private readonly config: Config;
   private readonly robotId: string;
   private readonly inboundQueues = new Map<string, Promise<void>>();
   private readonly tokenBuckets = new Map<string, TokenBucket>();
+  private globalBucket: TokenBucket | null = null;
 
   constructor(config: Config, robotId: string) {
     this.config = config;
@@ -128,7 +132,7 @@ export class SessionRouter {
 
     // Rate limit check BEFORE non-text check — prevents DM spam of non-text
     // messages from bypassing rate limiting entirely.
-    if (!this.checkRateLimit(key)) {
+    if (!this.checkGlobalRateLimit() || !this.checkRateLimit(key)) {
       // Debounce: only notify once per rate-limit window to avoid reply spam.
       const bucket = this.tokenBuckets.get(key);
       if (bucket && !bucket.notified) {
@@ -169,6 +173,22 @@ export class SessionRouter {
 
     if (bucket.tokens < 1) return false;
     bucket.tokens -= 1;
+    return true;
+  }
+
+  /** Global rate limit across all sessions (10x per-session limit). */
+  private checkGlobalRateLimit(): boolean {
+    const now = Date.now();
+    const globalMax = this.config.rateLimit.maxPerMinute * GLOBAL_RATE_MULTIPLIER;
+    if (!this.globalBucket) {
+      this.globalBucket = { tokens: globalMax, lastRefill: now, notified: false };
+    }
+    const elapsed = now - this.globalBucket.lastRefill;
+    const refill = (elapsed / 60_000) * globalMax;
+    this.globalBucket.tokens = Math.min(globalMax, this.globalBucket.tokens + refill);
+    this.globalBucket.lastRefill = now;
+    if (this.globalBucket.tokens < 1) return false;
+    this.globalBucket.tokens -= 1;
     return true;
   }
 

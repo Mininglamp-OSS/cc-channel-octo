@@ -178,6 +178,33 @@ export async function registerBot(params: {
   return result;
 }
 
+/**
+ * GET request helper with consistent error handling, timeout, and int64 protection.
+ */
+async function getJson<T>(
+  apiUrl: string,
+  botToken: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  const url = `${apiUrl.replace(/\/+$/, "")}${path}`;
+  const effectiveSignal = signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const resp = await fetch(url, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${botToken}`,
+    },
+    signal: effectiveSignal,
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`Octo API ${path} failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  const text = await resp.text();
+  if (!text) return {} as T;
+  return parseOctoJson<T>(text);
+}
+
 // ─── Group Members ──────────────────────────────────────────────────────────
 
 export interface GroupMember {
@@ -194,18 +221,11 @@ export async function getGroupMembers(params: {
   botToken: string;
   groupNo: string;
 }): Promise<GroupMember[]> {
-  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${params.groupNo}/members`;
-  const resp = await fetch(url, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${params.botToken}`,
-    },
-    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
-  });
-  if (!resp.ok) {
-    throw new Error(`getGroupMembers failed: ${resp.status}`);
-  }
-  const data = await resp.json() as Record<string, unknown>;
+  const data = await getJson<Record<string, unknown>>(
+    params.apiUrl,
+    params.botToken,
+    `/v1/bot/groups/${params.groupNo}/members`,
+  );
   const members = Array.isArray(data?.members)
     ? data.members
     : Array.isArray(data)
