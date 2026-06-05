@@ -25,6 +25,8 @@ export interface Config {
     maxContextChars: number;
     historyLimit: number;
   };
+  /** Maximum response length in chars before truncation (Q32). */
+  maxResponseChars: number;
   botBlocklist?: string[];
 }
 
@@ -36,6 +38,7 @@ type PartialConfig = {
   sdk?: Partial<Config['sdk']>;
   rateLimit?: Partial<Config['rateLimit']>;
   context?: Partial<Config['context']>;
+  maxResponseChars?: number;
   botBlocklist?: string[];
 };
 
@@ -57,6 +60,7 @@ function defaults(): Config {
       maxContextChars: 6000,
       historyLimit: 40,
     },
+    maxResponseChars: 524_288, // 512 KB (Q32)
   };
 }
 
@@ -113,6 +117,7 @@ function mergeConfig(base: Config, override: PartialConfig): Config {
       ...base.context,
       ...(override.context ?? {}),
     },
+    maxResponseChars: override.maxResponseChars ?? base.maxResponseChars,
     botBlocklist: override.botBlocklist ?? base.botBlocklist,
   };
 }
@@ -189,6 +194,14 @@ function applyEnv(cfg: Config): Config {
 
   if (env.CC_OCTO_BOT_BLOCKLIST) {
     next.botBlocklist = parseCsv(env.CC_OCTO_BOT_BLOCKLIST);
+  }
+
+  if (env.CC_OCTO_MAX_RESPONSE_CHARS) {
+    next.maxResponseChars = parseIntStrict(
+      env.CC_OCTO_MAX_RESPONSE_CHARS,
+      'CC_OCTO_MAX_RESPONSE_CHARS',
+      1,
+    );
   }
 
   return next;
