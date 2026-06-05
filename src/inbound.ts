@@ -142,12 +142,26 @@ export function buildMediaUrl(relUrl?: string, apiUrl?: string): string | undefi
   }
 
   // Relative path — strip /file/ or /file/preview/ prefix then enforce no traversal.
+  //
+  // S4 follow-up (PR#38 round-3, Yujiawei + 李飞飞): the literal `..`/`.` check
+  // was bypassable via percent-encoded dot-segments (`%2e%2e`, `%2E.`, `.%2e`,
+  // etc.). WHATWG URL parser decodes `%2e` for dot-segment normalization, so
+  // `<apiHost>/file/%2e%2e/internal/secret.env` normalizes to
+  // `<apiHost>/internal/secret.env`, escaping the `/file/` sandbox. Combined
+  // with the same-host Authorization scoping, this exfiltrates internal
+  // authenticated paths using the bot's botToken.
+  //
+  // Fix: after assembling the candidate URL, parse via WHATWG `new URL()` and
+  // assert the normalized pathname is still under `/file/`. This catches ALL
+  // encoded-dot variants (lower/upper hex, mixed `%2e.`, raw `..`) in one
+  // check, no matter how attacker spells them.
   let storagePath = relUrl;
   if (storagePath.startsWith('file/preview/')) {
     storagePath = storagePath.substring('file/preview/'.length);
   } else if (storagePath.startsWith('file/')) {
     storagePath = storagePath.substring('file/'.length);
   }
+  // Cheap literal pre-check still useful as defense-in-depth.
   const segments = storagePath.split('/');
   for (const seg of segments) {
     if (seg === '..' || seg === '.') return undefined;
@@ -155,7 +169,19 @@ export function buildMediaUrl(relUrl?: string, apiUrl?: string): string | undefi
   if (storagePath.startsWith('/')) return undefined;
 
   const baseUrl = apiUrl?.replace(/\/+$/, '') ?? '';
-  return `${baseUrl}/file/${storagePath}`;
+  const candidate = `${baseUrl}/file/${storagePath}`;
+
+  // WHATWG-canonical sandbox check: after URL normalization, pathname must
+  // still start with `/file/`. If `%2e%2e` (or any other encoded-dot variant)
+  // would have escaped the prefix, normalize collapses it and we reject here.
+  try {
+    const normalized = new URL(candidate);
+    if (!normalized.pathname.startsWith('/file/')) return undefined;
+  } catch {
+    return undefined;
+  }
+
+  return candidate;
 }
 
 // ─── RichText (type=14) expansion ─────────────────────────────────────────
