@@ -130,6 +130,7 @@ function uintToString(array: number[]): string {
 }
 
 function encodeVariableLength(len: number): number[] {
+  if (len === 0) return [0];
   const ret: number[] = [];
   while (len > 0) {
     let digit = len % 0x80;
@@ -627,6 +628,12 @@ export class WKSocket extends EventEmitter {
       const aesKeyFull = Md5.init(secretBase64);
       this.aesKey = aesKeyFull.substring(0, 16);
       this.aesIV = salt && salt.length > 16 ? salt.substring(0, 16) : salt;
+      if (!salt || salt.length < 16) {
+        console.warn(
+          `[WKSocket] CONNACK salt is shorter than 16 bytes (got ${salt?.length ?? 0}). ` +
+          `AES-CBC IV will be zero-padded by CryptoJS. This may indicate a server issue.`,
+        );
+      }
 
       this.connected = true;
       this.lastConnectTime = Date.now();
