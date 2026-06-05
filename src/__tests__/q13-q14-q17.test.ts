@@ -5,6 +5,18 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+// Mock only sendMessage so the Q13 global rate limit test doesn't make real
+// fetch calls to https://test when replySafe fires (~1.7s DNS timeout per run).
+// Other API functions (notably getGroupMembers used by Q17 tests below) stay
+// real — their tests stub global fetch separately.
+vi.mock("../octo/api.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../octo/api.js")>();
+  return {
+    ...actual,
+    sendMessage: vi.fn().mockResolvedValue(undefined),
+  };
+});
+
 // ─── Q13: Global rate limit ────────────────────────────────────────────────
 
 describe("SessionRouter global rate limit (Q13)", () => {
@@ -12,7 +24,6 @@ describe("SessionRouter global rate limit (Q13)", () => {
   // The global limit is 10x per-session. Default maxPerMinute=5, so global=50.
 
   it("global rate limit blocks after burst from many sessions", async () => {
-    // Import SessionRouter (no mock needed — it doesn't call external APIs for rate limiting).
     const { SessionRouter } = await import("../session-router.js");
     const { ChannelType, MessageType } = await import("../octo/types.js");
 
@@ -24,16 +35,15 @@ describe("SessionRouter global rate limit (Q13)", () => {
       sdk: { allowedTools: [], permissionMode: "bypassPermissions", settingSources: ["user"] },
       rateLimit: { maxPerMinute: 2 }, // global = 2*10 = 20
       context: { maxContextChars: 6000, historyLimit: 40 },
-    } as Parameters<typeof SessionRouter["prototype"]["routeAndHandle"]> extends never[]
-      ? never
-      : any;
+      maxResponseChars: 524288,
+    };
 
     const router = new SessionRouter(config, "bot_id");
 
     let processedCount = 0;
     const handler = async () => { processedCount++; };
 
-    // Send 20 messages from 20 different users (each within per-session limit).
+    // Send 25 messages from 25 different users (each within per-session limit).
     for (let i = 0; i < 25; i++) {
       const msg = {
         message_id: `msg_${i}`,
