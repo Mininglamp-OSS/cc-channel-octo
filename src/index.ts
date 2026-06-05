@@ -51,6 +51,7 @@ async function main(): Promise<void> {
 
   // --- Group context ---
   const groupContext = new GroupContext(adapter, config.context.maxContextChars);
+  groupContext.loadAllFromDb();
 
   // --- Stream relay ---
   const streamRelay = new StreamRelay();
@@ -157,6 +158,15 @@ async function handleMessage(
       const fullResponse = collected.join('');
       if (fullResponse) {
         store.appendAssistant(sessionKey, fullResponse);
+      } else {
+        // Agent produced no output — send a feedback message so user isn't left hanging
+        await sendMessage({
+          apiUrl: config.apiUrl,
+          botToken: config.botToken,
+          channelId,
+          channelType,
+          content: '[No response generated. Please try rephrasing your question.]',
+        });
       }
 
     } catch (err) {

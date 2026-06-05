@@ -76,6 +76,19 @@ describe("splitMessage", () => {
     const segments = splitMessage("abc", 1);
     expect(segments).toEqual(["a", "b", "c"]);
   });
+
+  it("does not split surrogate pairs on hard cut", () => {
+    // 😀 = U+1F600 = 😀 (2 code units)
+    const emoji = "😀";
+    // Fill to force a hard cut right at a surrogate pair boundary
+    const filler = "a".repeat(9); // 9 + 2 = 11 code units, maxChars=10 would cut inside emoji
+    const text = filler + emoji;  // 11 code units
+    const segments = splitMessage(text, 10);
+    // Should NOT split the surrogate pair — back up to 9
+    expect(segments[0]).toBe(filler);
+    expect(segments[1]).toBe(emoji);
+    expect(segments.join("")).toBe(text);
+  });
 });
 
 // ─── Shared mock state via vi.hoisted ───────────────────────────────────────
@@ -206,7 +219,8 @@ describe("StreamRelay", () => {
     await vi.runAllTimersAsync();
     await guarded;
 
-    await expect(promise).rejects.toThrow("sendMessage failed");
+    // Q23: sendMessage failures are swallowed per-segment; deliver() should not reject.
+    await expect(promise).resolves.toBeUndefined();
 
     const countAfter = mockState.calls.filter((c) => c.fn === "sendTyping").length;
     await vi.advanceTimersByTimeAsync(30_000);
@@ -260,5 +274,25 @@ describe("StreamRelay", () => {
     await vi.advanceTimersByTimeAsync(30_000);
     const countLater = mockState.calls.filter((c) => c.fn === "sendTyping").length;
     expect(countLater).toBe(countAfter);
+  });
+
+  it("continues sending remaining segments when one fails", async () => {
+    let callCount = 0;
+    const { sendMessage } = await import("../octo/api.js");
+    (sendMessage as ReturnType<typeof vi.fn>).mockImplementation(async (params: Record<string, unknown>) => {
+      mockState.calls.push({ fn: "sendMessage", args: params });
+      callCount++;
+      if (callCount === 2) throw new Error("transient failure");
+      return { message_id: "msg_1", client_msg_no: "c1", message_seq: 1 };
+    });
+
+    const longText = "word ".repeat(1500); // ~7500 chars → 3 segments
+    const chunks = asyncChunks([longText]);
+    const promise = relay.deliver(CH_ID, CH_TYPE, chunks, API_URL, BOT_TOKEN);
+    await vi.runAllTimersAsync();
+    await promise; // Should NOT throw
+
+    const sendCalls = mockState.calls.filter((c) => c.fn === "sendMessage");
+    expect(sendCalls.length).toBe(3); // All 3 segments attempted
   });
 });
