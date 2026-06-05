@@ -3,7 +3,7 @@
  */
 
 import type { Config } from './config.js';
-import type { BotMessage } from './octo/types.js';
+import type { BotMessage, MentionEntity } from './octo/types.js';
 import { ChannelType, MessageType } from './octo/types.js';
 import { sendMessage } from './octo/api.js';
 
@@ -11,6 +11,8 @@ export interface RouteResult {
   sessionKey: string;
   shouldProcess: boolean;
   message: BotMessage;
+  /** User content with leading @botname stripped (for LLM input). */
+  cleanContent?: string;
 }
 
 interface TokenBucket {
@@ -209,9 +211,13 @@ export class SessionRouter {
     // @-mentioned. The mention gate below already enforces this, but bots in
     // the blocklist (above) get hard-dropped without even checking mentions.
 
-    // Group mention gate.
+    // Group mention gate — skip unless mentioned OR in mention-free group (G12).
     if (this.isGroupLike(msg.channel_type) && !this.isMentioned(msg)) {
-      return null;
+      // G12: Check if this group is in the mention-free list
+      const isMentionFree = this.config.mentionFreeGroups?.includes(msg.channel_id ?? '') ?? false;
+      if (!isMentionFree) {
+        return null;
+      }
     }
 
     // Skip system events (group join/leave, etc.) — no user-facing reply needed.
@@ -244,7 +250,28 @@ export class SessionRouter {
       return { sessionKey: key, shouldProcess: false, message: msg };
     }
 
-    return { sessionKey: key, shouldProcess: true, message: msg };
+    // G13: Strip leading @botname from group messages for cleaner LLM input.
+    let cleanContent = content;
+    if (this.isGroupLike(msg.channel_type)) {
+      // Try entities-based removal first (precise offset/length)
+      const mention = msg.payload.mention;
+      if (mention?.entities && Array.isArray(mention.entities)) {
+        const botEntity = mention.entities.find(
+          (e: MentionEntity) => e.uid === this.robotId && e.offset === 0,
+        );
+        if (botEntity && typeof botEntity.length === 'number') {
+          cleanContent = content.substring(botEntity.length).trimStart();
+        }
+      }
+      // Fallback: regex strip leading @word
+      if (cleanContent === content) {
+        cleanContent = content.replace(/^@\S+\s*/, '').trim();
+      }
+      // If stripping emptied the content, keep original
+      if (!cleanContent) cleanContent = content;
+    }
+
+    return { sessionKey: key, shouldProcess: true, message: msg, cleanContent };
   }
 
   /**

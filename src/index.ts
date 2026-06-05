@@ -14,7 +14,7 @@ import { SessionRouter } from './session-router.js';
 import { GroupContext } from './group-context.js';
 import { queryAgent } from './agent-bridge.js';
 import { StreamRelay } from './stream-relay.js';
-import { sendMessage } from './octo/api.js';
+import { sendMessage, sendReadReceipt } from './octo/api.js';
 import { ChannelType, MessageType } from './octo/types.js';
 import type { BotMessage } from './octo/types.js';
 import { join } from 'node:path';
@@ -135,12 +135,26 @@ async function handleMessage(
 
       // --- Build history prefix BEFORE appending current message (G10: segmented) ---
       const userContent = msg.payload.content ?? '';
+
+      // G3: Extract quoted/replied message content for LLM context
+      let quotePrefix = '';
+      const replyData = msg.payload?.reply;
+      if (replyData) {
+        const replyPayload = replyData.payload;
+        const replyContent = replyPayload?.content ?? '';
+        const replyFrom = replyData.from_name ?? replyData.from_uid ?? 'unknown';
+        if (replyContent) {
+          quotePrefix = `[Quoted message from ${replyFrom}]: ${replyContent}\n---\n`;
+        }
+      }
+      const userContentForLLM = quotePrefix + (result.cleanContent ?? userContent);
+
       const historyPrefix = store.buildSegmentedHistoryPrefix(sessionKey, config.context.historyLimit);
       store.appendUser(sessionKey, userContent, msg.message_seq);
 
       // --- Query agent with structural role separation (Q3 fix) ---
-      // userContent → user role (prompt), history + context → system role (systemPrompt)
-      const rawChunks = queryAgent(userContent, historyPrefix, contextStr, config);
+      // userContentForLLM → user role (prompt), history + context → system role (systemPrompt)
+      const rawChunks = queryAgent(userContentForLLM, historyPrefix, contextStr, config);
 
       // Tee the generator: collect full text while streaming to Octo
       const collected: string[] = [];
@@ -153,6 +167,17 @@ async function handleMessage(
 
       // --- Stream output to Octo ---
       await streamRelay.deliver(channelId, channelType, teeChunks(), config.apiUrl, config.botToken, config.maxResponseChars);
+
+      // G8: Send read receipt after processing (fire-and-forget)
+      if (msg.message_id && msg.channel_id && msg.channel_type !== undefined) {
+        sendReadReceipt({
+          apiUrl: config.apiUrl,
+          botToken: config.botToken,
+          channelId: msg.channel_id,
+          channelType: msg.channel_type,
+          messageIds: [msg.message_id],
+        }).catch((err) => console.error(`[cc-channel-octo] readReceipt failed: ${String(err)}`));
+      }
 
       // --- Store assistant response in history ---
       const fullResponse = collected.join('');

@@ -33,6 +33,8 @@ export interface Config {
    * the `_bot` heuristic. Use this to whitelist trusted bots.
    */
   allowedBotUids?: string[];
+  /** Group IDs where the bot responds without being @mentioned (G12). */
+  mentionFreeGroups?: string[];
 }
 
 type PartialConfig = {
@@ -46,6 +48,7 @@ type PartialConfig = {
   maxResponseChars?: number;
   botBlocklist?: string[];
   allowedBotUids?: string[];
+  mentionFreeGroups?: string[];
 };
 
 function defaults(): Config {
@@ -126,6 +129,7 @@ function mergeConfig(base: Config, override: PartialConfig): Config {
     maxResponseChars: override.maxResponseChars ?? base.maxResponseChars,
     botBlocklist: override.botBlocklist ?? base.botBlocklist,
     allowedBotUids: override.allowedBotUids ?? base.allowedBotUids,
+    mentionFreeGroups: override.mentionFreeGroups ?? base.mentionFreeGroups,
   };
 }
 
@@ -205,6 +209,10 @@ function applyEnv(cfg: Config): Config {
 
   if (env.CC_OCTO_ALLOWED_BOT_UIDS) {
     next.allowedBotUids = parseCsv(env.CC_OCTO_ALLOWED_BOT_UIDS);
+  }
+
+  if (env.CC_OCTO_MENTION_FREE_GROUPS) {
+    next.mentionFreeGroups = parseCsv(env.CC_OCTO_MENTION_FREE_GROUPS);
   }
 
   if (env.CC_OCTO_MAX_RESPONSE_CHARS) {
