@@ -3,10 +3,6 @@
 
 /** Octo Bot API types. */
 
-export interface BotRegisterReq {
-  name?: string;
-}
-
 export interface BotRegisterResp {
   robot_id: string;
   im_token: string;
@@ -14,28 +10,6 @@ export interface BotRegisterResp {
   api_url: string;
   owner_uid: string;
   owner_channel_id: string;
-}
-
-export interface BotSendMessageReq {
-  channel_id: string;
-  channel_type: ChannelType;
-  stream_no?: string;
-  payload: MessagePayload;
-}
-
-export interface BotTypingReq {
-  channel_id: string;
-  channel_type: ChannelType;
-}
-
-export interface BotReadReceiptReq {
-  channel_id: string;
-  channel_type: ChannelType;
-}
-
-export interface BotEventsReq {
-  event_id: number;
-  limit?: number;
 }
 
 export interface BotMessage {

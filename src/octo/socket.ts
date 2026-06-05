@@ -9,7 +9,7 @@ import { Buffer } from "buffer";
 import CryptoJS from "crypto-js";
 import { Md5 } from "md5-typescript";
 import { randomBytes } from "node:crypto";
-import type { BotMessage, MessagePayload } from "./types.js";
+import type { BotMessage, MessagePayload, MessageType } from "./types.js";
 
 // ─── WuKongIM Binary Protocol Constants ─────────────────────────────────────
 
@@ -158,19 +158,6 @@ function aesDecrypt(data: Uint8Array, aesKey: string, aesIV: string): Uint8Array
   return Uint8Array.from(Buffer.from(decrypted.toString(CryptoJS.enc.Utf8)));
 }
 
-function aesEncrypt(message: string, aesKey: string, aesIV: string): string {
-  return CryptoJS.AES.encrypt(
-    CryptoJS.enc.Utf8.parse(message),
-    CryptoJS.enc.Utf8.parse(aesKey),
-    {
-      keySize: 128 / 8,
-      iv: CryptoJS.enc.Utf8.parse(aesIV),
-      mode: CryptoJS.mode.CBC,
-      padding: CryptoJS.pad.Pkcs7,
-    },
-  ).toString();
-}
-
 // ─── Packet Encoding / Decoding ─────────────────────────────────────────────
 
 function encodeConnectPacket(opts: {
@@ -285,12 +272,6 @@ export class WKSocket extends EventEmitter {
     this.doConnect();
   }
 
-  /** Update credentials for reconnection (e.g. after token refresh) */
-  updateCredentials(uid: string, token: string): void {
-    this.opts.uid = uid;
-    this.opts.token = token;
-  }
-
   /** Gracefully disconnect */
   disconnect(): void {
     this.needReconnect = false;
@@ -332,7 +313,7 @@ export class WKSocket extends EventEmitter {
       try { oldWs.close(); } catch { /* ignore */ }
       setTimeout(() => {
         if (!resolved) {
-          try { (oldWs as any).terminate?.(); } catch { /* ignore */ }
+          try { (oldWs as WebSocket & { terminate?: () => void }).terminate?.(); } catch { /* ignore */ }
           done();
         }
       }, timeoutMs);
@@ -622,12 +603,12 @@ export class WKSocket extends EventEmitter {
     if (hasServerVersion) {
       this.serverVersion = dec.readByte();
     }
-    const _timeDiff = dec.readInt64BigInt();
+    dec.readInt64BigInt(); // timeDiff (unused)
     const reasonCode = dec.readByte();
     const serverKey = dec.readString();
     const salt = dec.readString();
     if (this.serverVersion >= 4) {
-      const _nodeId = dec.readInt64BigInt();
+      dec.readInt64BigInt(); // nodeId (unused)
     }
 
     if (reasonCode === 1) {
@@ -659,22 +640,23 @@ export class WKSocket extends EventEmitter {
     }
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   private onRecv(dec: Decoder, _noPersist: boolean, _reddot: boolean): void {
     const settingByte = dec.readByte();
     const setting = parseSettingByte(settingByte);
-    const _msgKey = dec.readString();
+    dec.readString(); // msgKey (unused)
     const fromUID = dec.readString();
     const channelID = dec.readString();
     const channelType = dec.readByte();
     if (this.serverVersion >= 3) {
-      const _expire = dec.readInt32();
+      dec.readInt32(); // expire (unused)
     }
-    const _clientMsgNo = dec.readString();
+    dec.readString(); // clientMsgNo (unused)
     const messageID = dec.readInt64String();
     const messageSeq = dec.readInt32();
     const timestamp = dec.readInt32();
     if (setting.topic) {
-      const _topic = dec.readString();
+      dec.readString(); // topic (unused)
     }
     const encryptedPayload = dec.readRemaining();
 
@@ -682,7 +664,7 @@ export class WKSocket extends EventEmitter {
     this.sendRaw(encodeRecvackPacket(messageID, messageSeq));
 
     // Decrypt payload
-    let payloadObj: Record<string, any> | undefined;
+    let payloadObj: Record<string, unknown> | undefined;
     try {
       const decryptedBytes = aesDecrypt(encryptedPayload, this.aesKey, this.aesIV);
       const payloadStr = uintToString(Array.from(decryptedBytes));
@@ -694,8 +676,8 @@ export class WKSocket extends EventEmitter {
 
     // Build MessagePayload (same shape as SDK's contentObj-based output)
     const payload: MessagePayload = {
-      type: payloadObj?.type ?? 0,
-      content: payloadObj?.content,
+      type: (payloadObj?.type as MessageType) ?? 0,
+      content: payloadObj?.content as string | undefined,
       ...payloadObj,
     };
 
@@ -713,8 +695,8 @@ export class WKSocket extends EventEmitter {
   }
 
   private onDisconnect(dec: Decoder): void {
-    const reasonCode = dec.readByte();
-    const _reason = dec.readString();
+    dec.readByte(); // reasonCode (unused)
+    dec.readString(); // reason (unused)
 
     this.connected = false;
     this.needReconnect = false;
