@@ -129,14 +129,44 @@ export function truncateUtf8ByBytes(input: string, maxBytes: number): {
   if (buf.length <= maxBytes) {
     return { truncated: input, originalBytes: buf.length, wasTruncated: false };
   }
-  let trimmed = buf.subarray(0, maxBytes);
-  // Trim back to a valid UTF-8 boundary. At most 3 steps for valid UTF-8
-  // (4-byte max sequence). Continuation bytes are 10xxxxxx, leaders 11xxxxxx.
-  for (let i = 0; i < 3 && trimmed.length > 0; i++) {
-    const lastByte = trimmed[trimmed.length - 1];
-    if (lastByte < 0x80) break; // ASCII boundary — safe
-    trimmed = trimmed.subarray(0, trimmed.length - 1);
-    if ((lastByte & 0xC0) === 0xC0) break; // dropped a leader — sequence complete
+  const baseTrimmed = buf.subarray(0, maxBytes);
+  // Find a clean UTF-8 boundary.
+  //
+  // Strategy: scan back from the cap position over continuation bytes
+  // (10xxxxxx) until we find an ASCII byte (0xxxxxxx) or a leader byte
+  // (11xxxxxx). Then check whether the byte range from the leader to the
+  // cap forms a complete sequence (length matches leader's expected
+  // length). If complete → keep; if partial/malformed → drop from leader
+  // inclusive. O(1) backoff, max 3 walk-back steps for valid UTF-8.
+  //
+  // Bug history: previous `i < 3` loop with decrementing trim did the
+  // wrong thing on N×4-byte clean boundaries (cap = N × 4): it dropped
+  // the complete final sequence's cont bytes and exited before the
+  // leader, producing U+FFFD. Independently reported by Jerry-Xin and
+  // 李飞飞 in PR#40 review.
+  let trimmed = baseTrimmed;
+  let leaderPos = baseTrimmed.length - 1;
+  while (leaderPos >= 0 && (baseTrimmed[leaderPos] & 0xC0) === 0x80) {
+    leaderPos--;
+  }
+  if (leaderPos >= 0) {
+    const startByte = baseTrimmed[leaderPos];
+    if (startByte >= 0x80) {
+      // Leader. Determine expected sequence length.
+      let expectedLen: number;
+      if ((startByte & 0xF8) === 0xF0) expectedLen = 4;
+      else if ((startByte & 0xF0) === 0xE0) expectedLen = 3;
+      else if ((startByte & 0xE0) === 0xC0) expectedLen = 2;
+      else expectedLen = 0; // Invalid leader — treat as malformed, drop
+
+      const actualLen = baseTrimmed.length - leaderPos;
+      if (expectedLen === 0 || actualLen !== expectedLen) {
+        // Partial / malformed sequence — drop from leader inclusive.
+        trimmed = baseTrimmed.subarray(0, leaderPos);
+      }
+      // Else: complete sequence — keep baseTrimmed as-is.
+    }
+    // Else: ASCII — already at a clean boundary, keep baseTrimmed.
   }
   return {
     truncated: trimmed.toString('utf-8'),

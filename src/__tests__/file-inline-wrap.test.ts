@@ -201,6 +201,60 @@ describe('truncateUtf8ByBytes (PR#40 review nit fix — byte-safe truncation)', 
     expect(Buffer.byteLength(r.truncated, 'utf-8')).toBeLessThanOrEqual(10);
   });
 
+  // ─── Regression: PR#40 follow-up — N×4-byte clean boundary corner case ───
+  // Independently reported by Jerry-Xin + 李飞飞. When the cap lands exactly on
+  // the final continuation byte of a 4-byte sequence, the previous algorithm
+  // dropped the complete sequence's cont bytes and exited before the leader,
+  // producing U+FFFD.
+  it('REGRESSION: handles N×4-byte clean boundary (50×🚀 cap=100)', () => {
+    // 50×🚀 = 200 bytes. cap=100 is EXACTLY 25 complete emoji boundary.
+    // Corrected algorithm recognises completeness and returns all 25 emoji.
+    // Old buggy algorithm produced U+FFFD on this case.
+    const input = '🚀'.repeat(50);
+    const r = truncateUtf8ByBytes(input, 100);
+    expect(r.truncated).not.toContain('\uFFFD');
+    expect(Buffer.byteLength(r.truncated, 'utf-8')).toBe(100);
+    expect([...r.truncated].length).toBe(25);
+  });
+
+  it('REGRESSION: cap that lands on mid-cont byte trims back to clean (50×🚀 cap=99)', () => {
+    // cap=99 lands inside emoji[24] (1 byte short). Trim back to emoji[23].
+    const input = '🚀'.repeat(50);
+    const r = truncateUtf8ByBytes(input, 99);
+    expect(r.truncated).not.toContain('\uFFFD');
+    expect(Buffer.byteLength(r.truncated, 'utf-8')).toBe(96);
+    expect([...r.truncated].length).toBe(24);
+  });
+
+  it('REGRESSION: Jerry-Xin reproducer (X🚀🚀 cap=5)', () => {
+    // Cap=5: bytes 0=X, 1-4=emoji[0] (complete 4-byte sequence). Output = X🚀.
+    const input = 'X' + '🚀'.repeat(2);  // 1 + 8 = 9 bytes
+    const r = truncateUtf8ByBytes(input, 5);
+    expect(r.truncated).not.toContain('\uFFFD');
+    expect(Buffer.byteLength(r.truncated, 'utf-8')).toBe(5);
+    expect([...r.truncated].length).toBe(2);
+  });
+
+  it('REGRESSION: cap = N×4 exactly (10×🌍 cap=4 / 7 / 40)', () => {
+    const input = '🌍'.repeat(10); // 40 bytes total
+    // cap=40 = exact full length, no truncation
+    const r1 = truncateUtf8ByBytes(input, 40);
+    expect(r1.wasTruncated).toBe(false);
+    expect(r1.truncated).toBe(input);
+
+    // cap = 4 (one complete emoji)
+    const r2 = truncateUtf8ByBytes(input, 4);
+    expect(r2.truncated).not.toContain('\uFFFD');
+    expect([...r2.truncated].length).toBe(1);
+    expect(Buffer.byteLength(r2.truncated, 'utf-8')).toBe(4);
+
+    // cap = 7 (lands on emoji[1] cont byte) — trim back to emoji[0]
+    const r3 = truncateUtf8ByBytes(input, 7);
+    expect(r3.truncated).not.toContain('\uFFFD');
+    expect([...r3.truncated].length).toBe(1);
+    expect(Buffer.byteLength(r3.truncated, 'utf-8')).toBe(4);
+  });
+
   it('handles mixed ASCII + CJK + emoji', () => {
     const input = 'hello 世界 🌍 test';
     const r = truncateUtf8ByBytes(input, 12);
