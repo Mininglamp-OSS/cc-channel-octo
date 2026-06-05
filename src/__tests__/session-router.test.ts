@@ -256,3 +256,158 @@ describe('SessionRouter', () => {
     expect(order).toEqual([0, 1, 2, 3, 4]);
   });
 });
+
+// ─── routeAndHandle: Concurrency + Lock Integration ─────────────────────────
+
+describe('routeAndHandle concurrency', () => {
+  let router: SessionRouter;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    router = new SessionRouter(makeConfig({ rateLimit: { maxPerMinute: 100 } }), ROBOT_ID);
+  });
+
+  it('same session key: route + handler execute serially (FIFO)', async () => {
+    const order: number[] = [];
+
+    const promises = [];
+    for (let i = 0; i < 5; i++) {
+      const idx = i;
+      promises.push(
+        router.routeAndHandle(
+          makeMsg({
+            message_id: String(idx),
+            channel_type: ChannelType.DM,
+            from_uid: 'same-user',
+          }),
+          async () => {
+            // Simulate async work to expose ordering bugs
+            await new Promise((r) => setTimeout(r, 1));
+            order.push(idx);
+          },
+        ),
+      );
+    }
+    await Promise.all(promises);
+    expect(order).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it('different session keys run in parallel', async () => {
+    let maxConcurrent = 0;
+    let current = 0;
+
+    const promises = [];
+    for (let i = 0; i < 3; i++) {
+      promises.push(
+        router.routeAndHandle(
+          makeMsg({
+            message_id: String(i),
+            channel_type: ChannelType.DM,
+            from_uid: `user-${i}`, // different session keys
+          }),
+          async () => {
+            current++;
+            maxConcurrent = Math.max(maxConcurrent, current);
+            await new Promise((r) => setTimeout(r, 10));
+            current--;
+          },
+        ),
+      );
+    }
+    await Promise.all(promises);
+    expect(maxConcurrent).toBeGreaterThan(1);
+  });
+
+  it('handler runs inside the lock (max 1 concurrent per session)', async () => {
+    let maxConcurrent = 0;
+    let current = 0;
+
+    const promises = [];
+    for (let i = 0; i < 5; i++) {
+      promises.push(
+        router.routeAndHandle(
+          makeMsg({
+            message_id: String(i),
+            channel_type: ChannelType.DM,
+            from_uid: 'same-user',
+          }),
+          async () => {
+            current++;
+            maxConcurrent = Math.max(maxConcurrent, current);
+            await new Promise((r) => setTimeout(r, 5));
+            current--;
+          },
+        ),
+      );
+    }
+    await Promise.all(promises);
+    expect(maxConcurrent).toBe(1);
+  });
+
+  it('routeAndHandle does not call handler for non-processable messages', async () => {
+    const handlerCalls: string[] = [];
+
+    // Group message without mention — should not be processed
+    await router.routeAndHandle(
+      makeMsg({
+        channel_type: ChannelType.Group,
+        payload: { type: MessageType.Text, content: 'no mention' },
+      }),
+      async (result) => {
+        handlerCalls.push(result.sessionKey);
+      },
+    );
+
+    expect(handlerCalls).toHaveLength(0);
+  });
+
+  it('routeAndHandle calls handler for processable messages', async () => {
+    const handlerCalls: string[] = [];
+
+    // DM text message — should be processed
+    await router.routeAndHandle(
+      makeMsg({
+        channel_type: ChannelType.DM,
+        from_uid: 'user-1',
+        payload: { type: MessageType.Text, content: 'hello' },
+      }),
+      async (result) => {
+        handlerCalls.push(result.sessionKey);
+      },
+    );
+
+    expect(handlerCalls).toEqual(['user-1']);
+  });
+
+  it('burst of same-session messages: FIFO order + max-1 concurrent', async () => {
+    const order: number[] = [];
+    let maxConcurrent = 0;
+    let current = 0;
+
+    const burst = 10;
+    const promises = [];
+    for (let i = 0; i < burst; i++) {
+      const idx = i;
+      promises.push(
+        router.routeAndHandle(
+          makeMsg({
+            message_id: String(idx),
+            channel_type: ChannelType.DM,
+            from_uid: 'burst-user',
+          }),
+          async () => {
+            current++;
+            maxConcurrent = Math.max(maxConcurrent, current);
+            await new Promise((r) => setTimeout(r, 1));
+            order.push(idx);
+            current--;
+          },
+        ),
+      );
+    }
+    await Promise.all(promises);
+
+    expect(maxConcurrent).toBe(1);
+    expect(order).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  });
+});
