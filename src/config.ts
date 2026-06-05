@@ -194,6 +194,24 @@ function applyEnv(cfg: Config): Config {
   return next;
 }
 
+/**
+ * SSRF protection: only allow https:// URLs and http://localhost or http://127.0.0.1
+ * for local development. Rejects http:// to arbitrary hosts, file://, etc.
+ */
+function isAllowedApiUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === 'https:') return true;
+    if (parsed.protocol === 'http:') {
+      const host = parsed.hostname.toLowerCase();
+      return host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 export function loadConfig(configPath?: string): Config {
   const path = configPath ?? './config.json';
   const fileCfg = readConfigFile(path);
@@ -205,6 +223,11 @@ export function loadConfig(configPath?: string): Config {
   }
   if (!final.apiUrl) {
     throw new Error('Missing required config: apiUrl (set CC_OCTO_API_URL or config.json)');
+  }
+  if (!isAllowedApiUrl(final.apiUrl)) {
+    throw new Error(
+      `Unsafe apiUrl: ${final.apiUrl} — must be https:// or http://localhost/http://127.0.0.1 (SSRF protection)`,
+    );
   }
 
   return final;
