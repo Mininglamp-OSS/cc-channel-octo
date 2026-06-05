@@ -36,6 +36,27 @@ export const TEXT_FILE_EXTENSIONS = new Set([
 /** Maximum bytes to inline a text file in the LLM prompt (G2). */
 export const INLINE_FILE_MAX_BYTES = 20 * 1024;
 
+// ─── RichText / MultipleForward input budgets (C1 / Stage 6) ─────────────────────
+//
+// These caps apply per-payload at parse time. They are independent of — and
+// strictly tighter than — the system-prompt-wide 100 KiB cap in agent-bridge
+// (D1, PR#39). Goal: stop a single malicious payload from spending the
+// entire system-prompt budget or triggering OOM during parsing.
+
+/** Maximum blocks parsed from a RichText payload. */
+export const RICH_TEXT_MAX_BLOCKS = 50;
+/** Maximum image URLs extracted from a RichText payload. */
+export const RICH_TEXT_MAX_MEDIA_URLS = 20;
+/** Maximum bytes of rendered text from a single RichText payload (matches Text gate). */
+export const RICH_TEXT_MAX_OUTPUT_BYTES = 32 * 1024;
+
+/** Maximum recursion depth for MultipleForward expansion. */
+export const MULTIPLE_FORWARD_MAX_DEPTH = 3;
+/** Maximum number of inner messages rendered per MultipleForward level. */
+export const MULTIPLE_FORWARD_MAX_MESSAGES = 50;
+/** Maximum bytes of rendered transcript from a single MultipleForward payload. */
+export const MULTIPLE_FORWARD_MAX_OUTPUT_BYTES = 8 * 1024;
+
 /** Maximum bytes to download for any text file (inline or temp). */
 const MAX_FILE_DOWNLOAD_BYTES = 5 * 1024 * 1024; // 5 MB
 
@@ -87,12 +108,35 @@ export function buildMediaUrl(relUrl?: string, apiUrl?: string): string | undefi
 
 function normalizeRichTextBlocks(content: unknown): Array<Record<string, unknown>> {
   if (Array.isArray(content)) {
-    return content.filter((b): b is Record<string, unknown> => !!b && typeof b === 'object');
+    // C1 / P1.4: cap blocks parsed per payload. A malicious sender could send
+    // 10k blocks of empty text to spend parser CPU + downstream budget.
+    return content
+      .filter((b): b is Record<string, unknown> => !!b && typeof b === 'object')
+      .slice(0, RICH_TEXT_MAX_BLOCKS);
   }
   if (typeof content === 'string' && content) {
     return [{ type: RICH_TEXT_BLOCK_TEXT, text: content }];
   }
   return [];
+}
+
+/**
+ * Truncate a string to at most `maxBytes` UTF-8 bytes, appending a marker.
+ * Shrinks by single chars so multi-byte (CJK / emoji) characters never get
+ * split. Returns `{ text, truncated }` so callers can decide whether to
+ * emit a notice.
+ */
+function truncateByBytes(input: string, maxBytes: number, marker: string): { text: string; truncated: boolean } {
+  if (Buffer.byteLength(input, 'utf-8') <= maxBytes) {
+    return { text: input, truncated: false };
+  }
+  // Generous upfront slice, then trim by bytes (covers ASCII fast path and
+  // CJK without quadratic scan over an unbounded string).
+  let truncated = input.slice(0, maxBytes);
+  while (Buffer.byteLength(truncated, 'utf-8') > maxBytes) {
+    truncated = truncated.slice(0, -1);
+  }
+  return { text: truncated + marker, truncated: true };
 }
 
 function buildRichTextPlain(blocks: Array<Record<string, unknown>>): string {
@@ -117,6 +161,10 @@ function buildRichTextPlain(blocks: Array<Record<string, unknown>>): string {
  *   - text: prefer top-level `plain` (server-authoritative); else assemble
  *     from content blocks (text → text, image → `[图片]` placeholder)
  *   - mediaUrls: collect all image-block `url` (sanitized for string type)
+ *
+ * C1 / P1.4 (Stage 6): output text is truncated to RICH_TEXT_MAX_OUTPUT_BYTES
+ * (32 KiB — matches the Text payload gate in session-router) and mediaUrls is
+ * capped at RICH_TEXT_MAX_MEDIA_URLS to prevent prompt-budget exhaustion.
  */
 export function resolveRichTextContent(
   payload: { content?: unknown; plain?: unknown },
@@ -130,10 +178,12 @@ export function resolveRichTextContent(
     if (blk.type === RICH_TEXT_BLOCK_IMAGE && typeof blk.url === 'string' && blk.url) {
       const full = buildMediaUrl(blk.url, apiUrl);
       if (full) mediaUrls.push(full);
+      if (mediaUrls.length >= RICH_TEXT_MAX_MEDIA_URLS) break;
     }
   }
   const topPlain = typeof payload?.plain === 'string' ? payload.plain : '';
-  const text = topPlain.trim() !== '' ? topPlain : buildRichTextPlain(blocks);
+  const rawText = topPlain.trim() !== '' ? topPlain : buildRichTextPlain(blocks);
+  const { text } = truncateByBytes(rawText, RICH_TEXT_MAX_OUTPUT_BYTES, '\n[RichText truncated]');
   return { text, mediaUrls };
 }
 
@@ -172,13 +222,31 @@ function resolveInnerMessageText(payload: ForwardMessage['payload'], apiUrl?: st
   }
 }
 
-/** Expand a MultipleForward payload into a readable transcript. */
+/**
+ * Expand a MultipleForward payload into a readable transcript.
+ *
+ * C1 / P1.3 (Stage 6): bounded by three caps to prevent DoS via deeply nested
+ * or massive forwarded payloads:
+ *   - depth   ≤ MULTIPLE_FORWARD_MAX_DEPTH (default 3) — stack-safe
+ *   - msgs    ≤ MULTIPLE_FORWARD_MAX_MESSAGES per level — CPU bound
+ *   - output  ≤ MULTIPLE_FORWARD_MAX_OUTPUT_BYTES — prompt budget
+ *
+ * The internal _depth parameter is hop-counted (top-level = 0). Going beyond
+ * the depth cap emits a single placeholder line instead of recursing.
+ */
 export function resolveMultipleForwardText(
   payload: { users?: ForwardUser[]; msgs?: ForwardMessage[] },
   apiUrl?: string,
+  _depth = 0,
 ): string {
+  if (_depth >= MULTIPLE_FORWARD_MAX_DEPTH) {
+    return '[合并转发: 嵌套已截断]';
+  }
   const users: ForwardUser[] = payload?.users ?? [];
-  const msgs: ForwardMessage[] = payload?.msgs ?? [];
+  const rawMsgs: ForwardMessage[] = payload?.msgs ?? [];
+  // Cap inner messages per level to prevent quadratic CPU on adversarial input.
+  const msgs = rawMsgs.slice(0, MULTIPLE_FORWARD_MAX_MESSAGES);
+  const truncatedCount = rawMsgs.length - msgs.length;
   const userMap = new Map<string, string>();
   for (const u of users) {
     if (u.uid && u.name) userMap.set(u.uid, u.name);
@@ -187,14 +255,21 @@ export function resolveMultipleForwardText(
   for (const m of msgs) {
     const senderName = userMap.get(m.from_uid) ?? m.from_uid;
     if (m.payload?.type === MessageType.MultipleForward) {
-      const nested = resolveMultipleForwardText(m.payload, apiUrl);
+      const nested = resolveMultipleForwardText(m.payload, apiUrl, _depth + 1);
       lines.push(`${senderName}: [合并转发]`);
       lines.push(nested);
     } else {
       lines.push(`${senderName}: ${resolveInnerMessageText(m.payload, apiUrl)}`);
     }
   }
-  return lines.join('\n');
+  if (truncatedCount > 0) {
+    lines.push(`[合并转发: 还有 ${truncatedCount} 条消息未展示]`);
+  }
+  const out = lines.join('\n');
+  // Final output budget guard — even with msg/depth caps, a single inner
+  // message text could be large. Truncate once at the top after assembly.
+  const { text } = truncateByBytes(out, MULTIPLE_FORWARD_MAX_OUTPUT_BYTES, '\n[合并转发: 输出已截断]');
+  return text;
 }
 
 // ─── Core resolver ─────────────────────────────────────────────────────────
