@@ -18,6 +18,9 @@ export class OctoGateway {
   private lockFilePath: string;
   private onMessage: MessageHandler | null = null;
 
+  /** When true, new messages are silently dropped (shutdown draining). */
+  private _draining = false;
+
   // Token refresh state
   private isRefreshing = false;
   private lastRefreshTime = 0;
@@ -48,8 +51,38 @@ export class OctoGateway {
     this.setupShutdownHandlers();
   }
 
-  /** Gracefully stop: disconnect WS + clear heartbeat + release lock */
-  async stop(): Promise<void> {
+  /** Whether the gateway is draining (rejecting new messages). */
+  get draining(): boolean {
+    return this._draining;
+  }
+
+  /**
+   * Gracefully stop: set draining → wait for in-flight handlers →
+   * stop heartbeat → disconnect WS → release lock.
+   *
+   * @param activeHandlers - Set of in-flight handler promises to drain.
+   *   Supplied by the orchestrator (index.ts) that tracks them.
+   * @param drainTimeoutMs - Max time (ms) to wait for in-flight handlers
+   *   before force-proceeding. Default 10000.
+   */
+  async stop(
+    activeHandlers?: Set<Promise<void>>,
+    drainTimeoutMs = 10_000,
+  ): Promise<void> {
+    // Mark draining — new messages will be dropped by handleMessage
+    this._draining = true;
+
+    // Wait for in-flight message handlers to complete (with timeout)
+    if (activeHandlers && activeHandlers.size > 0) {
+      console.log(`[cc-channel-octo] Draining ${activeHandlers.size} in-flight handler(s)...`);
+      const drainPromise = Promise.allSettled([...activeHandlers]);
+      const timeout = new Promise<void>((r) => setTimeout(r, drainTimeoutMs));
+      await Promise.race([drainPromise, timeout]);
+      if (activeHandlers.size > 0) {
+        console.warn(`[cc-channel-octo] Drain timeout, ${activeHandlers.size} handler(s) still active`);
+      }
+    }
+
     this.stopHeartbeat();
     if (this.socket) {
       await this.socket.disconnectAndWait();
@@ -145,6 +178,7 @@ export class OctoGateway {
   }
 
   private handleMessage(msg: BotMessage): void {
+    if (this._draining) return; // Q6: reject new messages during shutdown
     if (msg.from_uid === this.robotId) return;
     this.onMessage?.(msg);
   }
@@ -228,10 +262,24 @@ export class OctoGateway {
 
   // --- Graceful shutdown ---
 
+  private onShutdown: (() => Promise<void>) | null = null;
+
+  /**
+   * Set a shutdown callback. Called on SIGINT/SIGTERM before process.exit.
+   * The orchestrator (index.ts) wires this to drain handlers + close store.
+   */
+  setShutdownCallback(fn: () => Promise<void>): void {
+    this.onShutdown = fn;
+  }
+
   private setupShutdownHandlers(): void {
     const shutdown = async (signal: string) => {
       console.log(`Received ${signal}, shutting down...`);
-      await this.stop();
+      if (this.onShutdown) {
+        await this.onShutdown();
+      } else {
+        await this.stop();
+      }
       process.exit(0);
     };
 
