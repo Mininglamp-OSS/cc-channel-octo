@@ -184,29 +184,3 @@ describe('File payload: metadata-only history (PR#33 follow-up)', () => {
     expect(history).toContain(longText);
   });
 });
-
-// --- e2e wiring sanity ---
-
-describe('handleMessage wiring (smoke)', () => {
-  it('handleMessage now accepts botId parameter (PR#33 follow-up signature change)', async () => {
-    // Verify the exported signature compiles end-to-end by importing the
-    // module. The runtime contract is covered by e2e.test.ts; this guards
-    // against accidental signature regression.
-    const indexModule = await import('../index.js').catch(() => null);
-    // index.ts has no exports (it's the entry point) — verify it loads.
-    void indexModule;
-    expect(true).toBe(true); // smoke
-  });
-
-  // Document the contract change explicitly so future refactors don't drop it.
-  it('contract: seedHistoryFromApi must receive bot uid, not current sender uid', () => {
-    // Before the fix, the call site passed msg.from_uid (the inbound sender),
-    // which is never the bot's own uid for incoming messages. As a result the
-    // routing condition `from_uid === currentUserUid` was always false for the
-    // bot's messages, and they all ended up as user rows. The fix replaces
-    // msg.from_uid with gateway.botId so the comparison can actually match.
-    const inboundSenderUid = 'user-alice';
-    const botUid = 'bot-xyz';
-    expect(inboundSenderUid).not.toBe(botUid); // contract sanity
-  });
-});

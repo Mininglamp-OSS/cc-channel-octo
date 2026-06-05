@@ -117,23 +117,9 @@ describe("encodeVariableLength(0) (Q37)", () => {
   });
 });
 
-// ─── Q38: aesIV salt length warning ────────────────────────────────────────
-
-describe("aesIV salt length warning (Q38)", () => {
-  it("warns when CONNACK salt is shorter than 16 bytes", () => {
-    // We can't easily simulate a CONNACK without a full WS connection,
-    // but we can verify the warning code path exists by checking the source.
-    // Instead, verify the warning message format matches what we added.
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-    // The warning is triggered in onConnack when salt.length < 16.
-    // Since we can't drive WKSocket.onConnack directly (private method),
-    // we verify the code was added by checking the built output includes
-    // the expected warning string pattern.
-    // This is a static verification — the runtime path is tested by Q29
-    // (WKSocket packet-level tests) when those are implemented.
-
-    warnSpy.mockRestore();
-    expect(true).toBe(true); // Placeholder — runtime testing deferred to Q29
-  });
-});
+// Q38 aesIV salt length warning:
+// Q1 cleanup — the placeholder `expect(true).toBe(true)` test that previously
+// lived here is removed. The warning is now exercised by
+// octo/wksocket-packet.test.ts (CONNACK with salt shorter than 16 bytes emits
+// console.warn) using the real WKSocket + ws-mock infrastructure that was
+// deferred when Q29 was first written.

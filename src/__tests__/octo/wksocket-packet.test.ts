@@ -413,4 +413,69 @@ describe('WKSocket packet-level integration', () => {
     expect(onDisconnected).toHaveBeenCalledOnce();
     expect(onMessage).not.toHaveBeenCalled();
   });
+
+  // Q1 bonus: Q38 aesIV salt-length warning. Previously documented only by a
+  // placeholder `expect(true).toBe(true)` test in q34-q37-q38.test.ts — now
+  // exercised through real CONNACK with a short salt. This test guards the
+  // warn-on-server-misbehavior contract added in PR#34 / Q38.
+  it('CONNACK with salt shorter than 16 bytes emits console.warn (Q38)', () => {
+    const onConnected = vi.fn();
+    const onError = vi.fn();
+    const onDisconnected = vi.fn();
+    const onMessage = vi.fn();
+    const sock = new WKSocket({
+      uid: 'bot-uid',
+      token: 'bot-token',
+      url: 'wss://test',
+      onConnected,
+      onMessage,
+      onError,
+      onDisconnected,
+    });
+    sock.connect();
+    const ws = wsRef.current!;
+    ws.emit('open');
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // Short salt: 8 bytes < 16 → triggers warn.
+      doHandshake(ws, 1, 'shortslt');
+      expect(onConnected).toHaveBeenCalledOnce();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('CONNACK salt is shorter than 16 bytes'),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('CONNACK with salt >= 16 bytes does NOT warn (negative case)', () => {
+    const onConnected = vi.fn();
+    const onError = vi.fn();
+    const onDisconnected = vi.fn();
+    const onMessage = vi.fn();
+    const sock = new WKSocket({
+      uid: 'bot-uid',
+      token: 'bot-token',
+      url: 'wss://test',
+      onConnected,
+      onMessage,
+      onError,
+      onDisconnected,
+    });
+    sock.connect();
+    const ws = wsRef.current!;
+    ws.emit('open');
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      doHandshake(ws, 1); // default TEST_SALT is 20 bytes
+      expect(onConnected).toHaveBeenCalledOnce();
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('CONNACK salt is shorter'),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
 });
