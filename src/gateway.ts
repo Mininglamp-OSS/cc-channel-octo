@@ -230,6 +230,7 @@ export class OctoGateway {
       this.startHeartbeat(); // Q33: Restart API heartbeat after successful refresh
     } catch (err) {
       console.error('Token refresh failed:', String(err));
+      this.startHeartbeat(); // Q33: Restore heartbeat on failure for self-healing
     } finally {
       this.isRefreshing = false;
     }
