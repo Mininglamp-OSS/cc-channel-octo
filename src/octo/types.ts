@@ -106,4 +106,45 @@ export enum MessageType {
   Card = 7,
   File = 8,
   MultipleForward = 11,
+  /** Rich text (text + inline images), introduced in upstream v1.0.x */
+  RichText = 14,
 }
+
+// ─── RichText (type=14) content blocks ──────────────────────────────────────
+
+export const RICH_TEXT_BLOCK_TEXT = 1;
+export const RICH_TEXT_BLOCK_IMAGE = 2;
+
+/** Placeholder rendered for an inline image when assembling plain text. */
+export const RICH_TEXT_IMAGE_PLACEHOLDER = '[图片]';
+
+export interface RichTextBlock {
+  type: number;
+  text?: string;
+  url?: string;
+  name?: string;
+  size?: number;
+  [key: string]: unknown;
+}
+
+// ─── Forward-payload nested message (MultipleForward children) ──────────────
+
+export interface ForwardUser {
+  uid: string;
+  name: string;
+}
+
+export interface ForwardMessage {
+  message_id?: string;
+  from_uid: string;
+  timestamp?: number;
+  payload: {
+    type: number;
+    content?: string;
+    url?: string;
+    name?: string;
+    users?: ForwardUser[];
+    msgs?: ForwardMessage[];
+  };
+}
+

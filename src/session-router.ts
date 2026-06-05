@@ -237,48 +237,48 @@ export class SessionRouter {
       return { sessionKey: key, shouldProcess: false, message: msg };
     }
 
-    // Non-text message → reply with notice.
-    if (msg.payload.type !== MessageType.Text) {
-      await this.replySafe(msg, '暂不支持此类消息，请发送文字');
-      return { sessionKey: key, shouldProcess: false, message: msg };
-    }
+    // G1: All payload types are now resolved by inbound.resolveContent in
+    // handleMessage. The router only filters rate limits, size, and bot
+    // loops — type-specific handling lives in the pipeline.
 
-    // Q10: Reject messages exceeding content length limit.
+    // Q10: Reject messages exceeding content length limit (text only — media
+    // URLs are bounded by their own size and rendered via resolveContent).
     const content = msg.payload.content ?? '';
-    if (Buffer.byteLength(content, 'utf-8') > MAX_CONTENT_BYTES) {
+    if (
+      msg.payload.type === MessageType.Text &&
+      Buffer.byteLength(content, 'utf-8') > MAX_CONTENT_BYTES
+    ) {
       await this.replySafe(msg, '消息过长，请缩短后重试');
       return { sessionKey: key, shouldProcess: false, message: msg };
     }
 
-    // G13: Strip leading @botname from group messages for cleaner LLM input.
-    //
-    // Only strip when we have positive evidence the leading @token IS the bot.
-    // The regex fallback used to strip *any* leading @word, which corrupts
-    // messages like "@alice please check" (especially in G12 mention-free
-    // groups, where the bot wasn't even @'d and would still lose the @alice
-    // context). We now only strip when:
-    //   1. entities precisely identify the bot at offset 0, OR
-    //   2. the bot is mentioned AND the leading @token resolves to its robotId.
-    let cleanContent = content;
-    if (this.isGroupLike(msg.channel_type)) {
-      const mention = msg.payload.mention;
-      // Path 1: entities-based removal (precise offset/length).
-      if (mention?.entities && Array.isArray(mention.entities)) {
-        const botEntity = mention.entities.find(
-          (e: MentionEntity) => e.uid === this.robotId && e.offset === 0,
-        );
-        if (botEntity && typeof botEntity.length === 'number') {
-          cleanContent = content.substring(botEntity.length).trimStart();
+    // G13: Strip leading @botname from group TEXT messages for cleaner LLM input.
+    // For non-text payloads (images, files, etc.) cleanContent stays undefined
+    // so the pipeline falls back to the resolveContent rendering instead of an
+    // empty string.
+    let cleanContent: string | undefined;
+    if (msg.payload.type === MessageType.Text) {
+      cleanContent = content;
+      if (this.isGroupLike(msg.channel_type)) {
+        const mention = msg.payload.mention;
+        // Path 1: entities-based removal (precise offset/length).
+        if (mention?.entities && Array.isArray(mention.entities)) {
+          const botEntity = mention.entities.find(
+            (e: MentionEntity) => e.uid === this.robotId && e.offset === 0,
+          );
+          if (botEntity && typeof botEntity.length === 'number') {
+            cleanContent = content.substring(botEntity.length).trimStart();
+          }
         }
+        // Path 2: regex fallback — only when the bot was explicitly @mentioned.
+        // In mention-free groups (G12) where the bot wasn't @'d, do NOT touch
+        // the message — a leading @ is addressed to someone else.
+        if (cleanContent === content && this.isMentioned(msg)) {
+          cleanContent = content.replace(/^@\S+\s*/, '').trimStart();
+        }
+        // If stripping emptied the content, keep original.
+        if (!cleanContent) cleanContent = content;
       }
-      // Path 2: regex fallback — only when the bot was explicitly @mentioned.
-      // In mention-free groups (G12) where the bot wasn't @'d, do NOT touch
-      // the message — a leading @ is addressed to someone else.
-      if (cleanContent === content && this.isMentioned(msg)) {
-        cleanContent = content.replace(/^@\S+\s*/, '').trimStart();
-      }
-      // If stripping emptied the content, keep original.
-      if (!cleanContent) cleanContent = content;
     }
 
     return { sessionKey: key, shouldProcess: true, message: msg, cleanContent };

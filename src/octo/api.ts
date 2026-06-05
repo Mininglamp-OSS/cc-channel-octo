@@ -362,3 +362,86 @@ export async function searchSpaceMembers(params: {
     `/v1/bot/space/members${qs ? `?${qs}` : ""}`,
   );
 }
+
+// ─── Channel Message History (G4) ──────────────────────────────────────────
+
+/** Historical message returned by /v1/bot/messages/sync. */
+export interface HistoricalMessage {
+  from_uid: string;
+  from_name?: string;
+  content?: string;
+  timestamp: number;
+  message_id?: string;
+  message_seq?: number;
+  /** Numeric MessageType (1=Text, 2=Image, 8=File, 14=RichText, etc.) */
+  type?: number;
+  url?: string;
+  name?: string;
+  /** Decoded full payload (server sends base64, we decode + JSON.parse). */
+  payload?: Record<string, unknown>;
+}
+
+/**
+ * Pull recent messages for a channel via the WuKongIM sync endpoint.
+ *
+ * Used by G4 to backfill conversation history when the local SQLite cache is
+ * empty or sparse (e.g. cold start, restored snapshot). The server payload is
+ * base64-encoded JSON; we decode it inline so callers get a clean object.
+ *
+ * Returns `[]` on any failure — the agent runs fine without history.
+ */
+export async function getChannelMessages(params: {
+  apiUrl: string;
+  botToken: string;
+  channelId: string;
+  channelType: number;
+  limit?: number;
+  startMessageSeq?: number;
+  endMessageSeq?: number;
+  signal?: AbortSignal;
+}): Promise<HistoricalMessage[]> {
+  try {
+    const result = await postJson<{ messages?: Array<Record<string, unknown>> }>(
+      params.apiUrl,
+      params.botToken,
+      '/v1/bot/messages/sync',
+      {
+        channel_id: params.channelId,
+        channel_type: params.channelType,
+        limit: params.limit ?? 20,
+        start_message_seq: params.startMessageSeq ?? 0,
+        end_message_seq: params.endMessageSeq ?? 0,
+        pull_mode: 1, // 1 = pull newer messages
+      },
+      params.signal,
+    );
+    const messages = result?.messages ?? [];
+    return messages.map((m) => {
+      let payload: Record<string, unknown> | undefined;
+      if (typeof m.payload === 'string') {
+        try {
+          payload = JSON.parse(Buffer.from(m.payload, 'base64').toString('utf-8'));
+        } catch {
+          // Leave payload undefined if decoding fails
+        }
+      } else if (m.payload && typeof m.payload === 'object') {
+        payload = m.payload as Record<string, unknown>;
+      }
+      return {
+        from_uid: String(m.from_uid ?? ''),
+        from_name: typeof m.from_name === 'string' ? m.from_name : undefined,
+        content: typeof m.content === 'string' ? m.content : undefined,
+        timestamp: typeof m.timestamp === 'number' ? m.timestamp : 0,
+        message_id: typeof m.message_id === 'string' ? m.message_id : undefined,
+        message_seq: typeof m.message_seq === 'number' ? m.message_seq : undefined,
+        type: typeof m.type === 'number' ? m.type : undefined,
+        url: typeof m.url === 'string' ? m.url : undefined,
+        name: typeof m.name === 'string' ? m.name : undefined,
+        payload,
+      };
+    });
+  } catch (err) {
+    console.error(`octo: getChannelMessages error: ${String(err)}`);
+    return [];
+  }
+}
