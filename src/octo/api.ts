@@ -7,6 +7,7 @@ import {
   ChannelType,
   MessageType,
   type MentionEntity,
+  type RichTextBlock,
   type SendMessageResult,
 } from "./types.js";
 import { randomUUID } from "node:crypto";
@@ -118,6 +119,181 @@ export async function sendMessage(params: {
     payload,
     client_msg_no: params.clientMsgNo ?? generateClientMsgNo(),
   }, params.signal);
+}
+
+/**
+ * Send a media message (Image / GIF / Voice / Video / File).
+ *
+ * Uses the same /v1/bot/sendMessage endpoint as text — the payload `type`
+ * field selects the media kind. Image needs width/height/name/size; File-like
+ * types (File/Voice/Video) need name/size only.
+ *
+ * Caller is responsible for uploading the file to COS first and passing the
+ * resulting CDN URL via `params.url`. See media-upload.ts uploadAndSendMedia().
+ */
+export async function sendMediaMessage(params: {
+  apiUrl: string;
+  botToken: string;
+  channelId: string;
+  channelType: ChannelType;
+  type: MessageType;
+  url: string;
+  name?: string;
+  size?: number;
+  width?: number;
+  height?: number;
+  mentionUids?: string[];
+  mentionEntities?: MentionEntity[];
+  clientMsgNo?: string;
+  signal?: AbortSignal;
+}): Promise<SendMessageResult | undefined> {
+  const payload: Record<string, unknown> = {
+    type: params.type,
+    url: params.url,
+  };
+  // Image (type=2) needs width/height/name/size; File-like (8/4/5) needs name/size only.
+  if (params.type === MessageType.Image) {
+    if (params.width) payload.width = params.width;
+    if (params.height) payload.height = params.height;
+    if (params.name) payload.name = params.name;
+    if (params.size != null) payload.size = params.size;
+  } else {
+    if (params.name) payload.name = params.name;
+    if (params.size != null) payload.size = params.size;
+  }
+  if (
+    (params.mentionUids && params.mentionUids.length > 0) ||
+    (params.mentionEntities && params.mentionEntities.length > 0)
+  ) {
+    const mention: Record<string, unknown> = {};
+    if (params.mentionUids && params.mentionUids.length > 0) {
+      mention.uids = params.mentionUids;
+    }
+    if (params.mentionEntities && params.mentionEntities.length > 0) {
+      mention.entities = params.mentionEntities;
+    }
+    payload.mention = mention;
+  }
+  return await postJson<SendMessageResult>(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
+    channel_id: params.channelId,
+    channel_type: params.channelType,
+    payload,
+    client_msg_no: params.clientMsgNo ?? generateClientMsgNo(),
+  }, params.signal);
+}
+
+/**
+ * Send a RichText(=14) message — text and image blocks interleaved in a single payload.
+ *
+ * Replaces "sendMessage(text) + N sendMediaMessage(image)" with a single HTTP send.
+ * Block contract (octo-lib richtext.go): `text` blocks need non-empty text;
+ * `image` blocks need http(s) URL + width/height > 0. Server validates;
+ * this function only assembles.
+ *
+ * `plain` (optional): downgrade text for legacy clients. Server recomputes from
+ * blocks authoritatively, so passing plain is purely for old-client compat.
+ */
+export async function sendRichTextMessage(params: {
+  apiUrl: string;
+  botToken: string;
+  channelId: string;
+  channelType: ChannelType;
+  blocks: RichTextBlock[];
+  plain?: string;
+  mentionUids?: string[];
+  mentionEntities?: MentionEntity[];
+  mentionAll?: boolean;
+  clientMsgNo?: string;
+  signal?: AbortSignal;
+}): Promise<SendMessageResult | undefined> {
+  const payload: Record<string, unknown> = {
+    type: MessageType.RichText,
+    content: params.blocks,
+  };
+  if (typeof params.plain === "string") {
+    payload.plain = params.plain;
+  }
+  if (
+    (params.mentionUids && params.mentionUids.length > 0) ||
+    (params.mentionEntities && params.mentionEntities.length > 0) ||
+    params.mentionAll
+  ) {
+    const mention: Record<string, unknown> = {};
+    if (params.mentionUids && params.mentionUids.length > 0) {
+      mention.uids = params.mentionUids;
+    }
+    if (params.mentionEntities && params.mentionEntities.length > 0) {
+      mention.entities = params.mentionEntities;
+    }
+    if (params.mentionAll) {
+      mention.all = 1;
+    }
+    payload.mention = mention;
+  }
+  return await postJson<SendMessageResult>(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
+    channel_id: params.channelId,
+    channel_type: params.channelType,
+    payload,
+    client_msg_no: params.clientMsgNo ?? generateClientMsgNo(),
+  }, params.signal);
+}
+
+/**
+ * Get STS temporary credentials for direct COS upload.
+ * GET /v1/bot/upload/credentials?filename=<encoded>
+ *
+ * Returns short-lived (typically 1h) credentials scoped to a single key.
+ * Used by uploadAndSendMedia in media-upload.ts.
+ */
+export async function getUploadCredentials(params: {
+  apiUrl: string;
+  botToken: string;
+  filename: string;
+  signal?: AbortSignal;
+}): Promise<{
+  bucket: string;
+  region: string;
+  key: string;
+  credentials: {
+    tmpSecretId: string;
+    tmpSecretKey: string;
+    sessionToken: string;
+  };
+  startTime: number;
+  expiredTime: number;
+  cdnBaseUrl?: string;
+}> {
+  const base = params.apiUrl.replace(/\/+$/, "");
+  const url = `${base}/v1/bot/upload/credentials?filename=${encodeURIComponent(params.filename)}`;
+  const effectiveSignal = params.signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const response = await fetch(url, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${params.botToken}` },
+    signal: effectiveSignal,
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Octo API /v1/bot/upload/credentials failed (${response.status}): ${text || response.statusText}`);
+  }
+  const data = await response.json() as Record<string, unknown>;
+  // Validate required fields to catch backend API changes early.
+  const missing = ['bucket', 'region', 'key', 'credentials'].filter(k => !data[k]);
+  if (missing.length > 0) {
+    throw new Error(`Octo API /v1/bot/upload/credentials returned incomplete response: missing ${missing.join(', ')}`);
+  }
+  const creds = data.credentials as Record<string, unknown>;
+  if (!creds.tmpSecretId || !creds.tmpSecretKey || !creds.sessionToken) {
+    throw new Error("Octo API /v1/bot/upload/credentials returned incomplete credentials");
+  }
+  return data as {
+    bucket: string;
+    region: string;
+    key: string;
+    credentials: { tmpSecretId: string; tmpSecretKey: string; sessionToken: string; };
+    startTime: number;
+    expiredTime: number;
+    cdnBaseUrl?: string;
+  };
 }
 
 // ─── Typing / Heartbeat ─────────────────────────────────────────────────────

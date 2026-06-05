@@ -325,4 +325,62 @@ describe("StreamRelay", () => {
     const sendCalls = mockState.calls.filter((c) => c.fn === "sendMessage");
     expect(sendCalls.length).toBe(3); // All 3 segments attempted
   });
+
+  // ── G7: @mention resolution in deliver() ─────────────────────────────────
+
+  it("resolves @[uid:name] structured mentions and includes mentionUids/Entities", async () => {
+    const chunks = asyncChunks(["hello @[u1:Alice] and @[u2:Bob]"]);
+    const promise = relay.deliver(CH_ID, CH_TYPE, chunks, API_URL, BOT_TOKEN);
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const sendCalls = mockState.calls.filter((c) => c.fn === "sendMessage");
+    expect(sendCalls.length).toBe(1);
+    const args = sendCalls[0].args as {
+      content: string;
+      mentionUids?: string[];
+      mentionEntities?: Array<{ uid: string; offset: number; length: number }>;
+    };
+    expect(args.content).toBe("hello @Alice and @Bob");
+    expect(args.mentionUids).toEqual(["u1", "u2"]);
+    expect(args.mentionEntities).toHaveLength(2);
+  });
+
+  it("resolves plain @name via memberMap", async () => {
+    const memberMap = new Map([["Alice", "u1"], ["Bob", "u2"]]);
+    const chunks = asyncChunks(["hi @Alice and @Bob"]);
+    const promise = relay.deliver(
+      CH_ID, CH_TYPE, chunks, API_URL, BOT_TOKEN, undefined, memberMap,
+    );
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const sendCalls = mockState.calls.filter((c) => c.fn === "sendMessage");
+    const args = sendCalls[0].args as { mentionUids?: string[] };
+    expect(args.mentionUids).toEqual(["u1", "u2"]);
+  });
+
+  it("detects @all and sets mentionAll flag", async () => {
+    const chunks = asyncChunks(["@all please review"]);
+    const promise = relay.deliver(CH_ID, CH_TYPE, chunks, API_URL, BOT_TOKEN);
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const sendCalls = mockState.calls.filter((c) => c.fn === "sendMessage");
+    const args = sendCalls[0].args as { mentionAll?: boolean };
+    expect(args.mentionAll).toBe(true);
+  });
+
+  it("omits mention fields when no mentions present", async () => {
+    const chunks = asyncChunks(["just plain text"]);
+    const promise = relay.deliver(CH_ID, CH_TYPE, chunks, API_URL, BOT_TOKEN);
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const sendCalls = mockState.calls.filter((c) => c.fn === "sendMessage");
+    const args = sendCalls[0].args as Record<string, unknown>;
+    expect(args.mentionUids).toBeUndefined();
+    expect(args.mentionEntities).toBeUndefined();
+    expect(args.mentionAll).toBeUndefined();
+  });
 });

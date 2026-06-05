@@ -210,9 +210,40 @@ All 14 config fields are overridable via environment variables. See [README.md](
 
 ## Output Delivery
 
-The stream relay delivers agent output via plain `sendMessage` with intelligent text splitting. Split priority: paragraph break (`\n\n`) > newline (`\n`) > space > hard cut. Maximum segment size: 3500 characters.
+### Text
+
+The stream relay delivers agent text via plain `sendMessage` with intelligent text splitting. Split priority: paragraph break (`\n\n`) > newline (`\n`) > space > hard cut (surrogate-pair safe). Maximum segment size: 3500 characters. Per-segment try/catch ensures one failed segment does not drop the rest.
 
 A typing indicator heartbeat runs at 5-second intervals so the user sees activity during long agent runs.
+
+### @mentions (G7)
+
+Before each `sendMessage` call, the relay runs `resolveMentions()` from `mention-utils.ts`:
+- **Structured form** `@[uid:displayName]` (preferred, generated from system prompt) — converted to `@displayName` with precise `MentionEntity` payload.
+- **Plain form** `@displayName` — resolved via optional `memberMap` (displayName → uid). Longest-prefix match handles names containing spaces.
+- **`@all` / `@所有人`** — detected and surfaced as `mentionAll: true`.
+
+Resolved `mentionUids`, `mentionEntities`, and `mentionAll` are attached to the outbound payload so the IM server can route notifications correctly.
+
+### Media (G5/G24)
+
+`media-upload.ts` provides `uploadAndSendMedia()` for one-shot media delivery:
+1. Resolve input (`data:` / `file://` / `http(s)://`) into a file body, size, content-type, and dimensions (for images).
+2. Call `getUploadCredentials` to obtain short-lived COS STS credentials.
+3. Stream-upload via `cos-nodejs-sdk-v5` `putObject`; resolve CDN URL (re-encoded for non-ASCII keys).
+4. Call `sendMediaMessage` (Image with `width`/`height`/`name`/`size`, File-like with `name`/`size` only).
+
+500 MB max file size. Temp files cleaned in `finally`. PNG/JPEG/GIF/WebP dimension parsing reads only header bytes (no image decoding).
+
+### RichText (G6)
+
+`sendRichTextCombined()` packs text and `![alt](url)` markdown image references into a single `type=14` (RichText) message:
+- Parses markdown image refs, uploads each in parallel to COS.
+- Assembles interleaved `text` / `image` blocks.
+- Successful images become `{ type: "image", url, width, height }` blocks.
+- Failed images fall back inline as `[alt]` text inside the surrounding text block.
+- A `plain` field with `[图片]` placeholders is sent alongside for legacy-client compat (server recomputes from blocks authoritatively).
+- Returns `richText: false` when no images were uploaded successfully — caller falls back to plain text.
 
 ## Error Handling
 

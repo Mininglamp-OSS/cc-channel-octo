@@ -9,9 +9,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../octo/api.js', () => ({
   sendMessage: vi.fn().mockResolvedValue(undefined),
+  sendMediaMessage: vi.fn().mockResolvedValue(undefined),
+  sendRichTextMessage: vi.fn().mockResolvedValue(undefined),
   sendTyping: vi.fn().mockResolvedValue(undefined),
   sendReadReceipt: vi.fn().mockResolvedValue(undefined),
   getGroupMembers: vi.fn().mockResolvedValue([]),
+  getUploadCredentials: vi.fn().mockResolvedValue({
+    bucket: 'b', region: 'r', key: 'k',
+    credentials: { tmpSecretId: 'i', tmpSecretKey: 'k', sessionToken: 't' },
+    startTime: 1, expiredTime: 2,
+  }),
   sendHeartbeat: vi.fn().mockResolvedValue(undefined),
   registerBot: vi.fn().mockResolvedValue({
     robot_id: 'bot-001',

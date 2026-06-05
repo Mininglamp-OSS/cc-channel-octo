@@ -15,6 +15,7 @@ import {
   sendTyping,
   sendMessage,
 } from "./octo/api.js";
+import { resolveMentions } from "./mention-utils.js";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -113,6 +114,7 @@ export class StreamRelay {
     apiUrl: string,
     botToken: string,
     maxResponseChars: number = DEFAULT_MAX_RESPONSE_CHARS,
+    memberMap?: Map<string, string>,
   ): Promise<void> {
     // --- Typing heartbeat ---
     const typingParams = { apiUrl, botToken, channelId, channelType };
@@ -143,13 +145,19 @@ export class StreamRelay {
       if (accumulated.length > 0) {
         const segments = splitMessage(accumulated);
         for (const segment of segments) {
+          // G7: resolve @[uid:name] structured mentions and @name via memberMap.
+          const { finalContent, mentionUids, mentionEntities, mentionAll } =
+            resolveMentions(segment, memberMap);
           try {
             await sendMessage({
               apiUrl,
               botToken,
               channelId,
               channelType,
-              content: segment,
+              content: finalContent,
+              ...(mentionUids.length > 0 ? { mentionUids } : {}),
+              ...(mentionEntities.length > 0 ? { mentionEntities } : {}),
+              ...(mentionAll ? { mentionAll: true } : {}),
             });
           } catch (err) {
             console.error(`[stream-relay] sendMessage failed for segment (${segment.length} chars), continuing: ${String(err)}`);
