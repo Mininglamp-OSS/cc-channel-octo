@@ -106,22 +106,6 @@ export interface MessagePayload {
   [key: string]: unknown;
 }
 
-export interface BotStreamStartReq {
-  channel_id: string;
-  channel_type: ChannelType;
-  payload: string; // base64 encoded
-}
-
-export interface BotStreamStartResp {
-  stream_no: string;
-}
-
-export interface BotStreamEndReq {
-  stream_no: string;
-  channel_id: string;
-  channel_type: ChannelType;
-}
-
 export interface SendMessageResult {
   message_id: string;  // string due to int64 protection in postJson
   client_msg_no: string;

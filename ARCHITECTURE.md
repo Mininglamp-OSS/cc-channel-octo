@@ -38,7 +38,7 @@ This document describes the internal architecture of cc-channel-octo: a standalo
 └─────────────────────────────────────────────────────────────┘
          ▲                                      │
          │ WuKongIM binary protocol             │ Octo REST API
-         │ (WebSocket)                          │ (stream/send)
+         │ (WebSocket)                          │ (send/typing)
          ▼                                      ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                      Octo Server                            │
@@ -56,7 +56,7 @@ Forked from [openclaw-channel-octo](https://github.com/Mininglamp-OSS/openclaw-c
 | File | Responsibility |
 |---|---|
 | `types.ts` | Octo Bot API types, channel/message enums, mention payloads |
-| `api.ts` | REST API functions: register, send, typing, heartbeat, stream start/send/end, group members, user info, channel message sync |
+| `api.ts` | REST API functions: register, send, typing, heartbeat, group members, user info, channel message sync |
 | `socket.ts` | WuKongIM binary protocol over WebSocket: DH key exchange (curve25519), AES-CBC encryption, binary framing (variable-length encoding), CONNECT/CONNACK/RECV/RECVACK/PING/PONG, reconnect with exponential backoff + jitter |
 
 **Protocol details.** The WuKongIM protocol uses a custom binary framing format (not protobuf). Each frame has a 1-byte header (packet type in upper nibble, flags in lower nibble) followed by a variable-length body size and the body. Encryption is AES-128-CBC with keys derived from a Diffie-Hellman exchange (curve25519) during CONNECT/CONNACK. The salt from CONNACK provides the IV. Message IDs are 64-bit integers transmitted as big-endian — the API layer uses `parseOctoJson` to convert 16+ digit numeric IDs to strings before `JSON.parse` to avoid JavaScript precision loss.
@@ -77,7 +77,7 @@ Forked from [openclaw-channel-octo](https://github.com/Mininglamp-OSS/openclaw-c
 | `session-router.ts` | Message routing pipeline: self-message filter → bot blocklist → group mention gate (`uids` or `ais`, NOT `all`) → rate limiting (token bucket, per-session, debounced notification) → non-text rejection. **Critical design: `routeAndHandle` holds a per-session lock across both routing and handler execution** — this eliminates the TOCTOU gap between "should I process this?" and "processing it". |
 | `group-context.ts` | Group chat context management: in-memory message window (100 messages per channel, budget-capped to `maxContextChars`), member name cache (SQLite-backed, hourly API refresh), bidirectional uid↔name mapping, `@name` mention resolution via regex. Context string is built BEFORE the current message is cached to avoid duplication. |
 | `agent-bridge.ts` | Claude Agent SDK integration. Builds a structured prompt (`[Group context]` + `[Conversation history]` + `[Current message]`), calls `query()` with configured permissions/tools/model, yields text chunks as `AsyncIterable<string>`. Includes a hardcoded system prompt that instructs the agent to reject credential exfiltration attempts. **Knows nothing about Octo.** |
-| `stream-relay.ts` | Streaming output delivery. Typing indicator heartbeat (5s). Stream API path: `start` → throttled `send` (800ms minimum interval, full accumulated text each flush) → `end`. Falls back to plain `sendMessage` with intelligent splitting (paragraph > newline > space > hard cut, 3500 char segments) when the stream API is unavailable. Mutex guard prevents timer flush and loop flush from racing. |
+| `stream-relay.ts` | Output delivery. Typing indicator heartbeat (5s). Delivers agent output via plain `sendMessage` with intelligent splitting (paragraph > newline > space > hard cut, 3500 char segments). |
 | `index.ts` | Entry point orchestrator. Wires all modules in sequence: config → adapter → store → cleanup → group-context → stream-relay → gateway → router → message handler. The `handleMessage` function coordinates the full pipeline under the router's session lock. |
 
 ## Data Flow
@@ -184,20 +184,15 @@ Final Config object
 
 All 14 config fields are overridable via environment variables. See [README.md](./README.md) for the full reference table.
 
-## Streaming Output
+## Output Delivery
 
-The stream relay implements a two-tier delivery strategy:
+The stream relay delivers agent output via plain `sendMessage` with intelligent text splitting. Split priority: paragraph break (`\n\n`) > newline (`\n`) > space > hard cut. Maximum segment size: 3500 characters.
 
-**Primary: Stream API.** Uses Octo's `stream/start` → `stream/send` → `stream/end` endpoints. Each `send` transmits the full accumulated text (not incremental deltas), base64-encoded as a JSON payload. Flushes are throttled to ≥800ms intervals to avoid API flooding. A mutex guard (`isFlushing`) prevents concurrent flushes from a timer callback and the main iteration loop.
-
-**Fallback: Plain messages.** When the stream API returns an error (e.g. older Octo servers), the relay switches to `sendMessage` with intelligent text splitting. Split priority: paragraph break (`\n\n`) > newline (`\n`) > space > hard cut. Maximum segment size: 3500 characters.
-
-Both paths maintain a typing indicator heartbeat at 5-second intervals so the user sees activity during long agent runs.
+A typing indicator heartbeat runs at 5-second intervals so the user sees activity during long agent runs.
 
 ## Error Handling
 
 - **Agent errors:** Caught per-message, best-effort error reply sent to user, does not crash the process.
-- **Stream API failures:** Automatic fallback to plain messages, no user-visible error.
 - **WebSocket disconnects:** Exponential backoff reconnect (3s base, 60s max, ±25% jitter). Three consecutive rapid disconnects (<5s each) trigger token refresh instead of reconnect.
 - **Heartbeat failures:** Three consecutive API heartbeat failures trigger reconnect via token refresh.
 - **Token refresh:** 60-second cooldown prevents refresh storms. Re-registers bot and establishes new WebSocket connection.

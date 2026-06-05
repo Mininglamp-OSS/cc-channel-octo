@@ -10,9 +10,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('../octo/api.js', () => ({
   sendMessage: vi.fn().mockResolvedValue(undefined),
   sendTyping: vi.fn().mockResolvedValue(undefined),
-  streamStart: vi.fn().mockResolvedValue('stream-001'),
-  streamSend: vi.fn().mockResolvedValue(undefined),
-  streamEnd: vi.fn().mockResolvedValue(undefined),
   getGroupMembers: vi.fn().mockResolvedValue([]),
   sendHeartbeat: vi.fn().mockResolvedValue(undefined),
   registerBot: vi.fn().mockResolvedValue({
@@ -47,9 +44,6 @@ import { buildPrompt, queryAgent } from '../agent-bridge.js';
 import {
   sendMessage,
   sendTyping,
-  streamStart,
-  streamSend,
-  streamEnd,
 } from '../octo/api.js';
 import { ChannelType, MessageType } from '../octo/types.js';
 import type { BotMessage } from '../octo/types.js';
@@ -248,9 +242,8 @@ describe('E2E smoke tests', () => {
     const prompt = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
     expect(prompt).toContain('[Current message]\nHi there');
 
-    // Stream output was sent
-    expect(streamStart).toHaveBeenCalled();
-    expect(streamEnd).toHaveBeenCalled();
+    // Output was sent via sendMessage
+    expect(sendMessage).toHaveBeenCalled();
 
     // Session history stored
     const history = store.buildHistoryPrefix(USER_UID, 40);
@@ -267,8 +260,8 @@ describe('E2E smoke tests', () => {
     // queryAgent was called
     expect(queryAgent).toHaveBeenCalledTimes(1);
 
-    // Stream output was sent to group channel
-    expect(streamStart).toHaveBeenCalled();
+    // Output was sent to group channel
+    expect(sendMessage).toHaveBeenCalled();
 
     // Session history stored (group session key = channel_id:from_uid)
     const sessionKey = `${GROUP_CHANNEL}:${USER_UID}`;
@@ -286,8 +279,8 @@ describe('E2E smoke tests', () => {
     // queryAgent should NOT be called
     expect(queryAgent).not.toHaveBeenCalled();
 
-    // No stream output
-    expect(streamStart).not.toHaveBeenCalled();
+    // No output sent
+    expect(sendMessage).not.toHaveBeenCalled();
 
     // But message IS cached in group context
     const ctx = groupContext.buildContext(GROUP_CHANNEL);
@@ -370,7 +363,7 @@ describe('E2E smoke tests', () => {
     await simulateMessage(msg, config, store, router, groupContext, streamRelay);
 
     expect(queryAgent).not.toHaveBeenCalled();
-    expect(streamStart).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   // --- 8. Group context not duplicated in prompt ---
