@@ -201,6 +201,12 @@ This repo enforces three layers of automated checks:
 
 Coverage artifacts are uploaded per CI run (retained 14 days). No hard threshold yet — baselines are being established.
 
+Reviewers must follow [`docs/REVIEW_CHECKLIST.md`](./docs/REVIEW_CHECKLIST.md)
+on security-adjacent PRs. The 9-item checklist is distilled from Stage 6
+review-process failures and codifies hard-won rules like "reproduction test
+before APPROVED", "refresh reviews state before clicking APPROVED",
+"enumerate canonical-equivalent forms for attacker-input validation", etc.
+
 ### Project Structure
 
 ```

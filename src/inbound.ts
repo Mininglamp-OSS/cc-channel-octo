@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { MessagePayload, ForwardMessage, ForwardUser } from './octo/types.js';
 import { MessageType, RICH_TEXT_BLOCK_IMAGE, RICH_TEXT_BLOCK_TEXT, RICH_TEXT_IMAGE_PLACEHOLDER } from './octo/types.js';
+import { truncateUtf8ByBytes } from './file-inline-wrap.js';
 import { assertPublicUrl, fetchWithRedirectGuard } from './url-policy.js';
 
 /**
@@ -168,6 +169,24 @@ export function buildMediaUrl(relUrl?: string, apiUrl?: string): string | undefi
   }
   if (storagePath.startsWith('/')) return undefined;
 
+  // C1 follow-up (项 #3): encoded slash `%2F` defense-in-depth.
+  //
+  // WHATWG URL parser does NOT decode `%2F` in pathname (it stays literal in
+  // the path segment), so the WHATWG-canonical sandbox check below would
+  // accept `..%2f..%2finternal`. That's spec-correct — the bytes sent are
+  // /file/..%2f..%2finternal, a single path component under /file/.
+  //
+  // HOWEVER, some HTTP servers / proxies / CDNs (Apache with
+  // `AllowEncodedSlashes On`, certain reverse proxies) decode `%2F` as `/`
+  // server-side and THEN resolve dot-segments, escaping the sandbox.
+  //
+  // Production storage paths never contain `%2F` (legitimate filenames
+  // don't either — they'd be encoded as `%252F` at most). Cheap to reject
+  // outright as defense-in-depth against server-side decoding variance.
+  if (storagePath.includes('%2f') || storagePath.includes('%2F')) {
+    return undefined;
+  }
+
   const baseUrl = apiUrl?.replace(/\/+$/, '') ?? '';
   const candidate = `${baseUrl}/file/${storagePath}`;
 
@@ -202,21 +221,14 @@ function normalizeRichTextBlocks(content: unknown): Array<Record<string, unknown
 
 /**
  * Truncate a string to at most `maxBytes` UTF-8 bytes, appending a marker.
- * Shrinks by single chars so multi-byte (CJK / emoji) characters never get
- * split. Returns `{ text, truncated }` so callers can decide whether to
- * emit a notice.
+ *
+ * Delegates to `truncateUtf8ByBytes` (file-inline-wrap.ts) which uses an O(1)
+ * walk-back algorithm — fixes the previous O(n) per-char while loop that was
+ * quadratic for very long CJK input (齐静春 PR#41 non-blocking review note).
  */
 function truncateByBytes(input: string, maxBytes: number, marker: string): { text: string; truncated: boolean } {
-  if (Buffer.byteLength(input, 'utf-8') <= maxBytes) {
-    return { text: input, truncated: false };
-  }
-  // Generous upfront slice, then trim by bytes (covers ASCII fast path and
-  // CJK without quadratic scan over an unbounded string).
-  let truncated = input.slice(0, maxBytes);
-  while (Buffer.byteLength(truncated, 'utf-8') > maxBytes) {
-    truncated = truncated.slice(0, -1);
-  }
-  return { text: truncated + marker, truncated: true };
+  const { truncated: shortened, wasTruncated } = truncateUtf8ByBytes(input, maxBytes);
+  return wasTruncated ? { text: shortened + marker, truncated: true } : { text: shortened, truncated: false };
 }
 
 function buildRichTextPlain(blocks: Array<Record<string, unknown>>): string {

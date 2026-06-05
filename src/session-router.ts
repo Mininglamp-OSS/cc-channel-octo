@@ -14,23 +14,22 @@ export interface RouteResult {
   /** User content with leading @botname stripped (for LLM input). */
   cleanContent?: string;
   /**
-   * When shouldProcess is false, why the message was rejected. Allows the
-   * caller to skip downstream side-effects (group context caching, etc.)
-   * for messages that should not influence future turns.
+   * Reason for rejection when shouldProcess is false.
+   *
+   * Only emitted for cases where the caller should treat the message as
+   * 'do-not-cache-in-group-context' (rate-limited or oversized — these are
+   * actively-rejected messages from a flooder). Silent-drop cases (blocked
+   * bot, self message, system event, not mentioned) leave rejectionReason
+   * undefined: those messages are legitimate group chatter the agent
+   * should still see in [Group context].
    *
    * C1 / P2.5 (Stage 6): added to fix the channel where rate-limited or
-   * oversized messages still polluted the group context cache — a flooder
-   * could be limited at the router but still inject text the LLM would see
-   * in the next legitimate turn.
+   * oversized messages still polluted the group context cache. C1 follow-up
+   * cleanup (齐静春 PR#41 review): trimmed to the 2 reasons actually emitted
+   * so the type doesn't suggest a wider contract than the code provides.
+   * Add more reasons here when corresponding emit sites land.
    */
-  rejectionReason?:
-    | 'blocked_bot'
-    | 'self_message'
-    | 'system_event'
-    | 'rate_limited'
-    | 'global_rate_limited'
-    | 'oversized'
-    | 'not_mentioned';
+  rejectionReason?: 'rate_limited' | 'oversized';
 }
 
 interface TokenBucket {
