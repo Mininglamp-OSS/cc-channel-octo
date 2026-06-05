@@ -24,6 +24,10 @@ export class GroupContext {
   // Per-channel member maps to avoid cross-group name collisions
   private readonly memberMapByChannel = new Map<string, Map<string, string>>(); // channelId → uid → name
   private readonly nameToUidByChannel = new Map<string, Map<string, string>>(); // channelId → name → uid
+  // G23: per-channel robot flag map (channelId → uid → isRobot).
+  // Populated from refreshMembers; stored for future routing integrations
+  // (e.g. 免@ gate that should treat bot members differently).
+  private readonly robotFlags = new Map<string, Map<string, boolean>>();
   private readonly lastRefresh = new Map<string, number>();
 
   private readonly adapter: DbAdapter;
@@ -161,6 +165,15 @@ export class GroupContext {
         }
         memberMap.set(m.uid, m.name);
         nameMap.set(m.name, m.uid);
+        // G23: Track server-authoritative robot flag for future 免@ gate.
+        if (m.robot !== undefined) {
+          let rfMap = this.robotFlags.get(channelId);
+          if (!rfMap) {
+            rfMap = new Map();
+            this.robotFlags.set(channelId, rfMap);
+          }
+          rfMap.set(m.uid, m.robot === 1);
+        }
         try {
           this.upsertMember.run(channelId, m.uid, m.name, now);
         } catch (err) {
@@ -244,6 +257,11 @@ export class GroupContext {
 
   getName(uid: string, channelId: string): string | undefined {
     return this.getMemberMap(channelId).get(uid);
+  }
+
+  /** G23: Check the server-authoritative robot flag for a group member. */
+  isRobot(channelId: string, uid: string): boolean | undefined {
+    return this.robotFlags.get(channelId)?.get(uid);
   }
 
   loadMembersFromDb(channelId: string): void {

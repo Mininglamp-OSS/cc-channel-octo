@@ -19,6 +19,8 @@ export type MessageHandler = (msg: BotMessage) => void;
 export class OctoGateway {
   private socket: WKSocket | null = null;
   private robotId = '';
+  // G18: owner_uid from registerBot; used by SessionRouter for future permission model.
+  private _ownerUid = '';
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private lockFilePath: string;
   private onMessage: MessageHandler | null = null;
@@ -41,6 +43,11 @@ export class OctoGateway {
 
   get botId(): string {
     return this.robotId;
+  }
+
+  /** G18: owner_uid returned by registerBot. Empty string until start() succeeds. */
+  get ownerUid(): string {
+    return this._ownerUid;
   }
 
   /** Set the message handler. Called for every incoming BotMessage. */
@@ -176,6 +183,7 @@ export class OctoGateway {
     });
 
     this.robotId = reg.robot_id;
+    this._ownerUid = reg.owner_uid;
     console.log(`Bot registered: robot_id=${reg.robot_id}`);
 
     this.socket = this.createSocket(reg.ws_url, reg.robot_id, reg.im_token);
@@ -223,6 +231,7 @@ export class OctoGateway {
       });
 
       this.robotId = reg.robot_id;
+      this._ownerUid = reg.owner_uid;
       console.log('Token refreshed, reconnecting...');
 
       this.socket = this.createSocket(reg.ws_url, reg.robot_id, reg.im_token);

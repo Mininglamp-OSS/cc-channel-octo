@@ -31,13 +31,29 @@ const MAX_CONTENT_BYTES = 32_768; // 32 KB
 export class SessionRouter {
   private readonly config: Config;
   private readonly robotId: string;
+  /** G18: owner_uid from registerBot. Stored for future permission model. */
+  private readonly ownerUid: string;
   private readonly inboundQueues = new Map<string, Promise<void>>();
   private readonly tokenBuckets = new Map<string, TokenBucket>();
+  /** G20: per-user buckets keyed by from_uid alone (cross-channel rate limit). */
+  private readonly userBuckets = new Map<string, TokenBucket>();
   private globalBucket: TokenBucket | null = null;
+  /**
+   * G14: UIDs known to be bots. Initialized with this bot's robotId; can be
+   * extended via registerKnownBot() for future multi-bot deployments.
+   */
+  private readonly knownBotUids = new Set<string>();
 
-  constructor(config: Config, robotId: string) {
+  constructor(config: Config, robotId: string, ownerUid = '') {
     this.config = config;
     this.robotId = robotId;
+    this.ownerUid = ownerUid;
+    this.knownBotUids.add(robotId);
+  }
+
+  /** G14: register another known bot uid (future multi-bot support). */
+  registerKnownBot(uid: string): void {
+    if (uid) this.knownBotUids.add(uid);
   }
 
   /**
@@ -98,6 +114,23 @@ export class SessionRouter {
     return this.config.botBlocklist?.includes(uid) ?? false;
   }
 
+  /**
+   * G14: Heuristic bot detection. Octo bot uids conventionally end in `_bot`.
+   * This is NOT a perfect check — a human could pick that suffix — but it
+   * catches the common case where a bot DMs another bot and triggers an
+   * uncontrolled response loop. Bots whitelisted in `allowedBotUids` bypass
+   * this gate.
+   */
+  private looksLikeBot(uid: string): boolean {
+    if (this.knownBotUids.has(uid)) return true;
+    if (uid.endsWith('_bot')) return true;
+    return false;
+  }
+
+  private isAllowedBot(uid: string): boolean {
+    return this.config.allowedBotUids?.includes(uid) ?? false;
+  }
+
   private isGroupLike(channelType: ChannelType | undefined): boolean {
     return channelType === ChannelType.Group || channelType === ChannelType.CommunityTopic;
   }
@@ -120,10 +153,24 @@ export class SessionRouter {
       return null;
     }
 
+    // G14: DM from anything that looks like a bot — silently drop unless
+    // explicitly whitelisted. Prevents bot↔bot reply loops.
+    if (
+      msg.channel_type === ChannelType.DM &&
+      this.looksLikeBot(msg.from_uid) &&
+      !this.isAllowedBot(msg.from_uid)
+    ) {
+      return null;
+    }
+
     // Group: drop messages from other bots (blocklisted or self) entirely.
     if (this.isGroupLike(msg.channel_type) && this.isBlockedBot(msg.from_uid)) {
       return null;
     }
+
+    // G14: Group messages from bot-looking uids — only respond if explicitly
+    // @-mentioned. The mention gate below already enforces this, but bots in
+    // the blocklist (above) get hard-dropped without even checking mentions.
 
     // Group mention gate.
     if (this.isGroupLike(msg.channel_type) && !this.isMentioned(msg)) {
@@ -135,11 +182,13 @@ export class SessionRouter {
 
     // Rate limit check BEFORE non-text check — prevents DM spam of non-text
     // messages from bypassing rate limiting entirely.
-    if (!this.checkGlobalRateLimit() || !this.checkRateLimit(key)) {
-      // Debounce: only notify once per rate-limit window to avoid reply spam.
-      const bucket = this.tokenBuckets.get(key);
-      if (bucket && !bucket.notified) {
-        bucket.notified = true;
+    // G20 fix: peek all three buckets without consuming; only consume on full
+    // pass. On block, attach notified state to the actual blocking bucket so
+    // the debounce reply doesn't spam when a different bucket has tokens.
+    const blocker = this.checkAllRateLimits(key, msg.from_uid);
+    if (blocker) {
+      if (!blocker.notified) {
+        blocker.notified = true;
         await this.replySafe(msg, '请稍后再试');
       }
       return { sessionKey: key, shouldProcess: false, message: msg };
@@ -161,45 +210,76 @@ export class SessionRouter {
     return { sessionKey: key, shouldProcess: true, message: msg };
   }
 
-  private checkRateLimit(key: string): boolean {
+  /**
+   * G20 fix: Check all three rate limits (global, per-session, per-user) in
+   * one pass. Refills all three buckets, then either consumes 1 token from
+   * each (when all pass) or returns the blocking bucket (when any fails).
+   *
+   * Returns null on success (tokens consumed), or the blocking bucket on
+   * failure (no tokens consumed). The caller uses the blocking bucket's
+   * `notified` flag to debounce the "请稍后再试" reply per-bucket, so a user
+   * blocked by per-user limit doesn't get spammed when their per-session
+   * bucket still has tokens.
+   */
+  private checkAllRateLimits(key: string, uid: string): TokenBucket | null {
     this.cleanStaleBuckets();
 
     const now = Date.now();
     const maxPerMinute = this.config.rateLimit.maxPerMinute;
-    let bucket = this.tokenBuckets.get(key);
-    if (!bucket) {
-      bucket = { tokens: maxPerMinute, lastRefill: now, notified: false };
-      this.tokenBuckets.set(key, bucket);
-    }
-    const elapsed = now - bucket.lastRefill;
-    const refill = (elapsed / 60_000) * maxPerMinute;
-    bucket.tokens = Math.min(maxPerMinute, bucket.tokens + refill);
-    bucket.lastRefill = now;
+    const globalMax = maxPerMinute * GLOBAL_RATE_MULTIPLIER;
 
-    // Reset notification flag when tokens have been refilled above threshold
-    if (bucket.tokens >= 1) {
-      bucket.notified = false;
-    }
+    const globalBucket = this.getOrCreateGlobalBucket(now, globalMax);
+    const sessionBucket = this.getOrCreateBucket(this.tokenBuckets, key, now, maxPerMinute);
+    const userBucket = this.getOrCreateBucket(this.userBuckets, uid, now, maxPerMinute);
 
-    if (bucket.tokens < 1) return false;
-    bucket.tokens -= 1;
-    return true;
+    this.refillBucket(globalBucket, now, globalMax);
+    this.refillBucket(sessionBucket, now, maxPerMinute);
+    this.refillBucket(userBucket, now, maxPerMinute);
+
+    // Check in priority order: global → per-user → per-session.
+    // Per-user before per-session so a user blocked across groups gets a
+    // consistent debounce target instead of one per session bucket.
+    if (globalBucket.tokens < 1) return globalBucket;
+    if (userBucket.tokens < 1) return userBucket;
+    if (sessionBucket.tokens < 1) return sessionBucket;
+
+    // All pass — consume one token from each, and clear notified flags so
+    // future blocks get a fresh debounce window.
+    globalBucket.tokens -= 1;
+    sessionBucket.tokens -= 1;
+    userBucket.tokens -= 1;
+    globalBucket.notified = false;
+    sessionBucket.notified = false;
+    userBucket.notified = false;
+    return null;
   }
 
-  /** Global rate limit across all sessions (10x per-session limit). */
-  private checkGlobalRateLimit(): boolean {
-    const now = Date.now();
-    const globalMax = this.config.rateLimit.maxPerMinute * GLOBAL_RATE_MULTIPLIER;
-    if (!this.globalBucket) {
-      this.globalBucket = { tokens: globalMax, lastRefill: now, notified: false };
+  private getOrCreateBucket(
+    map: Map<string, TokenBucket>,
+    key: string,
+    now: number,
+    capacity: number,
+  ): TokenBucket {
+    let bucket = map.get(key);
+    if (!bucket) {
+      bucket = { tokens: capacity, lastRefill: now, notified: false };
+      map.set(key, bucket);
     }
-    const elapsed = now - this.globalBucket.lastRefill;
-    const refill = (elapsed / 60_000) * globalMax;
-    this.globalBucket.tokens = Math.min(globalMax, this.globalBucket.tokens + refill);
-    this.globalBucket.lastRefill = now;
-    if (this.globalBucket.tokens < 1) return false;
-    this.globalBucket.tokens -= 1;
-    return true;
+    return bucket;
+  }
+
+  private getOrCreateGlobalBucket(now: number, capacity: number): TokenBucket {
+    if (!this.globalBucket) {
+      this.globalBucket = { tokens: capacity, lastRefill: now, notified: false };
+    }
+    return this.globalBucket;
+  }
+
+  private refillBucket(bucket: TokenBucket, now: number, capacity: number): void {
+    const elapsed = now - bucket.lastRefill;
+    const refill = (elapsed / 60_000) * capacity;
+    bucket.tokens = Math.min(capacity, bucket.tokens + refill);
+    bucket.lastRefill = now;
   }
 
   /** Remove token buckets that haven't been used in 5 minutes. */
@@ -208,6 +288,11 @@ export class SessionRouter {
     for (const [key, bucket] of this.tokenBuckets) {
       if (now - bucket.lastRefill > BUCKET_STALE_MS) {
         this.tokenBuckets.delete(key);
+      }
+    }
+    for (const [uid, bucket] of this.userBuckets) {
+      if (now - bucket.lastRefill > BUCKET_STALE_MS) {
+        this.userBuckets.delete(uid);
       }
     }
   }
