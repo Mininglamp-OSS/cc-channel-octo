@@ -125,7 +125,94 @@ export function buildSystemPrompt(
     const sanitized = sanitizeForSystemPrompt(historyPrefix);
     parts.push(`[Conversation history]\n${sanitized}`);
   }
-  return parts.join('\n\n');
+  const assembled = parts.join('\n\n');
+  // D1/P1-3 (齐 P1-3): cap the assembled system prompt to prevent
+  // SDK context_length_exceeded errors. History/groupContext can grow
+  // unbounded with long messages × historyLimit (default 40) × maxContextChars
+  // (default 6000). 100 KiB is comfortably above any realistic legitimate
+  // prompt while staying well under model context limits.
+  if (assembled.length <= MAX_SYSTEM_PROMPT_CHARS) {
+    return assembled;
+  }
+  return truncateSystemPrompt(parts);
+}
+
+/**
+ * Maximum assembled system prompt length in characters.
+ * Beyond this, history is truncated (keeping the most recent entries)
+ * to fit. Security prefix + custom prompt are always preserved.
+ */
+const MAX_SYSTEM_PROMPT_CHARS = 100 * 1024;
+
+/**
+ * Best-effort truncation: keep SECURITY_PROMPT_PREFIX + customPrompt intact,
+ * then preserve the tail of history (most recent) within the remaining budget.
+ * GroupContext is preserved up to a fixed share; the rest of the budget goes
+ * to history.
+ */
+function truncateSystemPrompt(parts: string[]): string {
+  // parts layout (some may be absent): [securityPrefix, customPrompt?,
+  // "[Group context]\n..."?, "[Conversation history]\n..."?]
+  const securityPrefix = parts[0];
+  // Reserved for non-truncated sections.
+  const reservedNonHistory: string[] = [securityPrefix];
+  let used = securityPrefix.length + 2; // +2 for join "\n\n"
+  let groupSection: string | undefined;
+  let historySection: string | undefined;
+  // Pull customPrompt + groupContext into reserved up-front so they can be
+  // budgeted before we drop history lines.
+  for (let i = 1; i < parts.length; i++) {
+    const p = parts[i];
+    if (p.startsWith('[Group context]\n')) {
+      groupSection = p;
+    } else if (p.startsWith('[Conversation history]\n')) {
+      historySection = p;
+    } else {
+      reservedNonHistory.push(p);
+      used += p.length + 2;
+    }
+  }
+  // Group context: keep up to 20 KiB, drop oldest lines if needed.
+  const groupBudget = 20 * 1024;
+  if (groupSection) {
+    if (groupSection.length <= groupBudget) {
+      reservedNonHistory.push(groupSection);
+      used += groupSection.length + 2;
+    } else {
+      const header = '[Group context]\n';
+      const body = groupSection.substring(header.length);
+      const lines = body.split('\n');
+      let kept: string[] = [];
+      let keptLen = 0;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const candidate = lines[i].length + 1;
+        if (keptLen + candidate > groupBudget) break;
+        kept.unshift(lines[i]);
+        keptLen += candidate;
+      }
+      const truncatedGroup = header + '[older messages dropped]\n' + kept.join('\n');
+      reservedNonHistory.push(truncatedGroup);
+      used += truncatedGroup.length + 2;
+    }
+  }
+  // History: take remaining budget for the tail of the section.
+  if (historySection) {
+    const header = '[Conversation history]\n';
+    const body = historySection.substring(header.length);
+    const remaining = Math.max(1024, MAX_SYSTEM_PROMPT_CHARS - used - header.length - 64);
+    const lines = body.split('\n');
+    let kept: string[] = [];
+    let keptLen = 0;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const candidate = lines[i].length + 1;
+      if (keptLen + candidate > remaining) break;
+      kept.unshift(lines[i]);
+      keptLen += candidate;
+    }
+    const truncatedHistory = header + '[older turns dropped]\n' + kept.join('\n');
+    reservedNonHistory.push(truncatedHistory);
+  }
+  return reservedNonHistory.join('\n\n');
 }
 
 /**
@@ -197,7 +284,11 @@ export async function* queryAgent(
   try {
     for await (const message of stream) {
       if (message.type === 'assistant') {
-        for (const block of message.message.content) {
+        // D1/P1-4 (齐 P1-4): guard against malformed SDK output — if the
+        // assistant message lacks `.message` or `.message.content`, treat as
+        // empty rather than throwing TypeError into the async generator.
+        const content = message.message?.content ?? [];
+        for (const block of content) {
           if (block.type === 'text' && block.text) {
             yield block.text;
           }
