@@ -20,6 +20,11 @@ import type { BotMessage } from './octo/types.js';
 import { join } from 'node:path';
 
 async function main(): Promise<void> {
+  // --- Q8: Global unhandled rejection handler ---
+  process.on('unhandledRejection', (reason) => {
+    console.error('[cc-channel-octo] Unhandled rejection:', reason instanceof Error ? reason.message : reason);
+  });
+
   // --- Config ---
   const config = loadConfig();
   console.log(
@@ -59,9 +64,27 @@ async function main(): Promise<void> {
   // --- Session router ---
   const router = new SessionRouter(config, gateway.botId);
 
+  // --- Active handler tracking (Q6: in-flight drain on shutdown) ---
+  const activeHandlers = new Set<Promise<void>>();
+
   // --- Message handler ---
   gateway.setMessageHandler((msg: BotMessage) => {
-    void handleMessage(msg, config, store, router, groupContext, streamRelay);
+    if (gateway.draining) return; // Extra guard: drop during shutdown
+    const p = handleMessage(msg, config, store, router, groupContext, streamRelay)
+      .catch((err) => {
+        // Q8: catch unhandled rejections from fire-and-forget handlers
+        console.error('[cc-channel-octo] Unhandled message handler error:', err instanceof Error ? err.message : err);
+      })
+      .finally(() => {
+        activeHandlers.delete(p);
+      });
+    activeHandlers.add(p);
+  });
+
+  // --- Q6 + Q7: Shutdown callback (drain handlers + close store) ---
+  gateway.setShutdownCallback(async () => {
+    await gateway.stop(activeHandlers);
+    store.close(); // Q7: explicitly close SQLite (WAL checkpoint)
   });
 
   console.log('[cc-channel-octo] Ready — listening for messages');
@@ -166,6 +189,6 @@ async function handleMessage(
 }
 
 main().catch((err) => {
-  console.error('[cc-channel-octo] Fatal error:', err);
+  console.error('[cc-channel-octo] Fatal error:', err instanceof Error ? err.message : err);
   process.exit(1);
 });
