@@ -529,4 +529,153 @@ describe('sendRichTextCombined', () => {
     expect(result.imageCount).toBe(0);
     expect(result.failedMedia).toHaveLength(1);
   });
+
+  // ─── C2 P1-3: bounded parallelism + per-message image cap ──────────────
+  //
+  // Without bounds, LLM emitting `![](data:...)` 100× would spawn 100 parallel
+  // COS uploads (fd / memory exhaustion). Fix: cap image count to
+  // RICHTEXT_MAX_IMAGES=20, run uploads with worker pool of
+  // RICHTEXT_MAX_CONCURRENT_UPLOADS=4.
+  it('P1-3: caps RichText image count to RICHTEXT_MAX_IMAGES (20)', async () => {
+    // Build 25 markdown images. Cap should drop refs >=20 into failedMedia.
+    // Mock credentials + send for each upload that proceeds.
+    const png = Buffer.alloc(33);
+    png[0] = 0x89; png[1] = 0x50; png[2] = 0x4E; png[3] = 0x47;
+    png[4] = 0x0D; png[5] = 0x0A; png[6] = 0x1A; png[7] = 0x0A;
+    png.writeUInt32BE(13, 8);
+    png.write('IHDR', 12);
+    png.writeUInt32BE(8, 16);
+    png.writeUInt32BE(8, 20);
+    const dataUri = `data:image/png;base64,${png.toString('base64')}`;
+
+    // Provide getUploadCredentials responses for 20 uploads (cap), plus 1 final
+    // sendRichTextMessage. Total expected fetch calls = 21.
+    for (let i = 0; i < 20; i++) {
+      fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+        bucket: 'b', region: 'r', key: `path/img${i}.png`,
+        credentials: { tmpSecretId: 'i', tmpSecretKey: 'k', sessionToken: 't' },
+        startTime: 1, expiredTime: 4600,
+        cdnBaseUrl: 'https://cdn.example.com',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    }
+    cosPutObjectMock.mockImplementation((_params, cb) => {
+      cb(null, { Location: 'b.cos.r.myqcloud.com/path/img.png' });
+    });
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      message_id: 'rt1', client_msg_no: 'c1', message_seq: 1,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    const text = Array.from({ length: 25 }, (_, i) => `![img${i}](${dataUri})`).join(' ');
+    const result = await sendRichTextCombined({
+      apiUrl: 'https://test.example.com',
+      botToken: 'bf_test',
+      channelId: 'ch1',
+      channelType: ChannelType.Group,
+      text,
+    });
+
+    // 5 images dropped to failedMedia with "cap exceeded" message.
+    expect(result.failedMedia.length).toBe(5);
+    for (const fail of result.failedMedia) {
+      expect(fail.error).toMatch(/cap exceeded/);
+    }
+    // 20 uploads attempted, all succeeded.
+    expect(cosPutObjectMock).toHaveBeenCalledTimes(20);
+    expect(result.imageCount).toBe(20);
+  });
+
+  // ─── C2 P1-4: chunked transfer bypasses HEAD size check ───────────────
+  //
+  // Without the stream-side size limiter, a server returning chunked encoding
+  // (no Content-Length) lets the download write to /tmp until disk fills. Fix:
+  // Transform stream counter rejects past MAX_UPLOAD_SIZE.
+  it('P1-4: chunked transfer with no Content-Length is bounded by stream size limit', async () => {
+    // Simulate chunked transfer: HEAD response has no content-length header,
+    // GET body emits 600MB worth of data.
+    fetchMock.mockResolvedValueOnce(new Response(null, {
+      status: 200,
+      // No 'content-length' header — typical of chunked transfer.
+    }));
+
+    // Build a ReadableStream that emits 1MB chunks until 600MB (exceeds 500MB cap)
+    const CHUNK_SIZE = 1024 * 1024;
+    const TOTAL_CHUNKS = 600;
+    let emitted = 0;
+    const stream = new ReadableStream({
+      pull(controller) {
+        if (emitted >= TOTAL_CHUNKS) { controller.close(); return; }
+        controller.enqueue(new Uint8Array(CHUNK_SIZE));
+        emitted++;
+      },
+    });
+    fetchMock.mockResolvedValueOnce(new Response(stream, {
+      status: 200,
+      headers: { 'Content-Type': 'application/octet-stream' },
+    }));
+
+    await expect(uploadAndSendMedia({
+      apiUrl: 'https://test.example.com',
+      botToken: 'bf_test',
+      channelId: 'ch1',
+      channelType: ChannelType.Group,
+      mediaUrl: 'https://example.com/chunked-payload.bin',
+    })).rejects.toThrow(/exceeded MAX_UPLOAD_SIZE/);
+  });
+
+  // ─── C2 P1-5: SVG XSS — SVG must NOT be sent as inline Image ───────────
+  //
+  // SVG can embed <script>/<foreignObject> which may execute if an IM client
+  // renders the image inline. Fix: route SVG to File type (forces download).
+  it('P1-5: SVG MIME type is sent as File not Image', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      bucket: 'b', region: 'r', key: 'path/x.svg',
+      credentials: { tmpSecretId: 'i', tmpSecretKey: 'k', sessionToken: 't' },
+      startTime: 1, expiredTime: 4600,
+      cdnBaseUrl: 'https://cdn.example.com',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    cosPutObjectMock.mockImplementation((_params, cb) => {
+      cb(null, { Location: 'b.cos.r.myqcloud.com/path/x.svg' });
+    });
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      message_id: 'm1', client_msg_no: 'c1', message_seq: 1,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    const svgPayload = '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>';
+    const dataUri = `data:image/svg+xml;base64,${Buffer.from(svgPayload).toString('base64')}`;
+
+    await uploadAndSendMedia({
+      apiUrl: 'https://test.example.com',
+      botToken: 'bf_test',
+      channelId: 'ch1',
+      channelType: ChannelType.Group,
+      mediaUrl: dataUri,
+    });
+
+    // Verify SVG was sent as File (type 8), NOT Image (type 2).
+    const sendCall = fetchMock.mock.calls[1];
+    const sendBody = JSON.parse(sendCall[1].body as string);
+    expect(sendBody.payload.type).toBe(8); // MessageType.File
+    expect(sendBody.payload.width).toBeUndefined();
+    expect(sendBody.payload.height).toBeUndefined();
+  });
+
+  it('P1-5: SVG in RichText markdown is rejected (not uploaded as image block)', async () => {
+    // RichText image blocks render inline too — SVG must be rejected via the
+    // isSafeInlineImage gate so failedMedia records it and [alt] falls back.
+    const svgPayload = '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>';
+    const dataUri = `data:image/svg+xml;base64,${Buffer.from(svgPayload).toString('base64')}`;
+
+    const result = await sendRichTextCombined({
+      apiUrl: 'https://test.example.com',
+      botToken: 'bf_test',
+      channelId: 'ch1',
+      channelType: ChannelType.Group,
+      text: `header ![svg](${dataUri}) footer`,
+    });
+
+    expect(result.richText).toBe(false); // no images uploaded → caller falls back to plain
+    expect(result.failedMedia).toHaveLength(1);
+    expect(result.failedMedia[0].error).toMatch(/Not a safe inline image|svg/i);
+    expect(cosPutObjectMock).not.toHaveBeenCalled();
+  });
 });

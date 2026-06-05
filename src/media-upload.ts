@@ -15,7 +15,7 @@ import { mkdir, open, unlink } from "node:fs/promises";
 import { createReadStream, createWriteStream, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { pipeline } from "node:stream/promises";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import COS from "cos-nodejs-sdk-v5";
 
 import {
@@ -37,6 +37,13 @@ import { assertPublicUrl, fetchWithRedirectGuard } from "./url-policy.js";
 
 const MAX_UPLOAD_SIZE = 500 * 1024 * 1024; // 500 MB
 const UPLOAD_TEMP_DIR = path.join("/tmp", "cc-octo-upload");
+
+/** P1-3: Cap on concurrent COS uploads in sendRichTextCombined. */
+const RICHTEXT_MAX_CONCURRENT_UPLOADS = 4;
+
+/** P1-3: Cap on inline image count per RichText reply. Excess refs are dropped
+ *  to plain `[alt]` text so the LLM can't trigger unbounded fanout. */
+const RICHTEXT_MAX_IMAGES = 20;
 
 // SSRF defense lives in url-policy.ts (assertPublicUrl + fetchWithRedirectGuard).
 
@@ -131,6 +138,28 @@ export async function parseImageDimensionsFromFile(
   } catch { /* ignore read/parse errors */ }
   finally { await fh?.close(); }
   return null;
+}
+
+// ─── Image rendering policy (P1-5: SVG XSS) ──────────────────────
+
+/**
+ * Image MIME types that may be safely rendered inline by an IM client.
+ *
+ * SVG is intentionally EXCLUDED: SVG documents can embed `<script>`,
+ * `<foreignObject>`, and other active content. If an IM client renders an
+ * inline SVG (Image-typed message) it may execute attacker-supplied JS in the
+ * client context. The LLM is bypassPermissions-trusted but its output is still
+ * shaped by IM user input, so an attacker can ask the LLM to fetch and post a
+ * crafted SVG. Treating SVG as File forces a download instead of inline render.
+ *
+ * Other concerns (TIFF, HEIC, JPEG XL) have no known active-content vectors
+ * but are also not in inferContentType's MIME map, so they fall to
+ * `application/octet-stream` and route to File anyway.
+ */
+export function isSafeInlineImage(contentType: string): boolean {
+  if (!contentType.startsWith("image/")) return false;
+  if (contentType === "image/svg+xml") return false;
+  return true;
 }
 
 // ─── Content-Disposition (for video/audio inline, file attachment) ─────────
@@ -278,8 +307,23 @@ async function downloadToTempFile(
   if (!body) throw new Error(`No response body from ${url}`);
   const nodeStream = Readable.fromWeb(body as Parameters<typeof Readable.fromWeb>[0]);
   const ws = createWriteStream(tempPath);
+  // P1-4: chunked transfer (no Content-Length) bypasses the HEAD size check.
+  // Enforce MAX_UPLOAD_SIZE during the stream so the temp file can't grow
+  // unbounded even when the server omits Content-Length or lies about it.
+  let bytesSeen = 0;
+  const sizeLimiter = new Transform({
+    transform(chunk: Buffer, _enc, cb) {
+      bytesSeen += chunk.length;
+      if (bytesSeen > MAX_UPLOAD_SIZE) {
+        return cb(new Error(
+          `Stream exceeded MAX_UPLOAD_SIZE (${MAX_UPLOAD_SIZE} bytes) — aborted`,
+        ));
+      }
+      cb(null, chunk);
+    },
+  });
   try {
-    await pipeline(nodeStream, ws);
+    await pipeline(nodeStream, sizeLimiter, ws);
   } catch (err) {
     await unlink(tempPath).catch(() => {});
     throw err;
@@ -399,7 +443,7 @@ export async function uploadAndSendMedia(params: {
       filename: resolved.filename,
     });
 
-    const msgType = resolved.contentType.startsWith("image/")
+    const msgType = isSafeInlineImage(resolved.contentType)
       ? MessageType.Image
       : MessageType.File;
 
@@ -480,8 +524,10 @@ async function uploadImageForRichText(
 ): Promise<UploadedImage> {
   const resolved = await resolveMedia(mediaUrl, undefined, signal);
   try {
-    if (!resolved.contentType.startsWith("image/")) {
-      throw new Error(`Not an image: ${resolved.contentType}`);
+    // P1-5: Reject SVG and other non-safe-inline images for RichText too
+    // (RichText image blocks are also rendered inline).
+    if (!isSafeInlineImage(resolved.contentType)) {
+      throw new Error(`Not a safe inline image: ${resolved.contentType}`);
     }
     const creds = await getUploadCredentials({
       apiUrl, botToken, filename: resolved.filename, signal,
@@ -549,21 +595,45 @@ export async function sendRichTextCombined(params: {
     return { imageCount: 0, failedMedia: [], richText: false };
   }
 
+  // P1-3: Cap inline image count. Refs past the cap are recorded as failed so
+  // they fall back inline as `[alt]` text in the assembled blocks. Defends
+  // against an LLM (or prompt-injected output) emitting 100+ image refs that
+  // would otherwise spawn 100+ COS uploads in parallel.
+  const overflowRefs: MarkdownImageRef[] =
+    imageRefs.length > RICHTEXT_MAX_IMAGES ? imageRefs.slice(RICHTEXT_MAX_IMAGES) : [];
+
   const uploaded: Map<number, UploadedImage> = new Map(); // ref index → uploaded
   const failedMedia: Array<{ url: string; error: string }> = [];
 
-  // Upload images in parallel (bounded — N typically small for one reply).
-  await Promise.all(imageRefs.map(async (ref, idx) => {
-    try {
-      const up = await uploadImageForRichText(
-        params.apiUrl, params.botToken, ref.url, params.signal,
-      );
-      uploaded.set(idx, up);
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      failedMedia.push({ url: ref.url, error: errMsg });
+  // Pre-fail overflow refs so the block assembly preserves their `[alt]` text.
+  for (const ref of overflowRefs) {
+    failedMedia.push({
+      url: ref.url,
+      error: `RichText image cap exceeded (max ${RICHTEXT_MAX_IMAGES} per message)`,
+    });
+  }
+
+  // P1-3: bounded-parallelism queue (concurrency = RICHTEXT_MAX_CONCURRENT_UPLOADS).
+  // Promise.all over N items would launch all N COS uploads at once — fd/memory
+  // exhaustion risk under hostile input.
+  const work = imageRefs.slice(0, RICHTEXT_MAX_IMAGES).map((ref, idx) => ({ ref, idx }));
+  let workCursor = 0;
+  async function worker(): Promise<void> {
+    while (workCursor < work.length) {
+      const slot = work[workCursor++];
+      try {
+        const up = await uploadImageForRichText(
+          params.apiUrl, params.botToken, slot.ref.url, params.signal,
+        );
+        uploaded.set(slot.idx, up);
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        failedMedia.push({ url: slot.ref.url, error: errMsg });
+      }
     }
-  }));
+  }
+  const workerCount = Math.min(RICHTEXT_MAX_CONCURRENT_UPLOADS, work.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
   if (uploaded.size === 0) {
     // All images failed — caller should fall back to plain text.
