@@ -44,6 +44,7 @@ import { GroupContext } from '../group-context.js';
 import { StreamRelay } from '../stream-relay.js';
 import { createAdapter, type DbAdapter } from '../db-adapter.js';
 import { queryAgent } from '../agent-bridge.js';
+import { resolveContent } from '../inbound.js';
 import {
   sendMessage,
   sendReadReceipt,
@@ -164,6 +165,10 @@ async function simulateMessage(
 
     const userContent = msg.payload.content ?? '';
 
+    // G1: resolve non-text payloads through inbound.resolveContent.
+    const resolved = resolveContent(msg.payload, config.apiUrl);
+    const bodyText = result.cleanContent ?? resolved.text;
+
     // G3: Extract quoted/replied message content for LLM context (truncated to 4KB).
     let quotePrefix = '';
     const replyData = msg.payload?.reply;
@@ -184,7 +189,7 @@ async function simulateMessage(
         quotePrefix = `[Quoted message from ${replyFrom}]: ${truncated}\n---\n`;
       }
     }
-    const userContentForLLM = quotePrefix + (result.cleanContent ?? userContent);
+    const userContentForLLM = quotePrefix + bodyText;
 
     const historyPrefix = store.buildSegmentedHistoryPrefix(sessionKey, config.context.historyLimit);
     store.appendUser(sessionKey, userContent, msg.message_seq);
@@ -343,19 +348,23 @@ describe('E2E smoke tests', () => {
     expect(ctx).toContain('TestUser：Just chatting');
   });
 
-  // --- 4. Non-text message gets "unsupported" reply ---
+  // --- 4. Non-text message: G1 routes it through to the agent ---
 
-  it('Non-text DM message: replies with unsupported notice', async () => {
+  it('G1: non-text DM message is resolved and sent to the agent (not rejected)', async () => {
     const msg = makeDmMsg('', {
-      payload: { type: MessageType.Image, url: 'https://example.com/img.png' },
+      payload: { type: MessageType.Image, url: 'file/preview/img.png' },
     });
     await simulateMessage(msg, config, store, router, groupContext, streamRelay);
 
-    // queryAgent should NOT be called
-    expect(queryAgent).not.toHaveBeenCalled();
+    // queryAgent IS called — the image is resolved as "[图片] <url>" and the
+    // agent gets a chance to respond.
+    expect(queryAgent).toHaveBeenCalled();
+    const userMsg = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(userMsg).toContain('[图片]');
+    expect(userMsg).toContain('img.png');
 
-    // sendMessage called with unsupported notice
-    expect(sendMessage).toHaveBeenCalledWith(
+    // No “不支持” notice.
+    expect(sendMessage).not.toHaveBeenCalledWith(
       expect.objectContaining({
         content: '暂不支持此类消息，请发送文字',
       }),

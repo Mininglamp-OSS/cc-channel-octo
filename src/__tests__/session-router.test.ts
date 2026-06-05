@@ -155,15 +155,18 @@ describe('SessionRouter', () => {
 
   // --- Non-text message ---
 
-  it('replies to non-text message and returns shouldProcess=false', async () => {
+  it('now passes non-text messages through (G1: handled by inbound.resolveContent)', async () => {
     const msg = makeMsg({
       channel_type: ChannelType.DM,
-      payload: { type: MessageType.Image },
+      payload: { type: MessageType.Image, url: 'file/abc.jpg' },
     });
     const result = await router.route(msg);
     expect(result).not.toBeNull();
-    expect(result!.shouldProcess).toBe(false);
-    expect(sendMessage).toHaveBeenCalledWith(
+    // G1: image messages are no longer rejected — they flow through to the
+    // pipeline where resolveContent renders them as "[图片] <url>".
+    expect(result!.shouldProcess).toBe(true);
+    // No “不支持” auto-reply.
+    expect(sendMessage).not.toHaveBeenCalledWith(
       expect.objectContaining({ content: '暂不支持此类消息，请发送文字' }),
     );
   });
