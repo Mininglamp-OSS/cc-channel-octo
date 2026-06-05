@@ -259,7 +259,7 @@ async function simulateMessage(
   });
 
   // C1 / P2.5 mirror: suppress group context cache for actively-rejected msgs
-  const SUPPRESS = new Set(['rate_limited', 'global_rate_limited', 'oversized']);
+  const SUPPRESS = new Set(['rate_limited', 'oversized']);
   const suppressCache = !!routeResult?.rejectionReason && SUPPRESS.has(routeResult.rejectionReason);
 
   if (

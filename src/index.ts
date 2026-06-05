@@ -383,7 +383,7 @@ async function handleMessage(
   // still landed in [Group context]. Silently-dropped messages (not_mentioned,
   // system_event, bot loop) still cache because they are legitimate group
   // chatter the agent should be aware of when next addressed.
-  const SUPPRESS_GROUP_CACHE = new Set(['rate_limited', 'global_rate_limited', 'oversized']);
+  const SUPPRESS_GROUP_CACHE = new Set(['rate_limited', 'oversized']);
   const suppressGroupCache =
     !!routeResult?.rejectionReason && SUPPRESS_GROUP_CACHE.has(routeResult.rejectionReason);
 
