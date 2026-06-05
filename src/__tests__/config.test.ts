@@ -271,10 +271,10 @@ describe('parseIntStrict via env', () => {
     expect(() => loadConfig(path)).toThrow(/Invalid integer/);
   });
 
-  it('rejects zero', () => {
+  it('accepts zero for maxTurns', () => {
     const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
     process.env.CC_OCTO_SDK_MAX_TURNS = '0';
-    expect(() => loadConfig(path)).toThrow(/Invalid integer/);
+    expect(loadConfig(path).sdk.maxTurns).toBe(0);
   });
 
   it('rejects scientific notation', () => {

@@ -156,6 +156,16 @@ The bot accepts messages from any Octo user who can reach it. Users can send arb
 | **No network** | `Read, Write, Edit, Bash, Glob, Grep` | Full local automation |
 | **Full** (default) | All 8 tools | Maximum automation capability |
 
+### Known Cryptographic Weaknesses
+
+The WuKongIM protocol mandates specific cryptographic choices that cc-channel-octo must follow for compatibility:
+
+- **MD5 for AES key derivation.** The DH shared secret is hashed with MD5 to produce the AES-128 key. MD5 is cryptographically broken for collision resistance, but key derivation from a high-entropy DH secret is not vulnerable to collision attacks — the risk is theoretical, not practical. Replacing MD5 would break protocol compatibility with WuKongIM.
+- **AES-128-CBC without HMAC.** The protocol uses AES-128-CBC for message encryption without a separate MAC. This is susceptible to padding oracle attacks in theory, but the WebSocket transport is already TLS-encrypted, and the attacker model (modify ciphertext in transit) requires MITM on the TLS connection itself.
+- **crypto-js dependency.** AES and MD5 operations use `crypto-js` and `md5-typescript` instead of Node.js built-in `crypto`. These could be replaced to reduce supply chain risk, but would increase divergence from the upstream `openclaw-channel-octo` protocol layer, making security patch synchronization harder. Tracked as tech debt.
+
+These are protocol-level constraints, not implementation choices. Changing them requires WuKongIM server-side changes.
+
 ## Persistence
 
 All persistent state lives in a single SQLite database (`data/cc-octo.db`):
