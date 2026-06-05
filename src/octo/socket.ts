@@ -283,7 +283,7 @@ export class WKSocket extends EventEmitter {
     this.stopReconnectTimer();
     this.clearStableTimer();
     if (this.ws) {
-      try { this.ws.close(); } catch { /* ignore */ }
+      try { this.ws.removeAllListeners(); this.ws.close(); } catch { /* ignore */ }
       this.ws = null;
     }
   }
@@ -308,6 +308,7 @@ export class WKSocket extends EventEmitter {
       const done = () => {
         if (resolved) return;
         resolved = true;
+        oldWs.removeAllListeners();
         resolve();
       };
       oldWs.on("close", done);

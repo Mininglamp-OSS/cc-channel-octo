@@ -166,6 +166,20 @@ The WuKongIM protocol mandates specific cryptographic choices that cc-channel-oc
 
 These are protocol-level constraints, not implementation choices. Changing them requires WuKongIM server-side changes.
 
+### Known Dependency Risks
+
+Three cryptographic dependencies have low maintenance activity:
+
+| Package | Version | Last Published | Risk | Replacement Path |
+|---------|---------|---------------|------|------------------|
+| `crypto-js` | 4.2.0 | 2023-10-24 | CVE-2023-46233 (PBKDF2, not used here). No releases in 2+ years. | Node.js built-in `crypto.createCipheriv` / `crypto.createDecipheriv` for AES-128-CBC. Drop-in replacement, ~20 lines. |
+| `md5-typescript` | 1.0.5 | 2018-03-03 | No known CVEs. Unmaintained (8+ years). | Node.js built-in `crypto.createHash('md5')`. One-line replacement. |
+| `curve25519-js` | 0.0.4 | 2019-08-02 | No known CVEs. Unmaintained (7+ years). Pure JS implementation. | `@noble/curves` (actively maintained, audited). Requires API adaptation. |
+
+**Current assessment:** Production runtime risk is **low** — these libraries perform simple, well-understood operations (AES-CBC, MD5 hash, X25519 DH). No known exploitable vulnerabilities affect our usage patterns. The risk is supply chain (abandoned packages receiving no security patches) rather than functional.
+
+**Replacement plan:** Tracked as tech debt. Replace when (a) a CVE affects our usage, (b) we diverge from upstream `openclaw-channel-octo` anyway, or (c) a dependency audit policy requires actively maintained packages.
+
 ## Persistence
 
 All persistent state lives in a single SQLite database (`data/cc-octo.db`):
