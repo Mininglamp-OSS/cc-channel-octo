@@ -4,6 +4,13 @@
  * DNS isolation: downloadToTempFile calls assertPublicUrl which does a DNS
  * lookup for non-IP hosts. Test URLs use fictitious `example.com` hostnames —
  * without DNS mock these hit the real resolver and fail in CI (ENOTFOUND).
+ *
+ * Mocking contract (PR#45 review nit from 王大锤): the `node:dns/promises`
+ * mock below is REQUIRED for any test that drives a code path through
+ * `downloadToTempFile` (anything resolving an http(s):// mediaUrl). If you
+ * add a new test using a new hostname, extend the mock's hostname branches
+ * — do NOT rely on the real resolver. Removing this mock makes the suite
+ * green locally and red in CI, the classic "works on my machine" antipattern.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';

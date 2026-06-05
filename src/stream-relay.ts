@@ -230,6 +230,19 @@ export class StreamRelay {
 
           // mentionAll only applies to one segment (the first). Avoids spamming
           // @所有人 notifications when a reply spans multiple chunks.
+          //
+          // Design choice (王大锤 PR#45 review note): we attach mentionAll to the
+          // FIRST segment unconditionally, not to the segment that actually
+          // contains the resolved "@all"/"@所有人" text. Three reasons:
+          //   1. mentionAll on the Octo API is a wire-level notification flag,
+          //      independent of where the literal "@all" text appears.
+          //   2. The first segment is always sent first — attaching the flag
+          //      there minimizes notification latency.
+          //   3. The literal text may have been resolved/rewritten by the LLM
+          //      into multiple positions; pinning to segment 0 is unambiguous.
+          // Alternative considered: scan each segment for @all literal and
+          // attach the flag only to segments containing it. Rejected because
+          // it would double-notify when @all appears more than once.
           const useMentionAll = mentionAll && !mentionAllConsumed;
           if (useMentionAll) mentionAllConsumed = true;
 
