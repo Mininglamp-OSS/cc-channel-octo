@@ -569,3 +569,35 @@ describe("Edge cases", () => {
     expect(remaining.length).toBe(0);
   });
 });
+
+// ─── 6. Large-Payload Safety (Q5 regression) ───────────────────────────────
+
+describe("Large-payload safety (>64K, no stack overflow)", () => {
+  it("Encoder.writeBytes handles >64K bytes without stack overflow", () => {
+    const enc = new Encoder();
+    const largeArray = new Array(100_000).fill(0x42);
+    enc.writeBytes(largeArray);
+    const result = enc.toUint8Array();
+    expect(result.length).toBe(100_000);
+    expect(result[0]).toBe(0x42);
+    expect(result[99_999]).toBe(0x42);
+  });
+
+  it("Encoder.writeString / Decoder.readString round-trip for large UTF-8 string", () => {
+    const enc = new Encoder();
+    // 20K CJK chars = ~60K UTF-8 bytes, fits in Int16 length prefix (max 65535)
+    const longStr = "中".repeat(20_000);
+    enc.writeString(longStr);
+    const dec = new Decoder(enc.toUint8Array());
+    expect(dec.readString()).toBe(longStr);
+  });
+
+  it("Encoder.writeString / Decoder.readString round-trip for >64K ASCII", () => {
+    const enc = new Encoder();
+    // 65000 ASCII chars = 65000 bytes, still fits in Int16 (max 65535)
+    const longStr = "A".repeat(65_000);
+    enc.writeString(longStr);
+    const dec = new Decoder(enc.toUint8Array());
+    expect(dec.readString()).toBe(longStr);
+  });
+});

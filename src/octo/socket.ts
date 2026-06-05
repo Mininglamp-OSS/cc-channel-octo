@@ -8,6 +8,7 @@ import { generateKeyPair, sharedKey } from "curve25519-js";
 import { Buffer } from "buffer";
 import CryptoJS from "crypto-js";
 import { Md5 } from "md5-typescript";
+import { randomBytes } from "node:crypto";
 import type { BotMessage, MessagePayload } from "./types.js";
 
 // ─── WuKongIM Binary Protocol Constants ─────────────────────────────────────
@@ -31,7 +32,7 @@ const PROTO_VERSION = 4;
 export class Encoder {
   private w: number[] = [];
   writeByte(b: number) { this.w.push(b & 0xff); }
-  writeBytes(b: number[]) { this.w.push(...b); }
+  writeBytes(b: number[]) { for (let i = 0; i < b.length; i++) this.w[this.w.length] = b[i]; }
   writeInt16(b: number) { this.w.push((b >> 8) & 0xff, b & 0xff); }
   writeInt32(b: number) { this.w.push((b >> 24) & 0xff, (b >> 16) & 0xff, (b >> 8) & 0xff, b & 0xff); }
   writeInt64(n: bigint) {
@@ -44,7 +45,7 @@ export class Encoder {
     if (s && s.length > 0) {
       const arr = stringToUint(s);
       this.writeInt16(arr.length);
-      this.w.push(...arr);
+      for (let i = 0; i < arr.length; i++) this.w[this.w.length] = arr[i];
     } else {
       this.writeInt16(0);
     }
@@ -121,15 +122,11 @@ export class Decoder {
 }
 
 function stringToUint(str: string): number[] {
-  const encoded = unescape(encodeURIComponent(str));
-  const arr: number[] = [];
-  for (let i = 0; i < encoded.length; i++) arr.push(encoded.charCodeAt(i));
-  return arr;
+  return Array.from(new TextEncoder().encode(str));
 }
 
 function uintToString(array: number[]): string {
-  const encoded = String.fromCharCode(...array);
-  return decodeURIComponent(escape(encoded));
+  return new TextDecoder().decode(new Uint8Array(array));
 }
 
 function encodeVariableLength(len: number): number[] {
@@ -146,7 +143,7 @@ function encodeVariableLength(len: number): number[] {
 // ─── AES-CBC Encryption Helpers ─────────────────────────────────────────────
 
 function aesDecrypt(data: Uint8Array, aesKey: string, aesIV: string): Uint8Array {
-  const str = String.fromCharCode(...Array.from(data));
+  const str = Buffer.from(data).toString("binary");
   const ciphertext = CryptoJS.enc.Base64.parse(str);
   const decrypted = CryptoJS.AES.decrypt(
     CryptoJS.enc.Base64.stringify(ciphertext),
@@ -360,7 +357,7 @@ export class WKSocket extends EventEmitter {
       if (this.ws !== ws) return; // stale guard
       this.tempBuffer = [];
       // Generate DH key pair
-      const seed = Uint8Array.from(stringToUint(generateDeviceID()));
+      const seed = randomBytes(32);
       const keyPair = generateKeyPair(seed);
       this.dhPrivateKey = keyPair.private;
       const pubKey = Buffer.from(keyPair.public).toString("base64");
@@ -517,7 +514,7 @@ export class WKSocket extends EventEmitter {
   }
 
   private handleRawData(data: Uint8Array): void {
-    this.tempBuffer.push(...Array.from(data));
+    for (let i = 0; i < data.length; i++) this.tempBuffer.push(data[i]);
 
     try {
       let lenBefore: number;
