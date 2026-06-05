@@ -83,23 +83,6 @@ export function buildMediaUrl(relUrl?: string, apiUrl?: string): string | undefi
   return `${baseUrl}/file/${storagePath}`;
 }
 
-/** Guess MIME type from filename extension.
- *  Kept for future use (download path may need to override server content-type for G22). */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function guessMime(pathOrName?: string, fallback = 'application/octet-stream'): string {
-  if (!pathOrName) return fallback;
-  const ext = pathOrName.split('.').pop()?.toLowerCase() ?? '';
-  const map: Record<string, string> = {
-    jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
-    gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp',
-    mp3: 'audio/mpeg', ogg: 'audio/ogg', wav: 'audio/wav', m4a: 'audio/mp4',
-    mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm',
-    pdf: 'application/pdf', zip: 'application/zip',
-    txt: 'text/plain', json: 'application/json', csv: 'text/csv', md: 'text/markdown',
-  };
-  return map[ext] ?? fallback;
-}
-
 // ─── RichText (type=14) expansion ─────────────────────────────────────────
 
 function normalizeRichTextBlocks(content: unknown): Array<Record<string, unknown>> {

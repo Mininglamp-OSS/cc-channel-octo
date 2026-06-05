@@ -73,7 +73,7 @@ async function main(): Promise<void> {
   // --- Message handler ---
   gateway.setMessageHandler((msg: BotMessage) => {
     if (gateway.draining) return; // Extra guard: drop during shutdown
-    const p = handleMessage(msg, config, store, router, groupContext, streamRelay)
+    const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId)
       .catch((err) => {
         // Q8: catch unhandled rejections from fire-and-forget handlers
         console.error('[cc-channel-octo] Unhandled message handler error:', err instanceof Error ? err.message : err);
@@ -100,6 +100,7 @@ async function handleMessage(
   router: SessionRouter,
   groupContext: GroupContext,
   streamRelay: StreamRelay,
+  botId: string,
 ): Promise<void> {
   const channelId = msg.channel_id ?? '';
   const channelType = msg.channel_type ?? ChannelType.DM;
@@ -143,6 +144,12 @@ async function handleMessage(
       const resolved = resolveContent(msg.payload, config.apiUrl);
       let bodyText = result.cleanContent ?? resolved.text;
 
+      // Compact history record. For File payloads we store only the metadata
+      // line (not the inlined contents) so a user dropping a few text files
+      // can't blow up the system prompt on subsequent turns. See PR#33
+      // follow-up issue ·2 (齐哥 review).
+      let historyRecord = bodyText;
+
       // G2: Inline text-file content for File payloads when feasible.
       if (
         msg.payload.type === MessageType.File &&
@@ -150,6 +157,9 @@ async function handleMessage(
       ) {
         const filename = typeof msg.payload.name === 'string' ? msg.payload.name : '未知文件';
         const knownSize = typeof msg.payload.size === 'number' ? msg.payload.size : undefined;
+        // Always store just the [文件: name] metadata in history — the
+        // inlined contents go to the LLM for THIS turn only.
+        historyRecord = `[文件: ${filename}]`;
         try {
           const fileResult = await tryResolveFile({
             url: resolved.mediaUrl,
@@ -171,7 +181,9 @@ async function handleMessage(
       }
 
       // --- Build history prefix BEFORE appending current message (G10: segmented) ---
-      const userContent = msg.payload.content ?? bodyText;
+      // Use historyRecord (metadata-only for files) instead of bodyText to keep
+      // SQLite history compact — inlined file contents stay turn-local.
+      const userContent = msg.payload.content ?? historyRecord;
 
       // G3: Extract quoted/replied message content for LLM context.
       //
@@ -229,8 +241,12 @@ async function handleMessage(
           });
           if (apiMessages.length > 0) {
             // Persist into local store so subsequent turns hit cache,
-            // and rebuild historyPrefix with the enriched data.
-            seedHistoryFromApi(store, sessionKey, apiMessages, msg.from_uid);
+            // and rebuild historyPrefix with the enriched data. Pass the
+            // bot's own uid so its prior replies are stored as assistant
+            // turns (PR#33 follow-up: previously every backfilled message
+            // was stored as user, which made the LLM see its own past words
+            // as if the user had said them).
+            seedHistoryFromApi(store, sessionKey, apiMessages, botId);
             historyPrefix = store.buildSegmentedHistoryPrefix(sessionKey, config.context.historyLimit);
           }
         } catch (err) {
@@ -342,14 +358,20 @@ const backfilledSessions = new Set<string>();
 
 /**
  * Seed local SessionStore with messages fetched from the WuKongIM sync API.
- * Skips the current user's bot (replies come from the agent path) and
- * persists each historical message in chronological order.
+ *
+ * Messages authored by the bot itself (from_uid === botId) are stored as
+ * assistant turns so the LLM sees its own past replies labeled `[assistant]:`
+ * — otherwise the LLM later reads its own words as if a user said them
+ * (PR#33 follow-up: 齐哥 review).
+ *
+ * Messages are persisted in chronological order so segmentation by
+ * message_seq remains consistent across the cache + backfill boundary.
  */
 function seedHistoryFromApi(
   store: SessionStore,
   sessionKey: string,
   apiMessages: HistoricalMessage[],
-  currentUserUid: string,
+  botId: string,
 ): void {
   // Older messages first — sync API returns newest-first depending on pull_mode.
   const ordered = apiMessages
@@ -361,15 +383,11 @@ function seedHistoryFromApi(
       ? m.content
       : placeholder;
     if (!content) continue;
-    // We don't know which side of the conversation each historical message
-    // came from without the bot uid, so heuristic: from_uid matching the
-    // current message's sender = user; everyone else = user too. The agent
-    // sees the senders inside the rendered history via the [user]/[assistant]
-    // labels we'll wire up later. For now, all historical messages are stored
-    // as user role to preserve conversation flavor without falsely claiming
-    // any of them came from us.
-    void currentUserUid;
-    store.appendUser(sessionKey, content, m.message_seq);
+    if (botId && m.from_uid === botId) {
+      store.appendAssistant(sessionKey, content, m.message_seq);
+    } else {
+      store.appendUser(sessionKey, content, m.message_seq);
+    }
   }
 }
 
