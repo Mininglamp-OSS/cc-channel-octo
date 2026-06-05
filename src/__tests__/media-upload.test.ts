@@ -735,4 +735,45 @@ describe('sendRichTextCombined', () => {
       expect(putCall.ContentDisposition).toMatch(/^attachment/i);
     }
   });
+
+  it('P1-5 hardening: legacy `image/svg` (no +xml suffix) also rejected (PR#49 belt-and-suspenders)', async () => {
+    // 王大锤 PR#45 re-review (5bab2f0, 02:55:28 GMT+8) documented gap:
+    // Firefox in some legacy contexts renders `image/svg` (without the
+    // `+xml` suffix) as SVG. Body HTML comment
+    // `<!-- 王大锤 re-review verdict: LGTM -->` locks author through
+    // the shared lml2468 keyring. isSafeInlineImage now rejects both
+    // `image/svg+xml` AND `image/svg` — 1-condition change covers an
+    // attacker-reachable edge case.
+    const svgPayload = '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>';
+    const dataUri = `data:image/svg;base64,${Buffer.from(svgPayload).toString('base64')}`;
+
+    fetchMock.mockReset();
+    cosPutObjectMock.mockReset();
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      bucket: 'b', region: 'r', key: 'path/x.svg',
+      credentials: { tmpSecretId: 'i', tmpSecretKey: 'k', sessionToken: 't' },
+      startTime: 1, expiredTime: 4600,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    cosPutObjectMock.mockImplementation((_params, cb) => {
+      cb(null, { Location: 'b.cos.r.myqcloud.com/path/x.svg' });
+    });
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      message_id: 'm1', client_msg_no: 'c1', message_seq: 1,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    await uploadAndSendMedia({
+      apiUrl: 'https://test.example.com',
+      botToken: 'bf_test',
+      channelId: 'ch1',
+      channelType: ChannelType.Group,
+      mediaUrl: dataUri,
+    });
+
+    // Must route to File (type=8), not Image (type=2) — same defense as +xml variant.
+    const sendBody = JSON.parse(fetchMock.mock.calls[1][1].body as string);
+    expect(sendBody.payload.type).toBe(8);
+    // Must also force Content-Disposition: attachment at COS layer.
+    const putCall = cosPutObjectMock.mock.calls[0][0] as { ContentDisposition?: string };
+    expect(putCall.ContentDisposition).toMatch(/^attachment/i);
+  });
 });
