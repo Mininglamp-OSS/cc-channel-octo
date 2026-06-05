@@ -201,6 +201,9 @@ export class OctoGateway {
     try {
       console.log('Attempting token refresh...');
 
+      // Q33: Stop heartbeat during refresh to avoid empty pings
+      this.stopHeartbeat();
+
       if (this.socket) {
         await this.socket.disconnectAndWait();
         this.socket = null;
@@ -219,6 +222,7 @@ export class OctoGateway {
 
       this.socket = this.createSocket(reg.ws_url, reg.robot_id, reg.im_token);
       this.socket.connect();
+      this.startHeartbeat(); // Q33: Restart API heartbeat after successful refresh
     } catch (err) {
       console.error('Token refresh failed:', String(err));
     } finally {
