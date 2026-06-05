@@ -152,13 +152,21 @@ export async function parseImageDimensionsFromFile(
  * shaped by IM user input, so an attacker can ask the LLM to fetch and post a
  * crafted SVG. Treating SVG as File forces a download instead of inline render.
  *
+ * MIME parameter handling: `data:image/svg+xml; charset=utf-8;base64,...` is
+ * a legitimate variant. Parameters MUST be stripped before comparison or the
+ * gate is trivially bypassed (PR#45 review-loop hardening). Lowercase too —
+ * MIME types are case-insensitive (RFC 6838 §4.2).
+ *
  * Other concerns (TIFF, HEIC, JPEG XL) have no known active-content vectors
  * but are also not in inferContentType's MIME map, so they fall to
  * `application/octet-stream` and route to File anyway.
  */
 export function isSafeInlineImage(contentType: string): boolean {
-  if (!contentType.startsWith("image/")) return false;
-  if (contentType === "image/svg+xml") return false;
+  // Strip parameters ("image/svg+xml; charset=utf-8" → "image/svg+xml") and
+  // lowercase, since MIME types and the `image/` prefix are case-insensitive.
+  const baseType = contentType.split(";")[0].trim().toLowerCase();
+  if (!baseType.startsWith("image/")) return false;
+  if (baseType === "image/svg+xml") return false;
   return true;
 }
 
@@ -217,10 +225,15 @@ export async function uploadFileToCOS(params: {
 
   let contentDisposition: string | undefined;
   if (params.filename) {
-    const ct = params.contentType;
+    const ct = params.contentType.split(";")[0].trim().toLowerCase();
     if (ct.startsWith('video/') || ct.startsWith('audio/')) {
       contentDisposition = buildContentDisposition(params.filename, 'inline');
-    } else if (!ct.startsWith('image/')) {
+    } else if (!ct.startsWith('image/') || ct === 'image/svg+xml') {
+      // Force `attachment` for SVG too: even when routed to MessageType.File
+      // in the IM payload, the COS object served via CDN with
+      // Content-Type: image/svg+xml will render inline in browsers (XSS
+      // vector — embedded <script>/<foreignObject>). Content-Disposition:
+      // attachment forces download instead of inline render.
       contentDisposition = buildContentDisposition(params.filename, 'attachment');
     }
   }
@@ -348,10 +361,25 @@ async function resolveMedia(
   signal?: AbortSignal,
 ): Promise<ResolvedFile> {
   if (mediaUrl.startsWith("data:")) {
-    const match = mediaUrl.match(/^data:([^;,]+)?(?:;base64)?,(.*)$/);
-    if (!match) throw new Error("Invalid data URI format");
-    const contentType = match[1] || "application/octet-stream";
-    const buf = Buffer.from(match[2], "base64");
+    // RFC 2397: data:[<mediatype>][;base64],<data>
+    // <mediatype> = type "/" subtype *(";" parameter)
+    // Split into header (before ",") and payload (after) at the FIRST comma.
+    const commaIdx = mediaUrl.indexOf(",");
+    if (commaIdx === -1) throw new Error("Invalid data URI format");
+    const header = mediaUrl.slice(5, commaIdx); // drop "data:"
+    const dataPart = mediaUrl.slice(commaIdx + 1);
+    // Check for ;base64 suffix.
+    const isBase64 = /;base64\s*$/i.test(header);
+    // Strip ;base64 suffix and any params (charset=utf-8 etc) — keep only
+    // the base media type for type-based routing decisions.
+    const headerNoB64 = header.replace(/;base64\s*$/i, "");
+    const semiIdx = headerNoB64.indexOf(";");
+    const contentType = semiIdx >= 0
+      ? headerNoB64.slice(0, semiIdx).trim() || "application/octet-stream"
+      : headerNoB64.trim() || "application/octet-stream";
+    const buf = isBase64
+      ? Buffer.from(dataPart, "base64")
+      : Buffer.from(decodeURIComponent(dataPart), "utf-8");
     if (buf.length > MAX_UPLOAD_SIZE) {
       throw new Error(`File too large (${buf.length} bytes, max ${MAX_UPLOAD_SIZE})`);
     }

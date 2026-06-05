@@ -678,4 +678,54 @@ describe('sendRichTextCombined', () => {
     expect(result.failedMedia[0].error).toMatch(/Not a safe inline image|svg/i);
     expect(cosPutObjectMock).not.toHaveBeenCalled();
   });
+
+  it('P1-5 hardening: SVG with charset/case-variant params still rejected (PR#45 review nit)', async () => {
+    // PR#45 review-loop probe (陈皮皮): isSafeInlineImage must strip MIME
+    // params and lowercase. "image/svg+xml; charset=utf-8" and uppercase
+    // variants must NOT bypass the SVG gate. Without param-strip + lowercase,
+    // a data URI like `data:image/svg+xml; charset=utf-8;base64,...` would
+    // pass startsWith("image/") and === check would miss → SVG routed to
+    // Image, XSS open.
+    const svgPayload = '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>';
+    const variants = [
+      `data:image/svg+xml; charset=utf-8;base64,${Buffer.from(svgPayload).toString('base64')}`,
+      `data:IMAGE/SVG+XML;base64,${Buffer.from(svgPayload).toString('base64')}`,
+      `data:Image/Svg+Xml;base64,${Buffer.from(svgPayload).toString('base64')}`,
+    ];
+    for (const dataUri of variants) {
+      // Setup: getUploadCredentials + COS putObject must NOT be triggered
+      // for SVG via Image path — set up mocks so a bypass would actually
+      // get to sendMediaMessage and we could inspect payload.type.
+      fetchMock.mockReset();
+      cosPutObjectMock.mockReset();
+      fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+        bucket: 'b', region: 'r', key: 'path/x.svg',
+        credentials: { tmpSecretId: 'i', tmpSecretKey: 'k', sessionToken: 't' },
+        startTime: 1, expiredTime: 4600,
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      cosPutObjectMock.mockImplementation((_params, cb) => {
+        cb(null, { Location: 'b.cos.r.myqcloud.com/path/x.svg' });
+      });
+      fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+        message_id: 'm1', client_msg_no: 'c1', message_seq: 1,
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+      await uploadAndSendMedia({
+        apiUrl: 'https://test.example.com',
+        botToken: 'bf_test',
+        channelId: 'ch1',
+        channelType: ChannelType.Group,
+        mediaUrl: dataUri,
+      });
+
+      // SVG variant MUST route to File (type=8), not Image (type=2).
+      const sendBody = JSON.parse(fetchMock.mock.calls[1][1].body as string);
+      expect(sendBody.payload.type).toBe(8);
+      // And COS upload MUST set Content-Disposition: attachment so the CDN
+      // serves SVG as download instead of inline render.
+      const putCall = cosPutObjectMock.mock.calls[0][0] as { ContentDisposition?: string };
+      expect(putCall.ContentDisposition).toBeDefined();
+      expect(putCall.ContentDisposition).toMatch(/^attachment/i);
+    }
+  });
 });
