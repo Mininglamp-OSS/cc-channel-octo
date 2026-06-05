@@ -321,7 +321,7 @@ export async function getChannelMessages(params: {
       };
     });
   } catch (err) {
-    console.error(`octo: getChannelMessages error: ${err}`);
+    console.error(`octo: getChannelMessages error: ${String(err)}`);
     return [];
   }
 }

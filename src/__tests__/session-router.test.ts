@@ -411,3 +411,62 @@ describe('routeAndHandle concurrency', () => {
     expect(order).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
   });
 });
+
+// ─── Q10: Message length limit ─────────────────────────────────────────────
+
+describe('Message length limit (Q10)', () => {
+  it('rejects messages exceeding 32KB', async () => {
+    const config = makeConfig();
+    const router = new SessionRouter(config, ROBOT_ID);
+    const longContent = 'A'.repeat(33_000); // > 32KB
+
+    const result = await router.route(
+      makeMsg({
+        channel_type: ChannelType.DM,
+        from_uid: 'long-msg-user',
+        payload: { type: MessageType.Text, content: longContent },
+      }),
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.shouldProcess).toBe(false);
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ content: '消息过长，请缩短后重试' }),
+    );
+  });
+
+  it('accepts messages at exactly 32KB', async () => {
+    const config = makeConfig();
+    const router = new SessionRouter(config, ROBOT_ID);
+    const exactContent = 'A'.repeat(32_768); // exactly 32KB ASCII
+
+    const result = await router.route(
+      makeMsg({
+        channel_type: ChannelType.DM,
+        from_uid: 'exact-limit-user',
+        payload: { type: MessageType.Text, content: exactContent },
+      }),
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.shouldProcess).toBe(true);
+  });
+
+  it('measures length in bytes not chars (CJK)', async () => {
+    const config = makeConfig();
+    const router = new SessionRouter(config, ROBOT_ID);
+    // 11000 CJK chars × 3 bytes = 33000 bytes > 32KB
+    const cjkContent = '中'.repeat(11_000);
+
+    const result = await router.route(
+      makeMsg({
+        channel_type: ChannelType.DM,
+        from_uid: 'cjk-user',
+        payload: { type: MessageType.Text, content: cjkContent },
+      }),
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.shouldProcess).toBe(false);
+  });
+});

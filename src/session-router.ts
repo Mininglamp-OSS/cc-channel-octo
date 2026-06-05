@@ -25,6 +25,9 @@ const BUCKET_STALE_MS = 5 * 60 * 1000; // 5 minutes
 /** Global rate limit: 10x per-session limit, shared across all sessions. */
 const GLOBAL_RATE_MULTIPLIER = 10;
 
+/** Maximum allowed content length in bytes (Q10). Messages exceeding this are rejected. */
+const MAX_CONTENT_BYTES = 32_768; // 32 KB
+
 export class SessionRouter {
   private readonly config: Config;
   private readonly robotId: string;
@@ -145,6 +148,13 @@ export class SessionRouter {
     // Non-text message → reply with notice.
     if (msg.payload.type !== MessageType.Text) {
       await this.replySafe(msg, '暂不支持此类消息，请发送文字');
+      return { sessionKey: key, shouldProcess: false, message: msg };
+    }
+
+    // Q10: Reject messages exceeding content length limit.
+    const content = msg.payload.content ?? '';
+    if (Buffer.byteLength(content, 'utf-8') > MAX_CONTENT_BYTES) {
+      await this.replySafe(msg, '消息过长，请缩短后重试');
       return { sessionKey: key, shouldProcess: false, message: msg };
     }
 

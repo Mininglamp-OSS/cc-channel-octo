@@ -170,7 +170,7 @@ async function handleMessage(
       }
 
     } catch (err) {
-      console.error(`[cc-channel-octo] Error processing message (session=${result.sessionKey}):`, err);
+      console.error(`[cc-channel-octo] Error processing message (session=${result.sessionKey}):`, String(err));
       // Best-effort error reply
       try {
         await sendMessage({
@@ -199,6 +199,6 @@ async function handleMessage(
 }
 
 main().catch((err) => {
-  console.error('[cc-channel-octo] Fatal error:', err instanceof Error ? err.message : err);
+  console.error('[cc-channel-octo] Fatal error:', String(err));
   process.exit(1);
 });

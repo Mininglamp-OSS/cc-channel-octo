@@ -10,9 +10,9 @@
  *  - Full CC_OCTO_* env override coverage
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { join } from 'node:path';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { loadConfig } from '../config.js';
 
@@ -348,5 +348,47 @@ describe('missing config file', () => {
     const cfg = loadConfig(join(tmpDir, 'missing.json'));
     expect(cfg.botToken).toBe('bf_env');
     expect(cfg.sdk.permissionMode).toBe('bypassPermissions'); // default
+  });
+});
+
+// ─── Q12: Config file permission warning ───────────────────────────────
+
+describe('Config file permission warning (Q12)', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'cfg-perm-'));
+    // Minimal env to pass required field validation
+    process.env.CC_OCTO_BOT_TOKEN = 'test-token';
+    process.env.CC_OCTO_API_URL = 'https://test-api';
+  });
+
+  afterEach(() => {
+    delete process.env.CC_OCTO_BOT_TOKEN;
+    delete process.env.CC_OCTO_API_URL;
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('warns when config file is world-readable (0o644)', () => {
+    const cfgPath = join(tmpDir, 'config.json');
+    writeFileSync(cfgPath, JSON.stringify({ botToken: 'tok', apiUrl: 'https://api' }));
+    chmodSync(cfgPath, 0o644);
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    loadConfig(cfgPath);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('chmod 600'),
+    );
+    warnSpy.mockRestore();
+  });
+
+  it('does NOT warn when config file is owner-only (0o600)', () => {
+    const cfgPath = join(tmpDir, 'config.json');
+    writeFileSync(cfgPath, JSON.stringify({ botToken: 'tok', apiUrl: 'https://api' }), { mode: 0o600 });
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    loadConfig(cfgPath);
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 });

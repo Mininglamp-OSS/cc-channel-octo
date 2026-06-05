@@ -3,7 +3,7 @@
  * Three-level priority: env > config.json > defaults.
  */
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, statSync } from 'node:fs';
 
 export interface Config {
   botToken: string;
@@ -64,6 +64,21 @@ function readConfigFile(configFilePath: string): PartialConfig {
   if (!existsSync(configFilePath)) {
     return {};
   }
+
+  // Q12: Warn if config file is readable by group/others (contains botToken).
+  try {
+    const stat = statSync(configFilePath);
+    const mode = stat.mode & 0o777;
+    if (mode & 0o077) {
+      console.warn(
+        `[cc-channel-octo] WARNING: ${configFilePath} has mode ${mode.toString(8)} — ` +
+        `secrets may be exposed to other users. Fix with: chmod 600 ${configFilePath}`,
+      );
+    }
+  } catch {
+    // Best-effort check — don't block startup if stat fails.
+  }
+
   const raw = readFileSync(configFilePath, 'utf-8');
   let parsed: Record<string, unknown> & PartialConfig;
   try {
