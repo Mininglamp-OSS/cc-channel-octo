@@ -28,6 +28,11 @@ export interface Config {
   /** Maximum response length in chars before truncation (Q32). */
   maxResponseChars: number;
   botBlocklist?: string[];
+  /**
+   * G14: Bots in this list are allowed to DM the bot even if their uid matches
+   * the `_bot` heuristic. Use this to whitelist trusted bots.
+   */
+  allowedBotUids?: string[];
 }
 
 type PartialConfig = {
@@ -40,6 +45,7 @@ type PartialConfig = {
   context?: Partial<Config['context']>;
   maxResponseChars?: number;
   botBlocklist?: string[];
+  allowedBotUids?: string[];
 };
 
 function defaults(): Config {
@@ -119,6 +125,7 @@ function mergeConfig(base: Config, override: PartialConfig): Config {
     },
     maxResponseChars: override.maxResponseChars ?? base.maxResponseChars,
     botBlocklist: override.botBlocklist ?? base.botBlocklist,
+    allowedBotUids: override.allowedBotUids ?? base.allowedBotUids,
   };
 }
 
@@ -194,6 +201,10 @@ function applyEnv(cfg: Config): Config {
 
   if (env.CC_OCTO_BOT_BLOCKLIST) {
     next.botBlocklist = parseCsv(env.CC_OCTO_BOT_BLOCKLIST);
+  }
+
+  if (env.CC_OCTO_ALLOWED_BOT_UIDS) {
+    next.allowedBotUids = parseCsv(env.CC_OCTO_ALLOWED_BOT_UIDS);
   }
 
   if (env.CC_OCTO_MAX_RESPONSE_CHARS) {

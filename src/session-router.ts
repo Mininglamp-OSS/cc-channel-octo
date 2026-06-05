@@ -31,13 +31,29 @@ const MAX_CONTENT_BYTES = 32_768; // 32 KB
 export class SessionRouter {
   private readonly config: Config;
   private readonly robotId: string;
+  /** G18: owner_uid from registerBot. Stored for future permission model. */
+  private readonly ownerUid: string;
   private readonly inboundQueues = new Map<string, Promise<void>>();
   private readonly tokenBuckets = new Map<string, TokenBucket>();
+  /** G20: per-user buckets keyed by from_uid alone (cross-channel rate limit). */
+  private readonly userBuckets = new Map<string, TokenBucket>();
   private globalBucket: TokenBucket | null = null;
+  /**
+   * G14: UIDs known to be bots. Initialized with this bot's robotId; can be
+   * extended via registerKnownBot() for future multi-bot deployments.
+   */
+  private readonly knownBotUids = new Set<string>();
 
-  constructor(config: Config, robotId: string) {
+  constructor(config: Config, robotId: string, ownerUid = '') {
     this.config = config;
     this.robotId = robotId;
+    this.ownerUid = ownerUid;
+    this.knownBotUids.add(robotId);
+  }
+
+  /** G14: register another known bot uid (future multi-bot support). */
+  registerKnownBot(uid: string): void {
+    if (uid) this.knownBotUids.add(uid);
   }
 
   /**
@@ -98,6 +114,23 @@ export class SessionRouter {
     return this.config.botBlocklist?.includes(uid) ?? false;
   }
 
+  /**
+   * G14: Heuristic bot detection. Octo bot uids conventionally end in `_bot`.
+   * This is NOT a perfect check — a human could pick that suffix — but it
+   * catches the common case where a bot DMs another bot and triggers an
+   * uncontrolled response loop. Bots whitelisted in `allowedBotUids` bypass
+   * this gate.
+   */
+  private looksLikeBot(uid: string): boolean {
+    if (this.knownBotUids.has(uid)) return true;
+    if (uid.endsWith('_bot')) return true;
+    return false;
+  }
+
+  private isAllowedBot(uid: string): boolean {
+    return this.config.allowedBotUids?.includes(uid) ?? false;
+  }
+
   private isGroupLike(channelType: ChannelType | undefined): boolean {
     return channelType === ChannelType.Group || channelType === ChannelType.CommunityTopic;
   }
@@ -120,10 +153,24 @@ export class SessionRouter {
       return null;
     }
 
+    // G14: DM from anything that looks like a bot — silently drop unless
+    // explicitly whitelisted. Prevents bot↔bot reply loops.
+    if (
+      msg.channel_type === ChannelType.DM &&
+      this.looksLikeBot(msg.from_uid) &&
+      !this.isAllowedBot(msg.from_uid)
+    ) {
+      return null;
+    }
+
     // Group: drop messages from other bots (blocklisted or self) entirely.
     if (this.isGroupLike(msg.channel_type) && this.isBlockedBot(msg.from_uid)) {
       return null;
     }
+
+    // G14: Group messages from bot-looking uids — only respond if explicitly
+    // @-mentioned. The mention gate below already enforces this, but bots in
+    // the blocklist (above) get hard-dropped without even checking mentions.
 
     // Group mention gate.
     if (this.isGroupLike(msg.channel_type) && !this.isMentioned(msg)) {
@@ -135,7 +182,13 @@ export class SessionRouter {
 
     // Rate limit check BEFORE non-text check — prevents DM spam of non-text
     // messages from bypassing rate limiting entirely.
-    if (!this.checkGlobalRateLimit() || !this.checkRateLimit(key)) {
+    // G20: enforce both per-session and per-user limits. Per-user prevents a
+    // single user from circumventing the limit by messaging across groups.
+    if (
+      !this.checkGlobalRateLimit() ||
+      !this.checkRateLimit(key) ||
+      !this.checkUserRateLimit(msg.from_uid)
+    ) {
       // Debounce: only notify once per rate-limit window to avoid reply spam.
       const bucket = this.tokenBuckets.get(key);
       if (bucket && !bucket.notified) {
@@ -186,6 +239,28 @@ export class SessionRouter {
     return true;
   }
 
+  /**
+   * G20: Per-user rate limit independent of channel. Same limit as per-session
+   * — prevents a user from multiplying their effective quota by spreading
+   * messages across groups.
+   */
+  private checkUserRateLimit(uid: string): boolean {
+    const now = Date.now();
+    const maxPerMinute = this.config.rateLimit.maxPerMinute;
+    let bucket = this.userBuckets.get(uid);
+    if (!bucket) {
+      bucket = { tokens: maxPerMinute, lastRefill: now, notified: false };
+      this.userBuckets.set(uid, bucket);
+    }
+    const elapsed = now - bucket.lastRefill;
+    const refill = (elapsed / 60_000) * maxPerMinute;
+    bucket.tokens = Math.min(maxPerMinute, bucket.tokens + refill);
+    bucket.lastRefill = now;
+    if (bucket.tokens < 1) return false;
+    bucket.tokens -= 1;
+    return true;
+  }
+
   /** Global rate limit across all sessions (10x per-session limit). */
   private checkGlobalRateLimit(): boolean {
     const now = Date.now();
@@ -208,6 +283,11 @@ export class SessionRouter {
     for (const [key, bucket] of this.tokenBuckets) {
       if (now - bucket.lastRefill > BUCKET_STALE_MS) {
         this.tokenBuckets.delete(key);
+      }
+    }
+    for (const [uid, bucket] of this.userBuckets) {
+      if (now - bucket.lastRefill > BUCKET_STALE_MS) {
+        this.userBuckets.delete(uid);
       }
     }
   }

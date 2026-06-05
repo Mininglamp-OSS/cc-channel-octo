@@ -63,7 +63,7 @@ async function main(): Promise<void> {
   console.log(`[cc-channel-octo] Bot started: id=${gateway.botId}`);
 
   // --- Session router ---
-  const router = new SessionRouter(config, gateway.botId);
+  const router = new SessionRouter(config, gateway.botId, gateway.ownerUid);
 
   // --- Active handler tracking (Q6: in-flight drain on shutdown) ---
   const activeHandlers = new Set<Promise<void>>();
