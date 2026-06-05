@@ -15,6 +15,15 @@ import { randomUUID } from "node:crypto";
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 /**
+ * Maximum base64-encoded payload length accepted from /v1/bot/messages/sync.
+ * D1/S7 (齐 P0-2): a malicious or buggy server could return a single payload
+ * of arbitrary size; Buffer.from(str, 'base64') allocates ~0.75 × input bytes
+ * synchronously. Cap at 256 KiB base64 ≈ 192 KiB decoded — well above any
+ * legitimate IM message payload.
+ */
+const MAX_HISTORICAL_PAYLOAD_BASE64_LEN = 256 * 1024;
+
+/**
  * Generate a client-side idempotency key (UUID) for outbound messages.
  *
  * WuKongIM uses client_msg_no for server-side dedup — identical client_msg_no
@@ -599,13 +608,27 @@ export async function getChannelMessages(params: {
       params.signal,
     );
     const messages = result?.messages ?? [];
-    return messages.map((m) => {
+    // D1/S7 (齐 P0-2): client-side cap on returned message count. The server
+    // could return more than `limit` requested (bug or malice); we map +
+    // decode each item which is O(payload size) per message.
+    const cap = params.limit ?? 20;
+    const limited = messages.length > cap ? messages.slice(0, cap) : messages;
+    return limited.map((m) => {
       let payload: Record<string, unknown> | undefined;
       if (typeof m.payload === 'string') {
-        try {
-          payload = JSON.parse(Buffer.from(m.payload, 'base64').toString('utf-8'));
-        } catch {
-          // Leave payload undefined if decoding fails
+        // D1/S7 (齐 P0-2): cap base64 payload size before decoding. A 100 MB
+        // base64 string would force Buffer.from to allocate ~75 MB synchronously.
+        // 256 KiB decoded ≈ 192 KiB binary, well above any legitimate IM payload.
+        if (m.payload.length > MAX_HISTORICAL_PAYLOAD_BASE64_LEN) {
+          console.warn(
+            `octo: getChannelMessages dropping oversized payload (${m.payload.length} base64 chars > ${MAX_HISTORICAL_PAYLOAD_BASE64_LEN})`,
+          );
+        } else {
+          try {
+            payload = JSON.parse(Buffer.from(m.payload, 'base64').toString('utf-8'));
+          } catch {
+            // Leave payload undefined if decoding fails
+          }
         }
       } else if (m.payload && typeof m.payload === 'object') {
         payload = m.payload as Record<string, unknown>;

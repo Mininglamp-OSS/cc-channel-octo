@@ -27,6 +27,21 @@ const enum PacketType {
 
 const PROTO_VERSION = 4;
 
+/**
+ * Maximum bytes allowed in the WebSocket inbound assembly buffer.
+ * D1/S6 (齐 P0-1): a malicious server can send partial packets indefinitely
+ * (e.g. an unending variable-length encoding) and OOM the bot. 1 MiB is
+ * >> any legitimate single packet — if we cross it, close + reconnect.
+ */
+const MAX_TEMP_BUFFER_BYTES = 1 * 1024 * 1024;
+
+/**
+ * Maximum bytes used to encode a single variable-length integer (MQTT spec).
+ * D1/S6: refuse > 4 continuation bytes — anything longer is malformed and
+ * keeps tempBuffer filling forever.
+ */
+const MAX_VARLEN_BYTES = 4;
+
 // ─── Binary Encoder / Decoder ───────────────────────────────────────────────
 
 export class Encoder {
@@ -499,6 +514,20 @@ export class WKSocket extends EventEmitter {
   private handleRawData(data: Uint8Array): void {
     for (let i = 0; i < data.length; i++) this.tempBuffer.push(data[i]);
 
+    // D1/S6 (齐 P0-1): cap tempBuffer at MAX_TEMP_BUFFER_BYTES to prevent
+    // unbounded growth from a malicious/buggy server that sends partial
+    // packets indefinitely (e.g. an unending variable-length encoding).
+    if (this.tempBuffer.length > MAX_TEMP_BUFFER_BYTES) {
+      console.error(
+        `[WKSocket] tempBuffer exceeded ${MAX_TEMP_BUFFER_BYTES} bytes (got ${this.tempBuffer.length}) — dropping and reconnecting`,
+      );
+      this.tempBuffer = [];
+      if (this.ws) {
+        try { this.ws.close(); } catch { /* ignore */ }
+      }
+      return;
+    }
+
     try {
       let lenBefore: number;
       let lenAfter: number;
@@ -545,6 +574,15 @@ export class WKSocket extends EventEmitter {
       if (pos > length - 1) {
         remLengthFull = false;
         break;
+      }
+      // D1/S6 (齐 P0-1): cap at MAX_VARLEN_BYTES per MQTT spec. Without
+      // this, a stream of 0x80 bytes would never terminate and would let
+      // tempBuffer grow until handleRawData kills the connection — raise
+      // earlier and more explicitly here.
+      if (pos - fixedHeaderLength >= MAX_VARLEN_BYTES) {
+        throw new Error(
+          `[WKSocket] variable-length encoding exceeded ${MAX_VARLEN_BYTES} bytes — malformed packet`,
+        );
       }
       const digit = data[pos++];
       remLength += (digit & 127) * multiplier;
