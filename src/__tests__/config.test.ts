@@ -26,6 +26,7 @@ const CC_VARS = [
   'CC_OCTO_SDK_MAX_TURNS', 'CC_OCTO_SDK_SYSTEM_PROMPT', 'CC_OCTO_SDK_SETTING_SOURCES',
   'CC_OCTO_RATE_LIMIT_MAX_PER_MINUTE', 'CC_OCTO_CONTEXT_MAX_CHARS',
   'CC_OCTO_CONTEXT_HISTORY_LIMIT', 'CC_OCTO_BOT_BLOCKLIST',
+  'CC_OCTO_MENTION_FREE_GROUPS', 'CC_OCTO_MAX_RESPONSE_CHARS',
 ];
 
 function setup() {
@@ -250,6 +251,12 @@ describe('CC_OCTO_* env override coverage', () => {
     const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
     process.env.CC_OCTO_BOT_BLOCKLIST = 'bot-a, bot-b, bot-c';
     expect(loadConfig(path).botBlocklist).toEqual(['bot-a', 'bot-b', 'bot-c']);
+  });
+
+  it('CC_OCTO_MENTION_FREE_GROUPS (csv) overrides config (G12)', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    process.env.CC_OCTO_MENTION_FREE_GROUPS = 'group-1, group-2,group-3';
+    expect(loadConfig(path).mentionFreeGroups).toEqual(['group-1', 'group-2', 'group-3']);
   });
 });
 

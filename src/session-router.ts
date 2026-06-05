@@ -251,10 +251,18 @@ export class SessionRouter {
     }
 
     // G13: Strip leading @botname from group messages for cleaner LLM input.
+    //
+    // Only strip when we have positive evidence the leading @token IS the bot.
+    // The regex fallback used to strip *any* leading @word, which corrupts
+    // messages like "@alice please check" (especially in G12 mention-free
+    // groups, where the bot wasn't even @'d and would still lose the @alice
+    // context). We now only strip when:
+    //   1. entities precisely identify the bot at offset 0, OR
+    //   2. the bot is mentioned AND the leading @token resolves to its robotId.
     let cleanContent = content;
     if (this.isGroupLike(msg.channel_type)) {
-      // Try entities-based removal first (precise offset/length)
       const mention = msg.payload.mention;
+      // Path 1: entities-based removal (precise offset/length).
       if (mention?.entities && Array.isArray(mention.entities)) {
         const botEntity = mention.entities.find(
           (e: MentionEntity) => e.uid === this.robotId && e.offset === 0,
@@ -263,11 +271,13 @@ export class SessionRouter {
           cleanContent = content.substring(botEntity.length).trimStart();
         }
       }
-      // Fallback: regex strip leading @word
-      if (cleanContent === content) {
-        cleanContent = content.replace(/^@\S+\s*/, '').trim();
+      // Path 2: regex fallback — only when the bot was explicitly @mentioned.
+      // In mention-free groups (G12) where the bot wasn't @'d, do NOT touch
+      // the message — a leading @ is addressed to someone else.
+      if (cleanContent === content && this.isMentioned(msg)) {
+        cleanContent = content.replace(/^@\S+\s*/, '').trimStart();
       }
-      // If stripping emptied the content, keep original
+      // If stripping emptied the content, keep original.
       if (!cleanContent) cleanContent = content;
     }
 

@@ -136,17 +136,38 @@ async function handleMessage(
       // --- Build history prefix BEFORE appending current message (G10: segmented) ---
       const userContent = msg.payload.content ?? '';
 
-      // G3: Extract quoted/replied message content for LLM context
+      // G3: Extract quoted/replied message content for LLM context.
+      //
+      // The quote payload comes from a previously-sent message (bounded by the
+      // server's own size limits), but to honor cc-channel-octo's 32KB user
+      // content gate without amplification we truncate the quoted body to a
+      // small budget. The quoted content is supplementary context, not a
+      // primary input, so a 4KB cap preserves usefulness without bypassing
+      // the size guarantee documented in session-router.ts.
       let quotePrefix = '';
       const replyData = msg.payload?.reply;
       if (replyData) {
-        const replyPayload = replyData.payload;
-        const replyContent = replyPayload?.content ?? '';
+        const replyPayload = replyData?.payload;
+        const rawReplyContent = replyPayload?.content ?? '';
         const replyFrom = replyData.from_name ?? replyData.from_uid ?? 'unknown';
-        if (replyContent) {
-          quotePrefix = `[Quoted message from ${replyFrom}]: ${replyContent}\n---\n`;
+        if (rawReplyContent) {
+          const QUOTE_MAX_BYTES = 4_096;
+          let truncated = rawReplyContent;
+          if (Buffer.byteLength(rawReplyContent, 'utf-8') > QUOTE_MAX_BYTES) {
+            // Byte-safe truncate: take a generous char slice then trim by bytes.
+            // 4096 bytes can hold ~1365 CJK chars; slice 1366 to be safe and shrink.
+            truncated = rawReplyContent.slice(0, QUOTE_MAX_BYTES);
+            while (Buffer.byteLength(truncated, 'utf-8') > QUOTE_MAX_BYTES) {
+              truncated = truncated.slice(0, -1);
+            }
+            truncated += '…[truncated]';
+          }
+          quotePrefix = `[Quoted message from ${replyFrom}]: ${truncated}\n---\n`;
         }
       }
+      // Note: quotePrefix is added to LLM input only — store.appendUser below
+      // persists the raw user content without the quote prefix to avoid prefix
+      // duplication on conversation replay.
       const userContentForLLM = quotePrefix + (result.cleanContent ?? userContent);
 
       const historyPrefix = store.buildSegmentedHistoryPrefix(sessionKey, config.context.historyLimit);

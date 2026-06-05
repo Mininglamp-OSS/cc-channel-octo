@@ -23,7 +23,7 @@ vi.mock('../octo/api.js', () => ({
   }),
   generateClientMsgNo: vi.fn().mockReturnValue('client-msg-001'),
   fetchUserInfo: vi.fn().mockResolvedValue(null),
-}));;
+}));
 
 vi.mock('../agent-bridge.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('../agent-bridge.js')>();
@@ -164,15 +164,24 @@ async function simulateMessage(
 
     const userContent = msg.payload.content ?? '';
 
-    // G3: Extract quoted/replied message content for LLM context
+    // G3: Extract quoted/replied message content for LLM context (truncated to 4KB).
     let quotePrefix = '';
     const replyData = msg.payload?.reply;
     if (replyData) {
-      const replyPayload = replyData.payload;
-      const replyContent = replyPayload?.content ?? '';
+      const replyPayload = replyData?.payload;
+      const rawReplyContent = replyPayload?.content ?? '';
       const replyFrom = replyData.from_name ?? replyData.from_uid ?? 'unknown';
-      if (replyContent) {
-        quotePrefix = `[Quoted message from ${replyFrom}]: ${replyContent}\n---\n`;
+      if (rawReplyContent) {
+        const QUOTE_MAX_BYTES = 4_096;
+        let truncated = rawReplyContent;
+        if (Buffer.byteLength(rawReplyContent, 'utf-8') > QUOTE_MAX_BYTES) {
+          truncated = rawReplyContent.slice(0, QUOTE_MAX_BYTES);
+          while (Buffer.byteLength(truncated, 'utf-8') > QUOTE_MAX_BYTES) {
+            truncated = truncated.slice(0, -1);
+          }
+          truncated += '…[truncated]';
+        }
+        quotePrefix = `[Quoted message from ${replyFrom}]: ${truncated}\n---\n`;
       }
     }
     const userContentForLLM = quotePrefix + (result.cleanContent ?? userContent);
@@ -547,6 +556,34 @@ describe('E2E smoke tests', () => {
     expect(userMsg).toContain('[Quoted message from Alice]');
     expect(userMsg).toContain('the original code');
     expect(userMsg).toContain('what does this mean');
+  });
+
+  // P1 regression: oversized reply payload is truncated before being prepended
+  // to user content. Without this guard, a small current message could carry
+  // an unbounded payload.reply.payload.content into queryAgent, bypassing the
+  // 32KB content guard in session-router.
+  it('G3 P1: truncates oversized quoted reply to ~4KB', async () => {
+    const hugeReply = 'X'.repeat(50_000);
+    const msg = makeDmMsg('tell me about this', {
+      payload: {
+        type: MessageType.Text,
+        content: 'tell me about this',
+        reply: {
+          from_uid: 'other-user',
+          from_name: 'Alice',
+          payload: { type: MessageType.Text, content: hugeReply },
+        },
+      },
+    });
+    await simulateMessage(msg, config, store, router, groupContext, streamRelay);
+
+    expect(queryAgent).toHaveBeenCalledTimes(1);
+    const userMsg = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    // Truncation marker present.
+    expect(userMsg).toContain('[truncated]');
+    // Total prompt size is bounded (4KB cap + small framing overhead).
+    expect(userMsg.length).toBeLessThan(5_000);
+    expect(userMsg).toContain('tell me about this');
   });
 
   // --- G8: Read receipt ---
