@@ -2,14 +2,12 @@
 // Source: https://github.com/Mininglamp-OSS/openclaw-channel-octo
 // Removed: COS upload, GROUP.md API, OBO, rich text, media, thread/group management,
 //          read receipts, bot groups list, group info, mention prefs, space members.
-// Added: stream start/send/end API functions.
 
 import {
   ChannelType,
   MessageType,
   type MentionEntity,
   type SendMessageResult,
-  type BotStreamStartResp,
 } from "./types.js";
 import { randomUUID } from "node:crypto";
 
@@ -338,72 +336,4 @@ export async function fetchUserInfo(params: {
     console.error(`octo: fetchUserInfo(${params.uid}) error: ${String(err)}`);
     return null;
   }
-}
-
-// ─── Stream API ─────────────────────────────────────────────────────────────
-
-/** Start a streaming message. Returns a stream_no for subsequent sends. */
-export async function streamStart(params: {
-  apiUrl: string;
-  botToken: string;
-  channelId: string;
-  channelType: ChannelType;
-  payload: string; // base64-encoded initial payload
-}): Promise<string> {
-  const result = await postJson<BotStreamStartResp>(
-    params.apiUrl,
-    params.botToken,
-    "/bot/stream/start",
-    {
-      channel_id: params.channelId,
-      channel_type: params.channelType,
-      payload: params.payload,
-    },
-  );
-  if (!result?.stream_no) {
-    throw new Error("streamStart: no stream_no in response");
-  }
-  return result.stream_no;
-}
-
-/** Send an update to an ongoing stream. */
-export async function streamSend(params: {
-  apiUrl: string;
-  botToken: string;
-  streamNo: string;
-  channelId: string;
-  channelType: ChannelType;
-  payload: string; // base64-encoded payload
-}): Promise<void> {
-  await postJson(
-    params.apiUrl,
-    params.botToken,
-    "/bot/stream/send",
-    {
-      stream_no: params.streamNo,
-      channel_id: params.channelId,
-      channel_type: params.channelType,
-      payload: params.payload,
-    },
-  );
-}
-
-/** End a stream. */
-export async function streamEnd(params: {
-  apiUrl: string;
-  botToken: string;
-  streamNo: string;
-  channelId: string;
-  channelType: ChannelType;
-}): Promise<void> {
-  await postJson(
-    params.apiUrl,
-    params.botToken,
-    "/bot/stream/end",
-    {
-      stream_no: params.streamNo,
-      channel_id: params.channelId,
-      channel_type: params.channelType,
-    },
-  );
 }
