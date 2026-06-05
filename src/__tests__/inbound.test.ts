@@ -109,9 +109,6 @@ describe('buildMediaUrl', () => {
     ['%2E/foo.env', 'https://api.example.com/file/%2E/foo.env'],
     // sub/.. cancels within /file/ — final pathname still starts with /file/.
     ['sub/%2e%2e/escape.env', 'https://api.example.com/file/sub/%2e%2e/escape.env'],
-    // %2f (encoded slash) is NOT decoded by WHATWG pathname — stays literal.
-    // Server sees /file/..%2f..%2finternal which is a single path segment.
-    ['..%2f..%2finternal/secret.env', 'https://api.example.com/file/..%2f..%2finternal/secret.env'],
     // Double-encoded `%252e%252e` decodes to literal `%2e%2e` in the URL,
     // not to `..` — stays under /file/ at the HTTP layer.
     ['%252e%252e/internal/secret.env', 'https://api.example.com/file/%252e%252e/internal/secret.env'],
@@ -141,6 +138,22 @@ describe('buildMediaUrl', () => {
     // %20 (space) and other benign encoded chars should still pass.
     expect(buildMediaUrl('My%20File.png', API_URL))
       .toBe('https://api.example.com/file/My%20File.png');
+  });
+
+  // ─── C1 follow-up (项 #3): %2F encoded slash defense-in-depth ─────────
+  //
+  // WHATWG keeps %2F encoded in pathname so the sandbox check passes, but
+  // some HTTP servers (Apache AllowEncodedSlashes On, certain proxies) decode
+  // %2F server-side and then resolve dot-segments. Reject all %2F outright.
+
+  it.each([
+    '..%2f..%2finternal/secret.env',     // classic encoded-slash traversal
+    '..%2F..%2Finternal/secret.env',     // uppercase
+    '..%2f../internal/secret.env',       // mixed encoded + literal slash
+    'a%2Fb/c.txt',                       // any %2F at all
+    'file%2Ftest.txt',                   // even benign-looking
+  ])('rejects %2F encoded slash (server decode defense): %s', (input) => {
+    expect(buildMediaUrl(input, API_URL)).toBeUndefined();
   });
 });
 
