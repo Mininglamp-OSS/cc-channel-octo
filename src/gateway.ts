@@ -220,7 +220,7 @@ export class OctoGateway {
       this.socket = this.createSocket(reg.ws_url, reg.robot_id, reg.im_token);
       this.socket.connect();
     } catch (err) {
-      console.error('Token refresh failed:', err);
+      console.error('Token refresh failed:', String(err));
     } finally {
       this.isRefreshing = false;
     }
@@ -242,7 +242,7 @@ export class OctoGateway {
         this.heartbeatFailCount++;
         console.error(
           `Heartbeat failed (${this.heartbeatFailCount}/${this.MAX_HEARTBEAT_FAILURES}):`,
-          err,
+          String(err),
         );
         if (this.heartbeatFailCount >= this.MAX_HEARTBEAT_FAILURES) {
           console.error('Max heartbeat failures reached, triggering reconnect...');

@@ -170,7 +170,7 @@ async function handleMessage(
       }
 
     } catch (err) {
-      console.error(`[cc-channel-octo] Error processing message (session=${result.sessionKey}):`, err);
+      console.error(`[cc-channel-octo] Error processing message (session=${result.sessionKey}):`, String(err));
       // Best-effort error reply
       try {
         await sendMessage({
