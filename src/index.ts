@@ -19,6 +19,8 @@ import type { HistoricalMessage } from './octo/api.js';
 import { ChannelType, MessageType } from './octo/types.js';
 import type { BotMessage } from './octo/types.js';
 import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } from './inbound.js';
+import { buildInlinedFileBody } from './file-inline-wrap.js';
+import { Buffer } from 'node:buffer';
 import { join } from 'node:path';
 
 async function main(): Promise<void> {
@@ -168,7 +170,11 @@ async function handleMessage(
             knownSize,
           });
           if ('inlined' in fileResult) {
-            bodyText = `[文件: ${filename}]\n\n--- 文件内容 ---\n${fileResult.inlined}\n--- 文件结束 ---`;
+            // S2: wrap user-controlled file content in base64-encoded
+            // <file_content> tag to prevent prompt injection via forged
+            // close-delimiter. SECURITY_PROMPT_PREFIX explains to the LLM
+            // that decoded content remains untrusted.
+            bodyText = buildInlinedFileBody(filename, fileResult.inlined);
           } else if ('tempPath' in fileResult) {
             bodyText = `[文件: ${filename}]\n本地路径: ${fileResult.tempPath}\n远程 URL: ${resolved.mediaUrl}`;
           } else {
@@ -237,7 +243,17 @@ async function handleMessage(
       // Note: quotePrefix is added to LLM input only — store.appendUser below
       // persists the raw user content without the quote prefix to avoid prefix
       // duplication on conversation replay.
-      const userContentForLLM = quotePrefix + bodyText;
+      let userContentForLLM = quotePrefix + bodyText;
+
+      // S2 (Stage 6): hard cap on total user-role payload after file inline.
+      // Q10 caps `payload.content` at 32KB, S2 wraps inlined file at ~28KB,
+      // S3 caps quote at 4KB — sum gives the budget. 96KB leaves comfortable
+      // headroom for Claude SDK context limits while preventing accidental
+      // explosions if any cap is bypassed.
+      const MAX_USER_LLM_BYTES = 98_304; // 96 KB
+      if (Buffer.byteLength(userContentForLLM, 'utf-8') > MAX_USER_LLM_BYTES) {
+        userContentForLLM = userContentForLLM.slice(0, MAX_USER_LLM_BYTES) + '\n[… user input truncated to 96KB cap]';
+      }
 
       // G4: Backfill history from API when local cache is empty for groups.
       // Only triggered on first interaction with a group (cold start) to avoid
