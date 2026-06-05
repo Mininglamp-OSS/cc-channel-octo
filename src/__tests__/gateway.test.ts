@@ -101,6 +101,17 @@ describe('Process lock', () => {
     expect(existsSync(lockPath)).toBe(false);
   });
 
+  it('handles lock file with non-numeric content', async () => {
+    const lockPath = join(tmpDir, 'gateway.lock');
+    writeFileSync(lockPath, 'not-a-pid\n', { mode: 0o600 });
+
+    const gw = new OctoGateway(makeConfig());
+    // Non-numeric PID should be treated as stale (kill would fail) and overwritten
+    await gw.start();
+    expect(readFileSync(lockPath, 'utf-8').trim()).toBe(String(process.pid));
+    await gw.stop();
+  });
+
   it('stale PID detection: removes lock from dead process', async () => {
     const lockPath = join(tmpDir, 'gateway.lock');
     // Write a lock with a PID that definitely doesn't exist
@@ -162,6 +173,20 @@ describe('Bot registration and socket', () => {
         wsUrl: 'wss://ws.test/v1',
         uid: 'bot-123',
         token: 'im-token-abc',
+      }),
+    );
+
+    await gw.stop();
+  });
+
+  it('passes botToken and apiUrl to registerBot', async () => {
+    const gw = new OctoGateway(makeConfig());
+    await gw.start();
+
+    expect(registerBot).toHaveBeenCalledWith(
+      expect.objectContaining({
+        apiUrl: 'https://test.example.com',
+        botToken: 'bf_test',
       }),
     );
 
