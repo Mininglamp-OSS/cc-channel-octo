@@ -19,6 +19,20 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { MessagePayload, ForwardMessage, ForwardUser } from './octo/types.js';
 import { MessageType, RICH_TEXT_BLOCK_IMAGE, RICH_TEXT_BLOCK_TEXT, RICH_TEXT_IMAGE_PLACEHOLDER } from './octo/types.js';
+import { assertPublicUrl, fetchWithRedirectGuard } from './url-policy.js';
+
+/**
+ * S1 helper: same-host check for credential scoping.
+ * Returns true only when both URLs parse successfully and have matching host
+ * (case-insensitive). Falsy or malformed inputs return false (fail-closed).
+ */
+function isSameHost(url: string, apiUrl: string): boolean {
+  try {
+    return new URL(url).host.toLowerCase() === new URL(apiUrl).host.toLowerCase();
+  } catch {
+    return false;
+  }
+}
 
 // ─── Configuration ─────────────────────────────────────────────────────────
 
@@ -90,16 +104,56 @@ export interface ResolvedContent {
 
 // ─── URL helpers ───────────────────────────────────────────────────────────
 
-/** Resolve a relative storage path against the bot API base. */
+/**
+ * Resolve a relative storage path against the bot API base.
+ *
+ * S1 + P1.2 (Stage 6): Hardened against absolute-URL smuggling and path
+ * traversal:
+ *   - Reject scheme-relative URLs (`//attacker.com/...`)
+ *   - Reject path-traversal segments (`..`, `.`)
+ *   - Reject backslash injection
+ *   - For absolute http(s) URLs: only allow when host matches apiUrl host.
+ *     This is the chokepoint that prevents an attacker-controlled
+ *     payload.url from later being fetched with the bot's Authorization
+ *     header (which would leak botToken to the attacker's server).
+ */
 export function buildMediaUrl(relUrl?: string, apiUrl?: string): string | undefined {
   if (!relUrl) return undefined;
-  if (relUrl.startsWith('http://') || relUrl.startsWith('https://')) return relUrl;
+
+  // Reject backslashes outright — they're not valid in URL paths and are a
+  // known Windows-style traversal vector when normalized.
+  if (relUrl.includes('\\')) return undefined;
+
+  // Reject scheme-relative URLs (`//attacker.com/path`).
+  if (relUrl.startsWith('//')) return undefined;
+
+  // Absolute http(s) URL — only allow when host matches apiUrl host.
+  if (relUrl.startsWith('http://') || relUrl.startsWith('https://')) {
+    if (!apiUrl) return undefined;
+    try {
+      const target = new URL(relUrl);
+      const base = new URL(apiUrl);
+      if (target.host.toLowerCase() !== base.host.toLowerCase()) return undefined;
+      if (target.protocol !== base.protocol) return undefined;
+      return relUrl;
+    } catch {
+      return undefined;
+    }
+  }
+
+  // Relative path — strip /file/ or /file/preview/ prefix then enforce no traversal.
   let storagePath = relUrl;
   if (storagePath.startsWith('file/preview/')) {
     storagePath = storagePath.substring('file/preview/'.length);
   } else if (storagePath.startsWith('file/')) {
     storagePath = storagePath.substring('file/'.length);
   }
+  const segments = storagePath.split('/');
+  for (const seg of segments) {
+    if (seg === '..' || seg === '.') return undefined;
+  }
+  if (storagePath.startsWith('/')) return undefined;
+
   const baseUrl = apiUrl?.replace(/\/+$/, '') ?? '';
   return `${baseUrl}/file/${storagePath}`;
 }
@@ -430,6 +484,7 @@ function extractExtension(url: string, fallbackName?: string): string {
 export async function tryResolveFile(params: {
   url: string;
   botToken: string;
+  apiUrl: string;
   filename: string;
   knownSize?: number;
 }): Promise<
@@ -437,7 +492,7 @@ export async function tryResolveFile(params: {
   | { tempPath: string }
   | { description: string }
 > {
-  const { url, botToken, filename, knownSize } = params;
+  const { url, botToken, apiUrl, filename, knownSize } = params;
   const ext = extractExtension(url, filename);
   if (!TEXT_FILE_EXTENSIONS.has(ext)) {
     // Non-text — surface size info if known
@@ -453,11 +508,32 @@ export async function tryResolveFile(params: {
     return { description: `[文件: ${filename} (${formatBytes(knownSize)}) - 超过下载上限 ${formatBytes(MAX_FILE_DOWNLOAD_BYTES)}]` };
   }
 
-  // Download with streaming + size guard
+  // S1: SSRF defense — reject private/loopback/link-local addresses.
   try {
-    const resp = await fetch(url, {
-      headers: { Authorization: `Bearer ${botToken}` },
-      signal: AbortSignal.timeout(FILE_DOWNLOAD_TIMEOUT_MS),
+    await assertPublicUrl(url);
+  } catch (err) {
+    return { description: `[文件: ${filename} - 拒绝下载: ${String(err)}]` };
+  }
+
+  // S1 (re-review fix): scope Authorization PER HOP, not statically.
+  // The previous implementation set the header once based on the initial URL
+  // and then `fetchWithRedirectGuard` reused the same init across redirects —
+  // meaning a same-host initial URL that 302'd to attacker.com would still
+  // ship the Authorization header to the attacker. We now pass a perHopInit
+  // callback so the header is recomputed per hop and dropped whenever the
+  // current hop's host differs from apiUrl host.
+  const signal = AbortSignal.timeout(FILE_DOWNLOAD_TIMEOUT_MS);
+
+  // Download with streaming + size guard. fetchWithRedirectGuard
+  // re-validates SSRF on every redirect hop (S2) AND now re-decides the
+  // Authorization header per hop (S1 follow-up).
+  try {
+    const resp = await fetchWithRedirectGuard(url, (currentUrl) => {
+      const headers: Record<string, string> = {};
+      if (isSameHost(currentUrl, apiUrl)) {
+        headers.Authorization = `Bearer ${botToken}`;
+      }
+      return { headers, signal };
     });
     if (!resp.ok) {
       return { description: `[文件: ${filename} - 下载失败 HTTP ${resp.status}]` };

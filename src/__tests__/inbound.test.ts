@@ -25,9 +25,18 @@ describe('buildMediaUrl', () => {
     expect(buildMediaUrl('', API_URL)).toBeUndefined();
   });
 
-  it('passes through absolute http(s) URLs', () => {
-    expect(buildMediaUrl('https://cdn.x.com/a.jpg', API_URL)).toBe('https://cdn.x.com/a.jpg');
-    expect(buildMediaUrl('http://cdn.x.com/a.jpg', API_URL)).toBe('http://cdn.x.com/a.jpg');
+  it('only passes through absolute http(s) URLs when host matches apiUrl (S1)', () => {
+    // Same host — allowed
+    expect(buildMediaUrl('https://api.example.com/file/x.jpg', API_URL))
+      .toBe('https://api.example.com/file/x.jpg');
+    // Different host — rejected (was the SSRF + botToken leak vector)
+    expect(buildMediaUrl('https://cdn.x.com/a.jpg', API_URL)).toBeUndefined();
+    expect(buildMediaUrl('http://attacker.com/log', API_URL)).toBeUndefined();
+    expect(buildMediaUrl('http://169.254.169.254/meta', API_URL)).toBeUndefined();
+  });
+
+  it('rejects protocol downgrade (https apiUrl + http target)', () => {
+    expect(buildMediaUrl('http://api.example.com/file/x.jpg', API_URL)).toBeUndefined();
   });
 
   it('strips file/preview/ prefix', () => {
@@ -43,6 +52,31 @@ describe('buildMediaUrl', () => {
   it('handles raw storage path', () => {
     expect(buildMediaUrl('abc/img.png', API_URL))
       .toBe('https://api.example.com/file/abc/img.png');
+  });
+
+  // ─── S1 + P1.2 path traversal + smuggling defense ───────────────
+
+  it.each([
+    ['../v1/admin'],
+    ['file/../v1/admin'],
+    ['../../etc/passwd'],
+    ['file/a/../../v1/admin'],
+    ['./hidden'],
+  ])('rejects path traversal: %s', (input) => {
+    expect(buildMediaUrl(input, API_URL)).toBeUndefined();
+  });
+
+  it('rejects scheme-relative URL (//attacker.com)', () => {
+    expect(buildMediaUrl('//attacker.com/log', API_URL)).toBeUndefined();
+  });
+
+  it('rejects backslash injection (Windows-style traversal)', () => {
+    expect(buildMediaUrl('a\\..\\v1\\admin', API_URL)).toBeUndefined();
+    expect(buildMediaUrl('file\\backslash', API_URL)).toBeUndefined();
+  });
+
+  it('rejects leading-slash relative path (avoids double-slash output)', () => {
+    expect(buildMediaUrl('/abs/path/x.png', API_URL)).toBeUndefined();
   });
 });
 
