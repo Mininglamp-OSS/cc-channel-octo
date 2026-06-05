@@ -8,6 +8,11 @@ import type { Config } from './config.js';
 import type { BotMessage } from './octo/types.js';
 import { existsSync, writeFileSync, unlinkSync, readFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { createRequire } from 'node:module';
+
+// Read version from package.json at load time (Q31: no hardcoded version).
+const _require = createRequire(import.meta.url);
+const PKG_VERSION: string = (_require('../package.json') as { version: string }).version;
 
 export type MessageHandler = (msg: BotMessage) => void;
 
@@ -167,7 +172,7 @@ export class OctoGateway {
       apiUrl: this.config.apiUrl,
       botToken: this.config.botToken,
       agentPlatform: 'cc-channel-octo',
-      agentVersion: '0.1.0',
+      agentVersion: PKG_VERSION,
     });
 
     this.robotId = reg.robot_id;
@@ -211,7 +216,7 @@ export class OctoGateway {
         botToken: this.config.botToken,
         forceRefresh: true,
         agentPlatform: 'cc-channel-octo',
-        agentVersion: '0.1.0',
+        agentVersion: PKG_VERSION,
       });
 
       this.robotId = reg.robot_id;

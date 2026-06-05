@@ -24,6 +24,12 @@ const TYPING_INTERVAL_MS = 5_000;
 /** Maximum characters per message segment. */
 const MAX_SEGMENT_CHARS = 3_500;
 
+/** Default maximum accumulated response length before truncation (Q32). */
+const DEFAULT_MAX_RESPONSE_CHARS = 524_288; // 512 KB
+
+/** Truncation suffix appended when response exceeds limit. */
+const TRUNCATION_SUFFIX = '\n\n[response truncated]';
+
 // ─── Message Splitting ─────────────────────────────────────────────────────
 
 /**
@@ -106,6 +112,7 @@ export class StreamRelay {
     chunks: AsyncIterable<string>,
     apiUrl: string,
     botToken: string,
+    maxResponseChars: number = DEFAULT_MAX_RESPONSE_CHARS,
   ): Promise<void> {
     // --- Typing heartbeat ---
     const typingParams = { apiUrl, botToken, channelId, channelType };
@@ -116,10 +123,20 @@ export class StreamRelay {
     }, TYPING_INTERVAL_MS);
 
     try {
-      // Accumulate all chunks.
+      // Accumulate all chunks, with truncation guard (Q32).
       let accumulated = "";
+      let truncated = false;
       for await (const chunk of chunks) {
         accumulated += chunk;
+        // Q32: Stop accumulating once limit is reached to prevent unbounded memory.
+        if (accumulated.length > maxResponseChars) {
+          accumulated = accumulated.slice(0, maxResponseChars) + TRUNCATION_SUFFIX;
+          truncated = true;
+          break;
+        }
+      }
+      if (truncated) {
+        console.warn(`[stream-relay] Response truncated at ${maxResponseChars} chars`);
       }
 
       // Send accumulated text via plain messages with splitting.

@@ -152,7 +152,7 @@ async function handleMessage(
       }
 
       // --- Stream output to Octo ---
-      await streamRelay.deliver(channelId, channelType, teeChunks(), config.apiUrl, config.botToken);
+      await streamRelay.deliver(channelId, channelType, teeChunks(), config.apiUrl, config.botToken, config.maxResponseChars);
 
       // --- Store assistant response in history ---
       const fullResponse = collected.join('');
