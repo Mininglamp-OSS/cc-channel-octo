@@ -180,7 +180,7 @@ function encodeConnectPacket(opts: {
   const bodyBytes = Array.from(body.toUint8Array());
 
   const frame = new Encoder();
-  // header: packetType << 4 | flags (noPersist bit0 = hasServerVersion for CONNACK)
+  // header: packetType << 4 | flags
   frame.writeByte((PacketType.CONNECT << 4) | 0);
   frame.writeBytes(encodeVariableLength(bodyBytes.length));
   frame.writeBytes(bodyBytes);
@@ -572,9 +572,6 @@ export class WKSocket extends EventEmitter {
   private onPacket(data: Uint8Array): void {
     const firstByte = data[0];
     const packetType = firstByte >> 4;
-    const hasServerVersion = (firstByte & 0x01) > 0;
-    const noPersist = (firstByte & 0x01) > 0;
-    const reddot = ((firstByte >> 1) & 0x01) > 0;
 
     // Skip the header and variable-length bytes to get body
     const dec = new Decoder(data);
@@ -583,13 +580,24 @@ export class WKSocket extends EventEmitter {
       dec.readVariableLength(); // remaining length
     }
 
+    // WuKongIM header byte layout: [packetType:4][flags:4]
+    // Bit 0 of flags has DIFFERENT semantics per packet type:
+    //   CONNACK: bit 0 = hasServerVersion (server includes version byte in body)
+    //   RECV:    bit 0 = noPersist (message should not be persisted)
+    // Bit 1 of flags:
+    //   RECV:    bit 1 = reddot (show unread badge)
     switch (packetType) {
-      case PacketType.CONNACK:
+      case PacketType.CONNACK: {
+        const hasServerVersion = (firstByte & 0x01) > 0;
         this.onConnack(dec, hasServerVersion);
         break;
-      case PacketType.RECV:
-        this.onRecv(dec, noPersist, reddot);
+      }
+      case PacketType.RECV: {
+        const _noPersist = (firstByte & 0x01) > 0;
+        const _reddot = ((firstByte >> 1) & 0x01) > 0;
+        this.onRecv(dec, _noPersist, _reddot);
         break;
+      }
       case PacketType.DISCONNECT:
         this.onDisconnect(dec);
         break;
