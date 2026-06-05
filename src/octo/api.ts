@@ -273,7 +273,14 @@ export async function getUploadCredentials(params: {
   });
   if (!response.ok) {
     const text = await response.text().catch(() => "");
-    throw new Error(`Octo API /v1/bot/upload/credentials failed (${response.status}): ${text || response.statusText}`);
+    // P1 from PR#34 review: server may echo request headers (incl. Authorization
+    // bearer token) on some error responses. Cap at 200 chars and strip any
+    // "Authorization" / "Bearer" tokens defensively before surfacing.
+    const sanitized = text
+      .slice(0, 200)
+      .replace(/Bearer\s+\S+/gi, "Bearer ***")
+      .replace(/(authorization"?\s*[:=]\s*"?)[^"\s,}]+/gi, "$1***");
+    throw new Error(`Octo API /v1/bot/upload/credentials failed (${response.status}): ${sanitized || response.statusText}`);
   }
   const data = await response.json() as Record<string, unknown>;
   // Validate required fields to catch backend API changes early.

@@ -264,7 +264,41 @@ describe('uploadAndSendMedia', () => {
     expect(sendBody.payload.height).toBeUndefined();
   });
 
-  it('propagates COS upload errors', async () => {
+  it('rejects file:// URLs entirely (P0.1 security)', async () => {
+    await expect(uploadAndSendMedia({
+      apiUrl: 'https://test.example.com',
+      botToken: 'bf_test',
+      channelId: 'ch1',
+      channelType: ChannelType.Group,
+      mediaUrl: 'file:///etc/passwd',
+    })).rejects.toThrow(/file:\/\/ URLs are not allowed/);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(cosPutObjectMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['http://127.0.0.1/x.png', /127\.0\.0\.1/],
+    ['http://169.254.169.254/latest/meta-data/', /169\.254\.169\.254/],
+    ['http://10.0.0.1/internal', /10\.0\.0\.1/],
+    ['http://172.16.5.5/internal', /172\.16\.5\.5/],
+    ['http://192.168.1.1/admin', /192\.168\.1\.1/],
+    ['http://100.100.0.1/cgn', /100\.100\.0\.1/],
+    ['http://[::1]/loopback', /::1/],
+    ['http://[fc00::1]/ula', /fc00::1/],
+    ['http://[fe80::1]/linklocal', /fe80::1/],
+  ])('rejects SSRF target %s (P0.2 security)', async (url, msgPattern) => {
+    await expect(uploadAndSendMedia({
+      apiUrl: 'https://test.example.com',
+      botToken: 'bf_test',
+      channelId: 'ch1',
+      channelType: ChannelType.Group,
+      mediaUrl: url,
+    })).rejects.toThrow(msgPattern);
+    // assertPublicUrl runs BEFORE HEAD — no HTTP call should be made.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects propagates COS upload errors', async () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
       bucket: 'b', region: 'r', key: 'path/x.png',
       credentials: { tmpSecretId: 'i', tmpSecretKey: 'k', sessionToken: 't' },

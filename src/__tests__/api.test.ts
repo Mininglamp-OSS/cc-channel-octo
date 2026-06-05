@@ -233,4 +233,53 @@ describe('getUploadCredentials', () => {
     await expect(getUploadCredentials({ ...BASE, filename: 'x.png' }))
       .rejects.toThrow(/failed \(403\)/);
   });
+
+  it('sanitizes Bearer token in error body (P1 from PR#34 review)', async () => {
+    fetchMock.mockResolvedValueOnce(mockErrorResponse(
+      401,
+      'unauthorized: Authorization: Bearer bf_secret_token_12345',
+    ));
+    let captured: Error | undefined;
+    try {
+      await getUploadCredentials({ ...BASE, filename: 'x.png' });
+    } catch (err) {
+      captured = err as Error;
+    }
+    expect(captured).toBeDefined();
+    // Token MUST NOT appear in the surfaced error message.
+    expect(captured!.message).not.toContain('bf_secret_token_12345');
+    // Sanitization replacement marker present.
+    expect(captured!.message).toContain('***');
+  });
+
+  it('sanitizes JSON-quoted authorization header', async () => {
+    fetchMock.mockResolvedValueOnce(mockErrorResponse(
+      500,
+      '{"error":"oops","authorization":"bf_secret_in_json"}',
+    ));
+    let captured: Error | undefined;
+    try {
+      await getUploadCredentials({ ...BASE, filename: 'x.png' });
+    } catch (err) {
+      captured = err as Error;
+    }
+    expect(captured).toBeDefined();
+    expect(captured!.message).not.toContain('bf_secret_in_json');
+    expect(captured!.message).toContain('***');
+  });
+
+  it('caps error body at 200 chars', async () => {
+    const longBody = 'x'.repeat(500);
+    fetchMock.mockResolvedValueOnce(mockErrorResponse(500, longBody));
+    let captured: Error | undefined;
+    try {
+      await getUploadCredentials({ ...BASE, filename: 'x.png' });
+    } catch (err) {
+      captured = err as Error;
+    }
+    expect(captured).toBeDefined();
+    // Error prefix + 200 chars max + nothing more
+    expect(captured!.message.length).toBeLessThan(300);
+    expect(captured!.message).not.toMatch(/x{300,}/);
+  });
 });
