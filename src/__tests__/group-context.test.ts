@@ -215,4 +215,58 @@ describe('GroupContext', () => {
     expect(name2).toBe('Alice');
     expect(fetchUserInfo).toHaveBeenCalledTimes(1);
   });
+
+  // --- Q15: pushMessage persists to SQLite ---
+
+  it('pushMessage persists messages to group_messages table', () => {
+    ctx.pushMessage('ch1', 'u1', 'Alice', 'hello world', 1000);
+    ctx.pushMessage('ch1', 'u2', 'Bob', 'hi there', 2000);
+
+    const rows = adapter.prepare(
+      'SELECT from_uid, from_name, content, timestamp FROM group_messages WHERE channel_id = ? ORDER BY id',
+    ).all('ch1') as Array<{ from_uid: string; from_name: string; content: string; timestamp: number }>;
+    expect(rows.length).toBe(2);
+    expect(rows[0].from_uid).toBe('u1');
+    expect(rows[0].content).toBe('hello world');
+    expect(rows[1].from_uid).toBe('u2');
+  });
+
+  it('loadMessagesFromDb restores messages after fresh GroupContext creation', () => {
+    // Push messages with first context
+    ctx.pushMessage('ch1', 'u1', 'Alice', 'msg1', 1000);
+    ctx.pushMessage('ch1', 'u2', 'Bob', 'msg2', 2000);
+
+    // Create a fresh GroupContext with same adapter
+    const ctx2 = new GroupContext(adapter, 6000);
+    ctx2.loadMessagesFromDb('ch1');
+
+    // Should restore messages and produce context
+    const context = ctx2.buildContext('ch1');
+    expect(context).toContain('Alice：msg1');
+    expect(context).toContain('Bob：msg2');
+  });
+
+  // --- Q16: loadAllFromDb ---
+
+  it('loadAllFromDb loads members and messages for all groups', () => {
+    // Setup: push data to two different groups
+    ctx.pushMessage('ch1', 'u1', 'Alice', 'hello', 1000);
+    ctx.pushMessage('ch2', 'u2', 'Bob', 'world', 2000);
+    ctx.learnMember('ch1', 'u1', 'Alice');
+    ctx.learnMember('ch2', 'u2', 'Bob');
+
+    // Create a fresh context and loadAllFromDb
+    const ctx2 = new GroupContext(adapter, 6000);
+    ctx2.loadAllFromDb();
+
+    // Members should be restored
+    expect(ctx2.getName('u1', 'ch1')).toBe('Alice');
+    expect(ctx2.getName('u2', 'ch2')).toBe('Bob');
+
+    // Messages should be restored
+    const context1 = ctx2.buildContext('ch1');
+    expect(context1).toContain('Alice：hello');
+    const context2 = ctx2.buildContext('ch2');
+    expect(context2).toContain('Bob：world');
+  });
 });

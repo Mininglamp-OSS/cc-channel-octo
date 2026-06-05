@@ -32,6 +32,9 @@ export class GroupContext {
 
   private upsertMember!: PreparedStatement;
   private selectMembers!: PreparedStatement;
+  private insertMessage!: PreparedStatement;
+  private selectRecentMessages!: PreparedStatement;
+  private deleteOldMessages!: PreparedStatement;
 
   constructor(adapter: DbAdapter, maxContextChars: number) {
     this.adapter = adapter;
@@ -41,11 +44,35 @@ export class GroupContext {
   }
 
   private initStatements(): void {
+    this.adapter.exec(`
+      CREATE TABLE IF NOT EXISTS group_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        channel_id TEXT NOT NULL,
+        from_uid TEXT NOT NULL,
+        from_name TEXT NOT NULL,
+        content TEXT NOT NULL,
+        timestamp INTEGER NOT NULL
+      )
+    `);
+    this.adapter.exec(`
+      CREATE INDEX IF NOT EXISTS idx_group_messages_channel
+      ON group_messages (channel_id, id DESC)
+    `);
+
     this.upsertMember = this.adapter.prepare(
       'INSERT INTO group_members (group_id, uid, name, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(group_id, uid) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at',
     );
     this.selectMembers = this.adapter.prepare(
       'SELECT uid, name FROM group_members WHERE group_id = ?',
+    );
+    this.insertMessage = this.adapter.prepare(
+      'INSERT INTO group_messages (channel_id, from_uid, from_name, content, timestamp) VALUES (?, ?, ?, ?, ?)',
+    );
+    this.selectRecentMessages = this.adapter.prepare(
+      'SELECT from_uid, from_name, content, timestamp FROM group_messages WHERE channel_id = ? ORDER BY id DESC LIMIT ?',
+    );
+    this.deleteOldMessages = this.adapter.prepare(
+      'DELETE FROM group_messages WHERE channel_id = ? AND id NOT IN (SELECT id FROM group_messages WHERE channel_id = ? ORDER BY id DESC LIMIT ?)',
     );
   }
 
@@ -84,6 +111,14 @@ export class GroupContext {
       window.shift();
     }
     this.learnMember(channelId, fromUid, fromName);
+
+    try {
+      this.insertMessage.run(channelId, fromUid, fromName, content, timestamp);
+      // Trim old messages to keep DB bounded (keep 2x window for safety)
+      this.deleteOldMessages.run(channelId, channelId, this.maxWindowSize * 2);
+    } catch (err) {
+      console.error(`group-context: insert message failed: ${String(err)}`);
+    }
   }
 
   learnMember(channelId: string, uid: string, name: string): void {
@@ -223,6 +258,49 @@ export class GroupContext {
       }
     } catch (err) {
       console.error(`group-context: loadMembersFromDb(${channelId}) failed: ${String(err)}`);
+    }
+  }
+
+  loadMessagesFromDb(channelId: string): void {
+    try {
+      const rows = this.selectRecentMessages.all(channelId, this.maxWindowSize) as Array<{
+        from_uid: string;
+        from_name: string;
+        content: string;
+        timestamp: number;
+      }>;
+      if (rows.length === 0) return;
+      // Rows come in DESC order, reverse to chronological
+      rows.reverse();
+      const existing = this.messageCache.get(channelId);
+      if (existing && existing.length > 0) return; // Don't overwrite live data
+      // Map snake_case DB columns to camelCase GroupMessage
+      this.messageCache.set(channelId, rows.map(r => ({
+        fromUid: r.from_uid,
+        fromName: r.from_name,
+        content: r.content,
+        timestamp: r.timestamp,
+      })));
+    } catch (err) {
+      console.error(`group-context: loadMessagesFromDb(${channelId}) failed: ${String(err)}`);
+    }
+  }
+
+  /** Load all persisted members and messages from DB (call once at startup). */
+  loadAllFromDb(): void {
+    try {
+      const rows = this.adapter.prepare(
+        'SELECT DISTINCT group_id FROM group_members',
+      ).all() as Array<{ group_id: string }>;
+      for (const row of rows) {
+        this.loadMembersFromDb(row.group_id);
+        this.loadMessagesFromDb(row.group_id);
+      }
+      if (rows.length > 0) {
+        console.log(`[group-context] Loaded members + messages for ${rows.length} group(s) from DB`);
+      }
+    } catch (err) {
+      console.error(`group-context: loadAllFromDb failed: ${String(err)}`);
     }
   }
 }
