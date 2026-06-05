@@ -93,7 +93,7 @@ Forked from [openclaw-channel-octo](https://github.com/Mininglamp-OSS/openclaw-c
 6. Inside handler (still under lock):
    a. session-store: getOrCreate session, build history prefix
    b. agent-bridge: buildPrompt (history + message) → query() → AsyncIterable<string>
-   c. stream-relay: typing heartbeat + throttled stream flushes to Octo
+   c. stream-relay: typing heartbeat + sendMessage delivery to Octo
    d. session-store: append user message + assistant response
 7. Lock released → next queued message for this session proceeds
 ```
