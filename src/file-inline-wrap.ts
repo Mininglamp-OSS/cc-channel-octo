@@ -109,6 +109,42 @@ export function buildInlinedFileBody(filename: string, content: string): string 
   }
 }
 
+/**
+ * Byte-safe truncation for UTF-8 strings.
+ *
+ * `String.prototype.slice` operates on UTF-16 code units, so a 96K-char slice
+ * of CJK text can still be 280K+ bytes. This helper encodes to a Buffer,
+ * truncates by byte count, then trims any trailing partial UTF-8 sequence so
+ * the decoded output never contains a U+FFFD replacement char.
+ *
+ * Returns the truncated string + the original byte length (so callers can
+ * decide whether to append a truncation marker).
+ */
+export function truncateUtf8ByBytes(input: string, maxBytes: number): {
+  truncated: string;
+  originalBytes: number;
+  wasTruncated: boolean;
+} {
+  const buf = Buffer.from(input, 'utf-8');
+  if (buf.length <= maxBytes) {
+    return { truncated: input, originalBytes: buf.length, wasTruncated: false };
+  }
+  let trimmed = buf.subarray(0, maxBytes);
+  // Trim back to a valid UTF-8 boundary. At most 3 steps for valid UTF-8
+  // (4-byte max sequence). Continuation bytes are 10xxxxxx, leaders 11xxxxxx.
+  for (let i = 0; i < 3 && trimmed.length > 0; i++) {
+    const lastByte = trimmed[trimmed.length - 1];
+    if (lastByte < 0x80) break; // ASCII boundary — safe
+    trimmed = trimmed.subarray(0, trimmed.length - 1);
+    if ((lastByte & 0xC0) === 0xC0) break; // dropped a leader — sequence complete
+  }
+  return {
+    truncated: trimmed.toString('utf-8'),
+    originalBytes: buf.length,
+    wasTruncated: true,
+  };
+}
+
 /** Exported for tests. */
 export const _internal = {
   MAX_INLINE_WRAP_BYTES,

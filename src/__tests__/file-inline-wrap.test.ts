@@ -14,6 +14,7 @@ import { Buffer } from 'node:buffer';
 import {
   wrapInlinedFileContent,
   buildInlinedFileBody,
+  truncateUtf8ByBytes,
   _internal,
 } from '../file-inline-wrap.js';
 
@@ -150,3 +151,68 @@ describe('Internal sanitizeFilenameForAttribute', () => {
     expect(fn('x'.repeat(200)).length).toBe(128);
   });
 });
+
+describe('truncateUtf8ByBytes (PR#40 review nit fix — byte-safe truncation)', () => {
+  it('returns input unchanged when under cap', () => {
+    const r = truncateUtf8ByBytes('hello', 100);
+    expect(r.truncated).toBe('hello');
+    expect(r.wasTruncated).toBe(false);
+    expect(r.originalBytes).toBe(5);
+  });
+
+  it('truncates ASCII string to exact byte cap', () => {
+    const input = 'A'.repeat(200);
+    const r = truncateUtf8ByBytes(input, 100);
+    expect(r.truncated.length).toBe(100); // ASCII: 1 char = 1 byte
+    expect(r.wasTruncated).toBe(true);
+    expect(r.originalBytes).toBe(200);
+  });
+
+  it('truncates CJK string by BYTES not chars (the actual bug)', () => {
+    // 100 CJK chars × 3 bytes = 300 bytes. With char-based .slice, a 96-byte
+    // cap would let through 96 chars = 288 bytes (3x oversized).
+    // With byte-based truncation, output must be <= 96 bytes.
+    const input = '中'.repeat(100);
+    const r = truncateUtf8ByBytes(input, 96);
+    expect(Buffer.byteLength(r.truncated, 'utf-8')).toBeLessThanOrEqual(96);
+    expect(r.wasTruncated).toBe(true);
+    expect(r.originalBytes).toBe(300);
+  });
+
+  it('trims back to valid UTF-8 boundary — no U+FFFD replacement char', () => {
+    // 3-byte CJK char would straddle the boundary if we cut mid-sequence.
+    // After trim-back, output must NOT contain U+FFFD.
+    const input = '中'.repeat(50); // 150 bytes
+    // Cap at 100 bytes = exactly 33.33 chars worth — cuts mid-character.
+    const r = truncateUtf8ByBytes(input, 100);
+    expect(r.truncated).not.toContain('\uFFFD');
+    // Also verify the truncated string decodes back to its original chars.
+    const charsInOutput = [...r.truncated].length;
+    expect(charsInOutput).toBe(33); // 33 complete chars = 99 bytes
+    expect(Buffer.byteLength(r.truncated, 'utf-8')).toBe(99);
+  });
+
+  it('handles 4-byte emoji at boundary without producing U+FFFD', () => {
+    // 🚀 is 4 bytes in UTF-8. With a cap that cuts mid-emoji, trim-back
+    // must drop the partial sequence entirely.
+    const input = 'X' + '🚀'.repeat(5);  // 1 + 4*5 = 21 bytes
+    const r = truncateUtf8ByBytes(input, 10);    // mid-emoji boundary
+    expect(r.truncated).not.toContain('\uFFFD');
+    expect(Buffer.byteLength(r.truncated, 'utf-8')).toBeLessThanOrEqual(10);
+  });
+
+  it('handles mixed ASCII + CJK + emoji', () => {
+    const input = 'hello 世界 🌍 test';
+    const r = truncateUtf8ByBytes(input, 12);
+    expect(r.truncated).not.toContain('\uFFFD');
+    expect(Buffer.byteLength(r.truncated, 'utf-8')).toBeLessThanOrEqual(12);
+  });
+
+  it('reports correct originalBytes for multi-byte content', () => {
+    const input = '中'.repeat(10); // 30 bytes
+    const r = truncateUtf8ByBytes(input, 100);
+    expect(r.originalBytes).toBe(30);
+    expect(r.wasTruncated).toBe(false);
+  });
+});
+

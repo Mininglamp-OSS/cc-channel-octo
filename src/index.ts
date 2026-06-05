@@ -19,7 +19,7 @@ import type { HistoricalMessage } from './octo/api.js';
 import { ChannelType, MessageType } from './octo/types.js';
 import type { BotMessage } from './octo/types.js';
 import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } from './inbound.js';
-import { buildInlinedFileBody } from './file-inline-wrap.js';
+import { buildInlinedFileBody, truncateUtf8ByBytes } from './file-inline-wrap.js';
 import { Buffer } from 'node:buffer';
 import { join } from 'node:path';
 
@@ -250,9 +250,15 @@ async function handleMessage(
       // S3 caps quote at 4KB — sum gives the budget. 96KB leaves comfortable
       // headroom for Claude SDK context limits while preventing accidental
       // explosions if any cap is bypassed.
+      //
+      // Byte-safe truncation via truncateUtf8ByBytes (Q静春 PR#40 review nit):
+      // String.prototype.slice operates on UTF-16 code units, so a CJK-heavy
+      // payload would not actually be capped at 96KB. The helper trims to a
+      // valid UTF-8 boundary so we never emit a replacement char.
       const MAX_USER_LLM_BYTES = 98_304; // 96 KB
-      if (Buffer.byteLength(userContentForLLM, 'utf-8') > MAX_USER_LLM_BYTES) {
-        userContentForLLM = userContentForLLM.slice(0, MAX_USER_LLM_BYTES) + '\n[… user input truncated to 96KB cap]';
+      const { truncated, wasTruncated } = truncateUtf8ByBytes(userContentForLLM, MAX_USER_LLM_BYTES);
+      if (wasTruncated) {
+        userContentForLLM = truncated + '\n[… user input truncated to 96KB cap]';
       }
 
       // G4: Backfill history from API when local cache is empty for groups.
