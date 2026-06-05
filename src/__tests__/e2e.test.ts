@@ -161,8 +161,8 @@ async function simulateMessage(
     }
 
     const userContent = msg.payload.content ?? '';
-    const historyPrefix = store.buildHistoryPrefix(sessionKey, config.context.historyLimit);
-    store.appendUser(sessionKey, userContent);
+    const historyPrefix = store.buildSegmentedHistoryPrefix(sessionKey, config.context.historyLimit);
+    store.appendUser(sessionKey, userContent, msg.message_seq);
 
     const rawChunks = queryAgent(userContent, historyPrefix, contextStr, config);
 
@@ -184,7 +184,8 @@ async function simulateMessage(
 
     const fullResponse = collected.join('');
     if (fullResponse) {
-      store.appendAssistant(sessionKey, fullResponse);
+      store.appendAssistant(sessionKey, fullResponse, msg.message_seq);
+      store.setLastBotReplySeq(sessionKey, msg.message_seq);
     }
     } catch (err) {
       console.error('simulateMessage error:', err);
@@ -205,6 +206,7 @@ async function simulateMessage(
   if (
     !wasProcessed &&
     isGroup &&
+    !msg.streamOn &&
     msg.payload.type === MessageType.Text &&
     msg.payload.content
   ) {
@@ -443,5 +445,56 @@ describe('E2E smoke tests', () => {
     const history = store.buildHistoryPrefix(USER_UID, 40);
     expect(history).toContain('[user]: empty response');
     expect(history).not.toContain('[assistant]');
+  });
+
+  // --- PR#30 review: G21 streamOn must not pollute group context ---
+
+  it('streamOn=true group message is NOT cached in group context (G21 fix)', async () => {
+    const baseMsg = makeGroupMsg('streaming partial update');
+    const streamingMsg: BotMessage = { ...baseMsg, streamOn: true };
+
+    await simulateMessage(streamingMsg, config, store, router, groupContext, streamRelay);
+
+    // The streaming update must NOT appear in the group context window.
+    const context = groupContext.buildContext(GROUP_CHANNEL);
+    expect(context).not.toContain('streaming partial update');
+  });
+
+  it('streamOn=false group message IS cached in group context (G21 baseline)', async () => {
+    const finalMsg = makeGroupMsg('final message');
+    await simulateMessage(finalMsg, config, store, router, groupContext, streamRelay);
+
+    const context = groupContext.buildContext(GROUP_CHANNEL);
+    expect(context).toContain('final message');
+  });
+
+  // --- PR#30 review: G10 segmentation actually runs end-to-end ---
+
+  it('handleMessage records lastBotReplySeq so next turn segments history (G10 fix)', async () => {
+    mockQueryYield('first answer');
+    await simulateMessage(
+      { ...makeDmMsg('first question'), message_seq: 100 },
+      config, store, router, groupContext, streamRelay,
+    );
+
+    // After the first turn, lastBotReplySeq should be set to 100.
+    expect(store.getLastBotReplySeq(USER_UID)).toBe(100);
+
+    // Second turn: user sends a follow-up with seq=101 — it must be labeled [new].
+    mockQueryYield('second answer');
+    await simulateMessage(
+      { ...makeDmMsg('follow-up question'), message_seq: 101 },
+      config, store, router, groupContext, streamRelay,
+    );
+
+    // Inspect history segmentation as it was built for the second turn.
+    // Set lastBotReplySeq back to 100 to simulate the state the second turn saw.
+    store.setLastBotReplySeq(USER_UID, 100);
+    const segHistory = store.buildSegmentedHistoryPrefix(USER_UID, 40);
+    expect(segHistory).toContain('[answered history]');
+    expect(segHistory).toContain('first question');
+    expect(segHistory).toContain('first answer');
+    expect(segHistory).toContain('[new messages]');
+    expect(segHistory).toContain('follow-up question');
   });
 });

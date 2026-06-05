@@ -23,6 +23,7 @@ interface SessionRow {
 interface MessageRow {
   role: 'user' | 'assistant';
   content: string;
+  message_seq: number | null;
 }
 
 const SCHEMA = `
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS messages (
   role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
   content TEXT NOT NULL,
   timestamp INTEGER NOT NULL,
+  message_seq INTEGER,
   FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
@@ -77,6 +79,9 @@ export class SessionStore {
   private deleteExpired!: PreparedStatement;
   private deleteSessionStmt!: PreparedStatement;
 
+  /** Tracks the last message_seq at which the bot replied, per group session key. */
+  private lastBotReplySeq = new Map<string, number>();
+
   constructor(adapter: DbAdapter) {
     this.adapter = adapter;
   }
@@ -84,16 +89,28 @@ export class SessionStore {
   init(): void {
     this.adapter.exec(SCHEMA);
 
+    // Migration: add message_seq column if missing (for DBs created before G10).
+    try {
+      const cols = this.adapter
+        .prepare("PRAGMA table_info(messages)")
+        .all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === 'message_seq')) {
+        this.adapter.exec('ALTER TABLE messages ADD COLUMN message_seq INTEGER');
+      }
+    } catch (err) {
+      console.warn(`session-store: migration check failed: ${String(err)}`);
+    }
+
     this.selectSession = this.adapter.prepare('SELECT * FROM sessions WHERE id = ?');
     this.insertSession = this.adapter.prepare(
       'INSERT INTO sessions (id, channel_id, channel_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
     );
     this.touchSession = this.adapter.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?');
     this.insertMessage = this.adapter.prepare(
-      'INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)',
+      'INSERT INTO messages (session_id, role, content, timestamp, message_seq) VALUES (?, ?, ?, ?, ?)',
     );
     this.selectRecentMessages = this.adapter.prepare(
-      'SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?',
+      'SELECT role, content, message_seq FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?',
     );
     this.deleteExpired = this.adapter.prepare('DELETE FROM sessions WHERE updated_at < ?');
     this.deleteSessionStmt = this.adapter.prepare('DELETE FROM sessions WHERE id = ?');
@@ -116,17 +133,22 @@ export class SessionStore {
     };
   }
 
-  appendUser(sessionId: string, content: string): void {
-    this.append(sessionId, 'user', content);
+  appendUser(sessionId: string, content: string, messageSeq?: number): void {
+    this.append(sessionId, 'user', content, messageSeq);
   }
 
-  appendAssistant(sessionId: string, content: string): void {
-    this.append(sessionId, 'assistant', content);
+  appendAssistant(sessionId: string, content: string, messageSeq?: number): void {
+    this.append(sessionId, 'assistant', content, messageSeq);
   }
 
-  private append(sessionId: string, role: 'user' | 'assistant', content: string): void {
+  private append(
+    sessionId: string,
+    role: 'user' | 'assistant',
+    content: string,
+    messageSeq?: number,
+  ): void {
     const now = Date.now();
-    this.insertMessage.run(sessionId, role, content, now);
+    this.insertMessage.run(sessionId, role, content, now, messageSeq ?? null);
     this.touchSession.run(now, sessionId);
   }
 
@@ -149,5 +171,67 @@ export class SessionStore {
 
   close(): void {
     this.adapter.close();
+  }
+
+  /** Record the message_seq at which the bot last replied for a session. */
+  setLastBotReplySeq(sessionId: string, seq: number): void {
+    this.lastBotReplySeq.set(sessionId, seq);
+  }
+
+  /** Get the message_seq at which the bot last replied for a session. */
+  getLastBotReplySeq(sessionId: string): number | undefined {
+    return this.lastBotReplySeq.get(sessionId);
+  }
+
+  /**
+   * Build history prefix with answered/new segmentation (G10).
+   * Messages with message_seq <= lastBotReplySeq are labeled [answered history],
+   * messages after are labeled [new messages]. Falls back to flat history if
+   * no lastBotReplySeq tracked or no seq data available.
+   */
+  buildSegmentedHistoryPrefix(sessionId: string, limit: number): string {
+    const rows = this.selectRecentMessages.all(sessionId, limit) as MessageRow[];
+    const ordered = rows.slice().reverse();
+    if (ordered.length === 0) return '';
+
+    const lastReplySeq = this.lastBotReplySeq.get(sessionId);
+    if (lastReplySeq === undefined) {
+      // No segmentation tracking — return flat history.
+      return ordered.map((r) => `[${r.role}]: ${r.content}`).join('\n');
+    }
+
+    // Real segmentation by message_seq (G10 fix per PR#30 review):
+    // - rows with message_seq <= lastReplySeq are answered
+    // - rows with message_seq > lastReplySeq are new
+    // - rows with NULL message_seq (assistant replies, legacy) attach to the
+    //   answered side if they precede any "new" user row, else stay flat.
+    const answered: MessageRow[] = [];
+    const newMsgs: MessageRow[] = [];
+    let seenNew = false;
+    for (const r of ordered) {
+      if (r.message_seq != null && r.message_seq > lastReplySeq) {
+        seenNew = true;
+        newMsgs.push(r);
+      } else if (r.message_seq != null) {
+        answered.push(r);
+      } else {
+        // No seq (e.g. assistant reply) — follows the current side.
+        (seenNew ? newMsgs : answered).push(r);
+      }
+    }
+
+    if (newMsgs.length === 0) {
+      // Nothing new since last reply — don't show segmentation labels.
+      return answered.map((r) => `[${r.role}]: ${r.content}`).join('\n');
+    }
+
+    const parts: string[] = [];
+    if (answered.length > 0) {
+      parts.push('[answered history]');
+      parts.push(...answered.map((r) => `[${r.role}]: ${r.content}`));
+    }
+    parts.push('[new messages]');
+    parts.push(...newMsgs.map((r) => `[${r.role}]: ${r.content}`));
+    return parts.join('\n');
   }
 }

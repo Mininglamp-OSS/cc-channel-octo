@@ -705,6 +705,7 @@ export class WKSocket extends EventEmitter {
       channel_type: channelType,
       timestamp,
       payload,
+      streamOn: setting.streamOn,
     };
 
     this.opts.onMessage(msg);
