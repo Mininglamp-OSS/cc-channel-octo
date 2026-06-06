@@ -6,18 +6,52 @@
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { isAllowedApiUrl } from './url-policy.js';
 
+/**
+ * Q2: Wildcard form of `allowedTools` — `"*"` means "allow every tool the SDK
+ * exposes". Otherwise must be an explicit string array (whitelist mode).
+ */
+export type AllowedTools = string[] | '*';
+
 export interface Config {
   botToken: string;
   apiUrl: string;
+  /**
+   * Q3: Base directory for per-session cwd isolation. Each (DM peer | group |
+   * thread) gets its own hashed subdirectory under this path. Resolved via
+   * `cwd-resolver.resolveSessionCwd()` before passing to the SDK.
+   *
+   * loadConfig() always populates this. Direct Config mocks (e.g. in tests)
+   * may rely on the deprecated `cwd` alias instead — call sites should read
+   * `config.cwdBase ?? config.cwd` to support both.
+   */
+  cwdBase?: string;
+  /**
+   * @deprecated Use `cwdBase`. Retained as a required compat alias for one
+   * release so existing tests and consumers that build Config objects by hand
+   * continue to compile. loadConfig() keeps this in sync with `cwdBase`.
+   */
   cwd: string;
   dataDir: string;
   sdk: {
     model?: string;
-    allowedTools: string[];
+    /**
+     * Q2: `"*"` allows every tool the SDK exposes; otherwise an explicit
+     * whitelist. Default is `"*"` because we already control surface area via
+     * `permissionMode` and `cwdBase` isolation — the old hard-coded 8-tool
+     * list was redundant lockdown and broke operators who needed SDK-internal
+     * tools like `TodoWrite`/`Task`.
+     */
+    allowedTools: AllowedTools;
     permissionMode: string;
     maxTurns?: number;
     systemPrompt?: string;
     settingSources: string[];
+    /**
+     * Q1: Override the upstream Claude API endpoint (e.g. self-hosted gateway).
+     * Forwarded to the SDK subprocess via the standard `ANTHROPIC_BASE_URL`
+     * environment variable. Env priority: `ANTHROPIC_BASE_URL` > this field.
+     */
+    anthropicBaseUrl?: string;
   };
   rateLimit: {
     maxPerMinute: number;
@@ -41,6 +75,9 @@ export interface Config {
 type PartialConfig = {
   botToken?: string;
   apiUrl?: string;
+  /** Q3: canonical field — base dir for per-session cwd isolation. */
+  cwdBase?: string;
+  /** Q3 deprecated alias — maps to cwdBase with a warning. */
   cwd?: string;
   dataDir?: string;
   sdk?: Partial<Config['sdk']>;
@@ -56,10 +93,12 @@ function defaults(): Config {
   return {
     botToken: '',
     apiUrl: '',
+    cwdBase: process.cwd(),
     cwd: process.cwd(),
     dataDir: './data',
     sdk: {
-      allowedTools: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebFetch', 'WebSearch'],
+      // Q2: default to wildcard — operators tighten only when they need to.
+      allowedTools: '*',
       permissionMode: 'bypassPermissions',
       settingSources: ['user'],
     },
@@ -110,10 +149,21 @@ function readConfigFile(configFilePath: string): PartialConfig {
 }
 
 function mergeConfig(base: Config, override: PartialConfig): Config {
+  // Q3: accept legacy `cwd` as an alias for `cwdBase`. cwdBase wins if both
+  // are present; otherwise cwd warns and is used.
+  let cwdBase = override.cwdBase ?? base.cwdBase ?? base.cwd;
+  if (override.cwdBase === undefined && override.cwd !== undefined) {
+    console.warn(
+      '[cc-channel-octo] WARNING: config.cwd is deprecated, use config.cwdBase instead',
+    );
+    cwdBase = override.cwd;
+  }
   return {
     botToken: override.botToken ?? base.botToken,
     apiUrl: override.apiUrl ?? base.apiUrl,
-    cwd: override.cwd ?? base.cwd,
+    cwdBase,
+    // Keep deprecated `cwd` in sync so any legacy reader still sees a value.
+    cwd: cwdBase ?? base.cwd,
     dataDir: override.dataDir ?? base.dataDir,
     sdk: {
       ...base.sdk,
@@ -163,12 +213,25 @@ function applyEnv(cfg: Config): Config {
 
   if (env.CC_OCTO_BOT_TOKEN) next.botToken = env.CC_OCTO_BOT_TOKEN;
   if (env.CC_OCTO_API_URL) next.apiUrl = env.CC_OCTO_API_URL;
-  if (env.CC_OCTO_CWD) next.cwd = env.CC_OCTO_CWD;
+  // Q3: CC_OCTO_CWDBASE wins; CC_OCTO_CWD is accepted with a deprecation warning.
+  if (env.CC_OCTO_CWDBASE) {
+    next.cwdBase = env.CC_OCTO_CWDBASE;
+    next.cwd = env.CC_OCTO_CWDBASE;
+  } else if (env.CC_OCTO_CWD) {
+    console.warn(
+      '[cc-channel-octo] WARNING: CC_OCTO_CWD is deprecated, use CC_OCTO_CWDBASE instead',
+    );
+    next.cwdBase = env.CC_OCTO_CWD;
+    next.cwd = env.CC_OCTO_CWD;
+  }
   if (env.CC_OCTO_DATA_DIR) next.dataDir = env.CC_OCTO_DATA_DIR;
 
   if (env.CC_OCTO_SDK_MODEL) next.sdk.model = env.CC_OCTO_SDK_MODEL;
   if (env.CC_OCTO_SDK_ALLOWED_TOOLS) {
-    next.sdk.allowedTools = parseCsv(env.CC_OCTO_SDK_ALLOWED_TOOLS);
+    // Q2: accept the literal `*` token (with surrounding whitespace tolerated)
+    // as the wildcard form; otherwise treat as CSV whitelist.
+    const raw = env.CC_OCTO_SDK_ALLOWED_TOOLS.trim();
+    next.sdk.allowedTools = raw === '*' ? '*' : parseCsv(env.CC_OCTO_SDK_ALLOWED_TOOLS);
   }
   if (env.CC_OCTO_SDK_PERMISSION_MODE) {
     next.sdk.permissionMode = env.CC_OCTO_SDK_PERMISSION_MODE;
@@ -179,6 +242,11 @@ function applyEnv(cfg: Config): Config {
   if (env.CC_OCTO_SDK_SYSTEM_PROMPT) next.sdk.systemPrompt = env.CC_OCTO_SDK_SYSTEM_PROMPT;
   if (env.CC_OCTO_SDK_SETTING_SOURCES) {
     next.sdk.settingSources = parseCsv(env.CC_OCTO_SDK_SETTING_SOURCES);
+  }
+  // Q1: ANTHROPIC_BASE_URL uses the Anthropic SDK standard variable name
+  // (no CC_OCTO_ prefix) so operators can reuse existing gateway configs.
+  if (env.ANTHROPIC_BASE_URL) {
+    next.sdk.anthropicBaseUrl = env.ANTHROPIC_BASE_URL;
   }
 
   if (env.CC_OCTO_RATE_LIMIT_MAX_PER_MINUTE) {

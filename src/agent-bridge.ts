@@ -12,6 +12,8 @@
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import type { PermissionMode, SettingSource } from '@anthropic-ai/claude-agent-sdk';
 import type { Config } from './config.js';
+import { resolveSessionCwd } from './cwd-resolver.js';
+import type { SessionCtx } from './cwd-resolver.js';
 
 const VALID_PERMISSION_MODES: Set<string> = new Set([
   'default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto',
@@ -258,6 +260,7 @@ export function buildPrompt(historyPrefix: string, groupContext: string, message
  * @param historyPrefix - Formatted conversation history from SessionStore
  * @param groupContext - Group chat context string (may be empty)
  * @param config - Application config (sdk.* fields used)
+ * @param sessionCtx - Per-session routing context for cwd isolation (Q3)
  * @yields string chunks of assistant text output
  */
 export async function* queryAgent(
@@ -265,6 +268,7 @@ export async function* queryAgent(
   historyPrefix: string,
   groupContext: string,
   config: Config,
+  sessionCtx?: SessionCtx,
 ): AsyncIterable<string> {
   const permissionMode = toPermissionMode(config.sdk.permissionMode);
   const settingSources = toSettingSources(config.sdk.settingSources);
@@ -276,12 +280,29 @@ export async function* queryAgent(
     config.sdk.systemPrompt,
   );
 
+  // Q3: per-session cwd under cwdBase — creates the directory on first use.
+  // Fall back to the base directory when sessionCtx is omitted (legacy callers
+  // and unit tests that don't care about isolation), and to the deprecated
+  // `cwd` field for Config instances built before the rename.
+  const cwdBase = config.cwdBase ?? config.cwd;
+  const cwd = sessionCtx ? resolveSessionCwd(cwdBase, sessionCtx) : cwdBase;
+
+  // Q1: forward ANTHROPIC_BASE_URL through the standard process environment
+  // before invoking the SDK. When unset, leave process.env untouched.
+  if (config.sdk.anthropicBaseUrl) {
+    process.env.ANTHROPIC_BASE_URL = config.sdk.anthropicBaseUrl;
+  }
+
   const stream = sdkQuery({
     prompt: userMessage,
     options: {
-      cwd: config.cwd,
+      cwd,
       systemPrompt,
-      allowedTools: config.sdk.allowedTools,
+      // Q2: `"*"` means "no whitelist" — drop the option so the SDK falls back
+      // to its built-in tool set. An explicit string[] is forwarded as-is.
+      ...(config.sdk.allowedTools === '*'
+        ? {}
+        : { allowedTools: config.sdk.allowedTools }),
       permissionMode,
       maxTurns: config.sdk.maxTurns,
       model: config.sdk.model,
