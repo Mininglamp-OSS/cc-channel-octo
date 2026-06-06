@@ -68,26 +68,16 @@ describe('C1 follow-up #1: truncateByBytes uses O(n) walk-back algorithm', () =>
 });
 
 // ─── 2. RejectionReason trim ───────────────────────────────────────────
-
-describe('C1 follow-up #2: RejectionReason trimmed to emitted reasons', () => {
-  it('type only allows rate_limited and oversized', async () => {
-    // Type-level smoke: import the type and verify the runtime emits only
-    // these two values. Compile-time check is enforced by tsc passing.
-    const mod = await import('../session-router.js');
-    expect(typeof mod.SessionRouter).toBe('function');
-    // Behavior verified by c1-rejection-userguard.test.ts (still passes
-    // after trim because it only tested rate_limited / oversized).
-  });
-});
-
+// Type contract is enforced by `tsc --noEmit` (compile-time). Runtime
+// behavior is exercised by `c1-rejection-userguard.test.ts`. A separate
+// `expect(typeof mod.SessionRouter).toBe('function')` assertion here would
+// test module loading, not the type trim — that is, it would pass even if
+// the union were reverted to the pre-trim 7 members. Tautology removed per
+// REVIEW_CHECKLIST §11 ("if reverting the change does not fail the test,
+// the test is not testing the change").
+//
 // ─── 3. buildMediaUrl %2F defense-in-depth ─────────────────────────────
-// Tests live in inbound.test.ts (extending the existing describe block).
-// This file just documents the cross-reference.
-
-describe('C1 follow-up #3: buildMediaUrl %2F defense', () => {
-  it('cross-reference: see inbound.test.ts "rejects %2F encoded slash"', () => {
-    // 5 it.each cases there cover lowercase / uppercase / mixed / any %2F /
-    // benign-looking %2F. All rejected.
-    expect(true).toBe(true);
-  });
-});
+// Real coverage lives in inbound.test.ts (`describe('buildMediaUrl')` →
+// `it.each(['..%2f..%2finternal/secret.env', ...])`). A placeholder
+// `expect(true).toBe(true)` here would have the same defect as #2.
+// Pointer kept as a comment so a future reader knows where to look.
