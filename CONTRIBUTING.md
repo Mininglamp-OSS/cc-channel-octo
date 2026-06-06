@@ -60,6 +60,20 @@ npm start
 | `npm run test:watch` | Run tests in watch mode |
 | `npm start` | Start the gateway |
 
+### Git Hooks
+
+Hooks are managed by [husky](https://typicode.github.io/husky/) and install automatically when you run `npm install`. They mirror the CI checks so problems surface locally instead of on the remote:
+
+| Hook | Runs | Purpose |
+|------|------|---------|
+| `pre-commit` | `lint-staged` (ESLint on staged `src/**/*.ts`) + `npm run type-check` | Fast gate — blocks `as any`, unused vars, and type regressions. |
+| `commit-msg` | `commitlint` | Enforces [Conventional Commits](https://www.conventionalcommits.org/) (`feat`, `fix`, `docs`, `test`, …). See [`commitlint.config.js`](./commitlint.config.js). |
+| `pre-push` | `npm run lint` + `npm test` | Heavier gate — reproduces the CI `lint` and `test` jobs before pushing. |
+
+Commit message format: `type(scope): subject` — e.g. `fix(session-router): clamp rate limiter window`. The `!` marker (`feat!:`) denotes a breaking change. Scopes are free-form and may use technical identifiers.
+
+> Hooks can be bypassed with `--no-verify` (`git commit --no-verify`, `git push --no-verify`) **in genuine emergencies only**. CI runs the same checks, so a bypass just defers the failure.
+
 ## Project Structure
 
 ```
@@ -139,11 +153,11 @@ npx vitest run src/__tests__/session-router.test.ts
 
 ### Pre-commit Checklist
 
-Before every commit:
+The `pre-commit` and `pre-push` hooks (see [Git Hooks](#git-hooks)) automate steps 1–3 below. The remaining items are good habits the hooks can't enforce:
 
-1. `npm run type-check` — zero errors
-2. `npm test` — all tests pass
-3. `npm run lint` — no errors (warnings acceptable)
+1. `npm run type-check` — zero errors *(automated: pre-commit)*
+2. `npm test` — all tests pass *(automated: pre-push)*
+3. `npm run lint` — no errors (warnings acceptable) *(automated: pre-commit on staged files, pre-push repo-wide)*
 4. `git add <specific files>` — never use `git add -A`
 5. `git status` — verify only intended files are staged
 6. `git branch --show-current` — confirm you're on the right branch

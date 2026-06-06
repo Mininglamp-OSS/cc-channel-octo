@@ -1,0 +1,6 @@
+# Pre-push gate — reproduce CI's blocking checks locally before pushing.
+# 1. ESLint across the repo (zero warnings) — mirrors the CI `lint` job.
+# 2. Full vitest suite — mirrors the CI `test` job; catch failures here, not on the remote.
+# Heavier than pre-commit by design; use `git push --no-verify` only in emergencies.
+npm run lint
+npm test

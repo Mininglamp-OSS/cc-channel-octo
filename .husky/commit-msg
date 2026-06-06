@@ -1,0 +1,4 @@
+# Commit-msg gate — enforce Conventional Commits (see commitlint.config.js).
+# Rules are loosened to match this repo's existing style; this locks in the
+# convention every commit here already follows.
+npx --no-install commitlint --edit "$1"
