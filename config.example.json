@@ -1,13 +1,16 @@
 {
-  "_comment": "Default: full tool set + bypassPermissions (headless automation). Security relies on allowedTools whitelist, not permissionMode. IMPORTANT: set cwd to an isolated working directory — do NOT point it at a directory containing config.json, tokens, or other secrets.",
-  "_comment_safe_mode": "Optional safe downgrade: set allowedTools to ['Read', 'Glob', 'Grep'] and remove Bash/Write/Edit/WebFetch/WebSearch to restrict to read-only operations. Remove WebFetch/WebSearch to eliminate SSRF risk.",
+  "_comment": "Default: allowedTools='*' (SDK full set) + bypassPermissions (headless automation). IMPORTANT: cwdBase is the parent dir for per-session sandboxes — each (DM peer | group | thread) gets its own hashed subdirectory under it. Do NOT point cwdBase at a directory containing config.json, tokens, or other secrets.",
+  "_comment_safe_mode": "Optional safe downgrade: set allowedTools to ['Read', 'Glob', 'Grep'] to restrict to read-only operations. Use '*' to allow every tool the SDK exposes.",
   "botToken": "bf_YOUR_BOT_TOKEN",
   "apiUrl": "https://your-octo-instance.com",
-  "cwd": "/path/to/isolated/project",
+  "_comment_cwd_base": "Q3: base directory for per-session cwd isolation. Each session gets a 16-hex SHA-256 subdirectory under this path; subdirs idle for >7d are auto-cleaned every 6h. Env override: CC_OCTO_CWDBASE (legacy CC_OCTO_CWD still accepted with a deprecation warning).",
+  "cwdBase": "/path/to/isolated/sandbox-root",
   "dataDir": "./data",
 
   "sdk": {
-    "allowedTools": ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebFetch", "WebSearch"],
+    "_comment_anthropic_base_url": "Q1: Optional self-hosted Claude API gateway base URL. Forwarded to the SDK subprocess (scoped, not via global process.env). Must be https:// (or http://localhost for dev) — it is SSRF-validated at boot like apiUrl. To enable, add a real \"anthropicBaseUrl\": \"https://your-gateway.example.com\" key here, or set the ANTHROPIC_BASE_URL env var (highest priority, Anthropic SDK standard name, no CC_OCTO_ prefix). Leave it out entirely to use Anthropic's public endpoint.",
+    "_comment_allowed_tools": "Q2: either '*' (allow every tool the SDK exposes) or an explicit string[] whitelist, e.g. ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebFetch', 'WebSearch']. Env override CC_OCTO_SDK_ALLOWED_TOOLS accepts the same two shapes (a value containing '*' means wildcard; otherwise CSV).",
+    "allowedTools": "*",
     "permissionMode": "bypassPermissions",
     "settingSources": ["user"]
   },

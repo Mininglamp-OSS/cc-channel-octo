@@ -13,6 +13,8 @@ import { OctoGateway } from './gateway.js';
 import { SessionRouter } from './session-router.js';
 import { GroupContext } from './group-context.js';
 import { queryAgent, sanitizeForSystemPrompt } from './agent-bridge.js';
+import type { SessionCtx } from './cwd-resolver.js';
+import { cleanupExpiredCwds } from './cwd-resolver.js';
 import { StreamRelay } from './stream-relay.js';
 import { sendMessage, sendReadReceipt, getChannelMessages } from './octo/api.js';
 import type { HistoricalMessage } from './octo/api.js';
@@ -31,15 +33,28 @@ async function main(): Promise<void> {
 
   // --- Config ---
   const config = loadConfig();
+  // Q3: loadConfig() always populates cwdBase from defaults; the `?? cwd`
+  // fallback is only here for hand-built Config objects in tests/imports.
+  const cwdBase = config.cwdBase ?? config.cwd;
   console.log(
-    `[cc-channel-octo] Config loaded: apiUrl=${config.apiUrl}, cwd=${config.cwd}, ` +
+    `[cc-channel-octo] Config loaded: apiUrl=${config.apiUrl}, cwdBase=${cwdBase}, ` +
     `dataDir=${config.dataDir}, sdk.model=${config.sdk.model ?? 'default'}, ` +
-    `sdk.allowedTools=[${config.sdk.allowedTools.join(',')}], ` +
+    `sdk.allowedTools=${config.sdk.allowedTools === '*' ? '*' : `[${config.sdk.allowedTools.join(',')}]`}, ` +
     `sdk.permissionMode=${config.sdk.permissionMode}, ` +
     `rateLimit=${config.rateLimit.maxPerMinute} req/min, ` +
     `context.maxContextChars=${config.context.maxContextChars}, ` +
     `context.historyLimit=${config.context.historyLimit}`,
   );
+
+  // --- Q3: per-session cwd cleanup (7d TTL) ---
+  cleanupExpiredCwds(cwdBase);
+  const CWD_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
+  const cwdCleanupTimer = setInterval(() => {
+    cleanupExpiredCwds(cwdBase);
+  }, CWD_CLEANUP_INTERVAL_MS);
+  // Allow the process to exit cleanly even if this timer is the only thing
+  // keeping the event loop alive (e.g. tests, single-shot smoke runs).
+  cwdCleanupTimer.unref();
 
   // --- Database ---
   const dbPath = join(config.dataDir, 'cc-octo.db');
@@ -88,6 +103,7 @@ async function main(): Promise<void> {
 
   // --- Q6 + Q7: Shutdown callback (drain handlers + close store) ---
   gateway.setShutdownCallback(async () => {
+    clearInterval(cwdCleanupTimer); // Q3: stop the periodic cwd cleanup
     await gateway.stop(activeHandlers);
     store.close(); // Q7: explicitly close SQLite (WAL checkpoint)
   });
@@ -312,7 +328,17 @@ async function handleMessage(
 
       // --- Query agent with structural role separation (Q3 fix) ---
       // userContentForLLM → user role (prompt), history + context → system role (systemPrompt)
-      const rawChunks = queryAgent(userContentForLLM, historyPrefix, contextStr, config);
+      // Q3 cwd isolation: the SessionCtx carries the router-produced sessionKey
+      // verbatim, so the cwd partition is byte-for-byte identical to the history
+      // partition. Group keys embed from_uid (`${channel_id}:${uid}`), so every
+      // group member gets their OWN sandbox — matching per-user group history
+      // and honoring the documented "one user cannot read/mutate another's
+      // working tree" guarantee.
+      const sessionCtx: SessionCtx = {
+        kind: isGroup ? 'group' : 'dm',
+        sessionKey,
+      };
+      const rawChunks = queryAgent(userContentForLLM, historyPrefix, contextStr, config, sessionCtx);
 
       // Tee the generator: collect full text while streaming to Octo
       const collected: string[] = [];

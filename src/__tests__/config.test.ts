@@ -21,12 +21,14 @@ import { loadConfig } from '../config.js';
 let tmpDir: string;
 const savedEnv: Record<string, string | undefined> = {};
 const CC_VARS = [
-  'CC_OCTO_BOT_TOKEN', 'CC_OCTO_API_URL', 'CC_OCTO_CWD', 'CC_OCTO_DATA_DIR',
+  'CC_OCTO_BOT_TOKEN', 'CC_OCTO_API_URL', 'CC_OCTO_CWD', 'CC_OCTO_CWDBASE',
+  'CC_OCTO_DATA_DIR',
   'CC_OCTO_SDK_MODEL', 'CC_OCTO_SDK_ALLOWED_TOOLS', 'CC_OCTO_SDK_PERMISSION_MODE',
   'CC_OCTO_SDK_MAX_TURNS', 'CC_OCTO_SDK_SYSTEM_PROMPT', 'CC_OCTO_SDK_SETTING_SOURCES',
   'CC_OCTO_RATE_LIMIT_MAX_PER_MINUTE', 'CC_OCTO_CONTEXT_MAX_CHARS',
   'CC_OCTO_CONTEXT_HISTORY_LIMIT', 'CC_OCTO_BOT_BLOCKLIST',
   'CC_OCTO_MENTION_FREE_GROUPS', 'CC_OCTO_MAX_RESPONSE_CHARS',
+  'ANTHROPIC_BASE_URL',
 ];
 
 function setup() {
@@ -66,11 +68,13 @@ describe('loadConfig defaults', () => {
 
     expect(cfg.botToken).toBe('bf_test');
     expect(cfg.apiUrl).toBe('https://api.test');
-    expect(cfg.cwd).toBe(process.cwd());
+    expect(cfg.cwdBase).toBe(process.cwd()); // Q3: cwdBase replaces cwd
     expect(cfg.dataDir).toBe('./data');
-    expect(cfg.sdk.allowedTools).toEqual(['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebFetch', 'WebSearch']);
+    // Q2: default is the wildcard sentinel — no whitelist applied at the SDK layer.
+    expect(cfg.sdk.allowedTools).toBe('*');
     expect(cfg.sdk.permissionMode).toBe('bypassPermissions');
     expect(cfg.sdk.settingSources).toEqual(['user']);
+    expect(cfg.sdk.anthropicBaseUrl).toBeUndefined(); // Q1: unset by default
     expect(cfg.rateLimit.maxPerMinute).toBe(5);
     expect(cfg.context.maxContextChars).toBe(6000);
     expect(cfg.context.historyLimit).toBe(40);
@@ -187,10 +191,27 @@ describe('CC_OCTO_* env override coverage', () => {
     expect(cfg.apiUrl).toBe('https://env-api');
   });
 
-  it('CC_OCTO_CWD', () => {
+  it('CC_OCTO_CWDBASE', () => {
     const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_CWD = '/env-cwd';
-    expect(loadConfig(path).cwd).toBe('/env-cwd');
+    process.env.CC_OCTO_CWDBASE = '/env-cwdbase';
+    expect(loadConfig(path).cwdBase).toBe('/env-cwdbase');
+  });
+
+  it('CC_OCTO_CWD (legacy alias) still applies with a deprecation warning', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    process.env.CC_OCTO_CWD = '/env-cwd-legacy';
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const cfg = loadConfig(path);
+    expect(cfg.cwdBase).toBe('/env-cwd-legacy');
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('CC_OCTO_CWD is deprecated'));
+    warnSpy.mockRestore();
+  });
+
+  it('CC_OCTO_CWDBASE wins when both CC_OCTO_CWDBASE and CC_OCTO_CWD are set', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    process.env.CC_OCTO_CWDBASE = '/env-cwdbase-wins';
+    process.env.CC_OCTO_CWD = '/env-cwd-loses';
+    expect(loadConfig(path).cwdBase).toBe('/env-cwdbase-wins');
   });
 
   it('CC_OCTO_SDK_MODEL', () => {
@@ -397,5 +418,194 @@ describe('Config file permission warning (Q12)', () => {
     loadConfig(cfgPath);
     expect(warnSpy).not.toHaveBeenCalled();
     warnSpy.mockRestore();
+  });
+});
+
+// ─── Q1: anthropicBaseUrl ──────────────────────────────────────────────
+
+describe('Q1: anthropicBaseUrl', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('reads sdk.anthropicBaseUrl from config file', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      sdk: { anthropicBaseUrl: 'https://gw.example.com' },
+    });
+    expect(loadConfig(path).sdk.anthropicBaseUrl).toBe('https://gw.example.com');
+  });
+
+  it('ANTHROPIC_BASE_URL env overrides config file', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      sdk: { anthropicBaseUrl: 'https://from-file' },
+    });
+    process.env.ANTHROPIC_BASE_URL = 'https://from-env';
+    expect(loadConfig(path).sdk.anthropicBaseUrl).toBe('https://from-env');
+  });
+
+  it('uses Anthropic SDK standard variable name (no CC_OCTO_ prefix)', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    // A CC_OCTO_ANTHROPIC_BASE_URL would NOT take effect — only the bare var.
+    process.env.ANTHROPIC_BASE_URL = 'https://standard';
+    expect(loadConfig(path).sdk.anthropicBaseUrl).toBe('https://standard');
+  });
+
+  it('rejects an http:// (non-localhost) anthropicBaseUrl (SSRF protection)', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      sdk: { anthropicBaseUrl: 'http://evil.example.com' },
+    });
+    expect(() => loadConfig(path)).toThrow(/Unsafe sdk\.anthropicBaseUrl/);
+  });
+
+  it('rejects an anthropicBaseUrl resolving to a private IP literal', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      sdk: { anthropicBaseUrl: 'https://169.254.169.254' },
+    });
+    expect(() => loadConfig(path)).toThrow(/Unsafe sdk\.anthropicBaseUrl/);
+  });
+
+  it('allows http://localhost for local development', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      sdk: { anthropicBaseUrl: 'http://localhost:8080' },
+    });
+    expect(loadConfig(path).sdk.anthropicBaseUrl).toBe('http://localhost:8080');
+  });
+});
+
+// ─── Q2: allowedTools "*" | string[] ───────────────────────────────────
+
+describe('Q2: allowedTools wildcard', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('config file can set allowedTools to "*"', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      sdk: { allowedTools: '*' },
+    });
+    expect(loadConfig(path).sdk.allowedTools).toBe('*');
+  });
+
+  it('config file can set allowedTools to an explicit array', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      sdk: { allowedTools: ['Read', 'Glob', 'Grep'] },
+    });
+    expect(loadConfig(path).sdk.allowedTools).toEqual(['Read', 'Glob', 'Grep']);
+  });
+
+  it('CC_OCTO_SDK_ALLOWED_TOOLS="*" maps to the wildcard sentinel', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    process.env.CC_OCTO_SDK_ALLOWED_TOOLS = '*';
+    expect(loadConfig(path).sdk.allowedTools).toBe('*');
+  });
+
+  it('CC_OCTO_SDK_ALLOWED_TOOLS=" * " (whitespace) still maps to wildcard', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    process.env.CC_OCTO_SDK_ALLOWED_TOOLS = ' * ';
+    expect(loadConfig(path).sdk.allowedTools).toBe('*');
+  });
+
+  it('CC_OCTO_SDK_ALLOWED_TOOLS with a "*" element anywhere maps to wildcard', () => {
+    // Regression: a CSV containing `*` must collapse to the wildcard sentinel
+    // rather than passing a literal `*` through as a (bogus) tool name.
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    process.env.CC_OCTO_SDK_ALLOWED_TOOLS = '*,Read';
+    expect(loadConfig(path).sdk.allowedTools).toBe('*');
+  });
+
+  it('CC_OCTO_SDK_ALLOWED_TOOLS without "*" stays a CSV array', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    process.env.CC_OCTO_SDK_ALLOWED_TOOLS = 'Read, Glob ,Grep';
+    expect(loadConfig(path).sdk.allowedTools).toEqual(['Read', 'Glob', 'Grep']);
+  });
+
+  it('env "*" overrides a config-file array', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      sdk: { allowedTools: ['Read'] },
+    });
+    process.env.CC_OCTO_SDK_ALLOWED_TOOLS = '*';
+    expect(loadConfig(path).sdk.allowedTools).toBe('*');
+  });
+});
+
+// ─── Q3: cwdBase / cwd alias ───────────────────────────────────────────
+
+describe('Q3: cwdBase + deprecated cwd alias', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('config.cwdBase is honored directly', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      cwdBase: '/explicit/base',
+    });
+    expect(loadConfig(path).cwdBase).toBe('/explicit/base');
+  });
+
+  it('legacy config.cwd still maps to cwdBase with a deprecation warning', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      cwd: '/legacy/dir',
+    });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const cfg = loadConfig(path);
+    expect(cfg.cwdBase).toBe('/legacy/dir');
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('config.cwd is deprecated'));
+    warnSpy.mockRestore();
+  });
+
+  it('config.cwdBase wins over config.cwd when both are present', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      cwdBase: '/wins',
+      cwd: '/loses',
+    });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const cfg = loadConfig(path);
+    expect(cfg.cwdBase).toBe('/wins');
+    // cwdBase is defined → cwd alias must NOT trigger its deprecation warning.
+    const cwdWarnings = warnSpy.mock.calls.filter((c) =>
+      typeof c[0] === 'string' && c[0].includes('config.cwd is deprecated'),
+    );
+    expect(cwdWarnings).toHaveLength(0);
+    warnSpy.mockRestore();
+  });
+
+  it('blank config.cwdBase falls back to the default (not "")', () => {
+    // A `"cwdBase": ""` typo must not slip past the nullish fallback and land
+    // sandboxes relative to process.cwd().
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      cwdBase: '   ',
+    });
+    expect(loadConfig(path).cwdBase).toBe(process.cwd());
+  });
+
+  it('blank CC_OCTO_CWDBASE env is ignored (treated as unset)', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      cwdBase: '/explicit/base',
+    });
+    process.env.CC_OCTO_CWDBASE = '  ';
+    expect(loadConfig(path).cwdBase).toBe('/explicit/base');
   });
 });
