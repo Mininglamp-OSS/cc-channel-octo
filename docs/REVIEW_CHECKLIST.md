@@ -251,6 +251,18 @@ guard (see §9.2 + §11).
 
 ### 9.4 Evolution narrative: §9 → §11 cross-parser stack progression
 
+- **trigger**: any new §N supersedes earlier §M's primary defense role,
+  so a first-time reader cannot reconstruct why §N exists without
+  reading §M first. Activates whenever a checklist addition reframes
+  rather than just extends an earlier rule.
+- **revert-invariant**: deleting §9.4 lets §11 appear ex-nihilo to
+  first-time readers — they see PRIMARY/SECONDARY pinning with no
+  lineage to §9 single-parser canonical enumeration, mis-apply §11
+  to single-parser cases, and silently drop §9 enumeration discipline
+  when they think §11 "replaces" it.
+- **sunset**: none (permanent invariant; lineage documentation is
+  required for any rule chain that supersedes rather than appends).
+
 §10 – §13 are not four unrelated rules stacked next to §9. They are
 the recursive extension of §9 into the multi-layer defense-in-depth
 regime. Read in lineage order:
@@ -330,6 +342,8 @@ behavioural win. If a perf assertion is added "for safety", apply
 §10.5 reverse-verify before merging.
 
 ### 10.5 Reverse-verify protocol (operationalisation)
+
+<!-- §10.2-§10.4 reserved for future operationalisation steps (do-not-skip-number; numbering deliberately jumps so additions can land between keep/delete framing and runtime protocol without renumbering downstream sections). -->
 
 Before merging any test with a timing assertion:
 
@@ -448,6 +462,21 @@ whenever you write a MIME-type filter:
 
 ### 11.5 Case study: legacy `image/svg` PR#49 dual-layer reverse-fail
 
+- **trigger**: any new hardening on a previously-§11-covered surface
+  (i.e. a second or subsequent independent fix that exercises the
+  PRIMARY/SECONDARY split established by §11.1). Activates whenever a
+  §11-style fix lands and the corresponding case-study slot is empty
+  or under-populated.
+- **revert-invariant**: deleting §11.5 lets §11 rest on N=1 evidence
+  (PR#45 only, reviewer-reproduction-driven, post-hoc PR#47 split).
+  Single case = anecdote; future maintainers can argue §11 was a
+  PR#45-specific overfit rather than a generalisable boundary-pinning
+  rule.
+- **sunset**: when ≥3 independent case studies land (§11.1 + §11.5 +
+  one more), promote the PRIMARY/SECONDARY pattern from "case-study
+  evidence base" to a §11.0 lede so the rule is stated up front and
+  the case studies move below as evidence.
+
 PR#49 hardened against the legacy `image/svg` MIME (without the `+xml`
 suffix) which Firefox in some legacy contexts has been observed to
 inline-render as SVG. The fix lands at both layers of the §11.1 stack;
@@ -552,6 +581,7 @@ definition):
 // spaces — that widens the attacker-input surface that §11.4 MIME
 // canonicalisation depends on. See REVIEW_CHECKLIST.md §13.
 const MARKDOWN_IMAGE_RE = /!\[[^\]]*\]\(([^)\s]+)\)/g;
+const MARKDOWN_LINK_RE = /(?<!\!)\[[^\]]*\]\(([^)\s]+)\)/g;
 ```
 
 ---
@@ -579,16 +609,37 @@ Three mandatory declarations:
    landing). Permanent rules write `sunset: none (permanent invariant)`
    explicitly — that is itself a declaration, not an omission.
 
+**Scope is rule-introducing additions only — not the author's call.**
+A new subsection §N.M is a rule-introducing addition whenever it
+states a normative claim that a reviewer can check against ("MUST",
+"required", "trigger if X", "reject when Y"). Subsections that are
+purely evidence — concrete attack reproductions, milestone PR
+lineage walks, recurrence counts — file under the parent §N's
+triple, but ONLY if they introduce no new normative claim of their
+own. The default is to declare the triple; the burden of proof is on
+the author to argue an addition is pure evidence, not on the next
+reviewer to argue it is a rule. "Pure case study" / "pure narrative"
+classifications must be acked by an independent reviewer before
+merge; self-classification by the author is not sufficient (this is
+the §14 self-falsification path PR#50 fixup 2 walked into and fixup
+3 corrected).
+
 Pairs with §2 (reviewer state check) / §12 (author state check) to
 close the rule-system self-reference loop: any destructive or
 irreversible PR action verifies state first; any new permanent rule
 added to the rulebook itself declares its own falsifiability boundary.
 
-### 14.1 Retroactive dogfooding for §10 – §13
+### 14.1 Retroactive dogfooding for §9.4 / §10 – §14 / §11.5
 
-Applying §14 backward to the §10 – §13 batch added in this PR
-(documented here so the dogfooding cycle closes inside the same PR):
+Applying §14 backward to every rule-introducing addition shipped in
+this PR (documented here so the dogfooding cycle closes inside the
+same PR, and no new rule lands without its triple inline at the
+section head):
 
+- **§9.4 Evolution narrative §9 → §11 cross-parser stack progression**
+  — triple inline at section head. Trigger: new §N supersedes earlier
+  §M's primary defense role. Revert-invariant: §11 appears ex-nihilo
+  to first-time readers. Sunset: none.
 - **§10 Performance assertions must be reverse-verifiable**
   - trigger: a test asserts wall-clock / throughput / size in a fixed numeric threshold
   - revert-invariant: deleting §10 lets PR#46-style 500ms-theatre assertions reappear; the test passes pre- and post-fix with no signal
@@ -597,6 +648,10 @@ Applying §14 backward to the §10 – §13 batch added in this PR
   - trigger: a fix touches ≥2 layers of a parse → validate → encode → render → enforce pipeline
   - revert-invariant: deleting §11 lets layered-defense tests assert at the upstream layer only; PRIMARY-layer drift becomes invisible (PR#45 SVG XSS reproduction)
   - sunset: none (permanent invariant; defense-in-depth is structural)
+- **§11.5 Case study: legacy `image/svg` PR#49 dual-layer reverse-fail**
+  — triple inline at section head. Trigger: any new hardening on a
+  previously-§11-covered surface. Revert-invariant: §11 rests on N=1
+  evidence. Sunset: ≥3 independent case studies → promote to §11.0 lede.
 - **§12 Author-side state check before push**
   - trigger: `git push --force-with-lease` (or any history-rewriting push) to a branch that backs an open PR
   - revert-invariant: deleting §12 lets the PR#46 dangling-commit incident recur (force-push to a merged PR's branch creates commits that never reach `main`)
@@ -610,13 +665,20 @@ Applying §14 backward to the §10 – §13 batch added in this PR
   - revert-invariant: deleting §14 lets future additions skip trigger / revert / sunset declarations; the checklist grows unbounded and dead rules accumulate silently
   - sunset: none (permanent invariant; rule-system self-reference is required regardless of rule count)
 
-**Non-rule additions are exempt** (case studies, narratives, evidence
-extensions). §9.4 (evolution narrative) and §11.5 (PR#49 case study)
-shipped in this same PR do NOT introduce new rules — they extend the
-evidence base / lineage of §9 and §11 respectively. §14 applies to
-rule-introducing additions only; case study / narrative additions
-file under the parent §N's existing trigger / revert-invariant /
-sunset declarations.
+**Self-falsification audit (PR#50 fixup 2 → fixup 3 correction)**
+
+Fixup 2 (commit 07107599) introduced an "Non-rule additions are
+exempt" paragraph here that classified §9.4 and §11.5 as pure
+evidence, exempt from the triple. That classification was the author
+asserting non-rule status of their own additions — exactly the
+self-classification path the revised §14 "Scope" paragraph above
+blocks. Reviewer (齐静春, 09:29 GMT+8) independently identified both
+§9.4 and §11.5 as introducing new normative claims (§9.4 = "lineage
+MUST be documented when superseding"; §11.5 = "N≥2 cases required to
+promote anecdote to pattern"). Fixup 3 removes the exemption
+paragraph, adds triples inline at the §9.4 and §11.5 section heads,
+and strengthens §14 with the independent-reviewer-ack requirement
+so the failure mode cannot recur.
 
 ---
 
