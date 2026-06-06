@@ -166,7 +166,16 @@ export function isSafeInlineImage(contentType: string): boolean {
   // lowercase, since MIME types and the `image/` prefix are case-insensitive.
   const baseType = contentType.split(";")[0].trim().toLowerCase();
   if (!baseType.startsWith("image/")) return false;
-  if (baseType === "image/svg+xml") return false;
+  // Belt-and-suspenders (PR#49, 王大锤 PR#45 re-review on 5bab2f0
+  // documented gap; body HTML comment "<!-- 王大锤 re-review verdict:
+  // LGTM -->" locks author through the shared lml2468 keyring):
+  // Reject `image/svg+xml` AND legacy `image/svg`. Firefox in some legacy
+  // contexts will render `image/svg` (without the `+xml` suffix) as SVG,
+  // so we reject both. Most browsers treat it as octet-stream so no inline
+  // render = no XSS, but it's a non-zero edge. The cost is 1 condition; the
+  // upside covers an attacker-reachable edge case in browsers that render
+  // the legacy form.
+  if (baseType === "image/svg+xml" || baseType === "image/svg") return false;
   return true;
 }
 
@@ -228,12 +237,17 @@ export async function uploadFileToCOS(params: {
     const ct = params.contentType.split(";")[0].trim().toLowerCase();
     if (ct.startsWith('video/') || ct.startsWith('audio/')) {
       contentDisposition = buildContentDisposition(params.filename, 'inline');
-    } else if (!ct.startsWith('image/') || ct === 'image/svg+xml') {
+    } else if (!ct.startsWith('image/') || ct === 'image/svg+xml' || ct === 'image/svg') {
       // Force `attachment` for SVG too: even when routed to MessageType.File
       // in the IM payload, the COS object served via CDN with
-      // Content-Type: image/svg+xml will render inline in browsers (XSS
-      // vector — embedded <script>/<foreignObject>). Content-Disposition:
-      // attachment forces download instead of inline render.
+      // Content-Type: image/svg+xml (or legacy image/svg, which Firefox in
+      // some legacy contexts still renders as SVG — surfaced by 王大锤
+      // PR#45 re-review on 5bab2f0, body HTML comment-locked author) will
+      // render inline in browsers (XSS vector — embedded
+      // <script>/<foreignObject>). Content-Disposition: attachment forces
+      // download instead of inline render. Mirror coverage on
+      // isSafeInlineImage above so both layers close the same
+      // attacker-reachable edge case.
       contentDisposition = buildContentDisposition(params.filename, 'attachment');
     }
   }
