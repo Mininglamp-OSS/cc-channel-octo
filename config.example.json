@@ -8,9 +8,8 @@
   "dataDir": "./data",
 
   "sdk": {
-    "_comment_anthropic_base_url": "Q1: Optional. Set to a self-hosted Claude API gateway base URL. Forwarded to the SDK subprocess as ANTHROPIC_BASE_URL. Env override (highest priority): ANTHROPIC_BASE_URL (Anthropic SDK standard variable name, no CC_OCTO_ prefix).",
-    "anthropicBaseUrl": "https://your-gateway.example.com",
-    "_comment_allowed_tools": "Q2: either '*' (allow every tool the SDK exposes) or an explicit string[] whitelist, e.g. ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebFetch', 'WebSearch']. Env override CC_OCTO_SDK_ALLOWED_TOOLS accepts the same two shapes (literal '*' or CSV).",
+    "_comment_anthropic_base_url": "Q1: Optional self-hosted Claude API gateway base URL. Forwarded to the SDK subprocess (scoped, not via global process.env). Must be https:// (or http://localhost for dev) — it is SSRF-validated at boot like apiUrl. To enable, add a real \"anthropicBaseUrl\": \"https://your-gateway.example.com\" key here, or set the ANTHROPIC_BASE_URL env var (highest priority, Anthropic SDK standard name, no CC_OCTO_ prefix). Leave it out entirely to use Anthropic's public endpoint.",
+    "_comment_allowed_tools": "Q2: either '*' (allow every tool the SDK exposes) or an explicit string[] whitelist, e.g. ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebFetch', 'WebSearch']. Env override CC_OCTO_SDK_ALLOWED_TOOLS accepts the same two shapes (a value containing '*' means wildcard; otherwise CSV).",
     "allowedTools": "*",
     "permissionMode": "bypassPermissions",
     "settingSources": ["user"]

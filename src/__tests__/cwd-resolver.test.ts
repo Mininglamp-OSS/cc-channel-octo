@@ -3,11 +3,15 @@
  *
  * Coverage:
  *  - Hash stability: same SessionCtx → same path on every call.
- *  - Hash uniqueness across DM / Group / Thread namespaces.
+ *  - Hash uniqueness across DM / Group and across distinct sessionKeys.
+ *  - kind-prefix separation: a dm and group key that are byte-identical differ.
  *  - mkdir idempotency on repeated resolveSessionCwd calls.
+ *  - Provenance recorded in the sidecar registry (outside the session dir).
  *  - TTL cleanup deletes dirs older than ttlMs; preserves fresh dirs.
+ *  - Marker self-heals on every resolve (no permanent cleanup exemption).
  *  - cleanup silently returns when cwdBase does not exist.
  *  - cleanup ignores non-hash-pattern entries (operator's own files).
+ *  - cleanup only deletes dirs with a registry entry; removes the entry too.
  */
 
 import { createHash } from 'node:crypto';
@@ -31,10 +35,15 @@ import {
   type SessionCtx,
 } from '../cwd-resolver.js';
 
-const MARKER = '.cc-octo-session';
+const REGISTRY_DIR = '.cc-octo-sessions';
 
 function expectedName(key: string): string {
   return createHash('sha256').update(key).digest('hex').slice(0, 16);
+}
+
+/** Path to the sidecar registry marker for a given 16-hex dir name. */
+function markerFor(baseDir: string, name: string): string {
+  return join(baseDir, REGISTRY_DIR, name);
 }
 
 function oldTimeSeconds(days: number): number {
@@ -52,76 +61,67 @@ afterEach(() => {
 });
 
 describe('resolveSessionCwd — hash stability', () => {
-  it('returns the same path for repeated DM calls with the same uid', () => {
-    const ctx: SessionCtx = { kind: 'dm', userId: 'alice' };
+  it('returns the same path for repeated DM calls with the same key', () => {
+    const ctx: SessionCtx = { kind: 'dm', sessionKey: 'alice' };
     const a = resolveSessionCwd(base, ctx);
     const b = resolveSessionCwd(base, ctx);
-    const c = resolveSessionCwd(base, { kind: 'dm', userId: 'alice' });
+    const c = resolveSessionCwd(base, { kind: 'dm', sessionKey: 'alice' });
     expect(a).toBe(b);
     expect(b).toBe(c);
   });
 
   it('returns the same path for repeated Group calls', () => {
-    const a = resolveSessionCwd(base, { kind: 'group', groupId: 'gid-1' });
-    const b = resolveSessionCwd(base, { kind: 'group', groupId: 'gid-1' });
-    expect(a).toBe(b);
-  });
-
-  it('returns the same path for repeated Thread calls', () => {
-    const a = resolveSessionCwd(base, { kind: 'thread', groupId: 'g', threadId: 't' });
-    const b = resolveSessionCwd(base, { kind: 'thread', groupId: 'g', threadId: 't' });
+    const a = resolveSessionCwd(base, { kind: 'group', sessionKey: 'gid-1:bob' });
+    const b = resolveSessionCwd(base, { kind: 'group', sessionKey: 'gid-1:bob' });
     expect(a).toBe(b);
   });
 });
 
 describe('resolveSessionCwd — hash uniqueness', () => {
-  it('different DM uids map to different dirs', () => {
-    const a = resolveSessionCwd(base, { kind: 'dm', userId: 'alice' });
-    const b = resolveSessionCwd(base, { kind: 'dm', userId: 'bob' });
+  it('different DM keys map to different dirs', () => {
+    const a = resolveSessionCwd(base, { kind: 'dm', sessionKey: 'alice' });
+    const b = resolveSessionCwd(base, { kind: 'dm', sessionKey: 'bob' });
     expect(a).not.toBe(b);
   });
 
-  it('different Group ids map to different dirs', () => {
-    const a = resolveSessionCwd(base, { kind: 'group', groupId: 'g1' });
-    const b = resolveSessionCwd(base, { kind: 'group', groupId: 'g2' });
+  it('different group sessionKeys map to different dirs', () => {
+    const a = resolveSessionCwd(base, { kind: 'group', sessionKey: 'g1:alice' });
+    const b = resolveSessionCwd(base, { kind: 'group', sessionKey: 'g1:bob' });
     expect(a).not.toBe(b);
   });
 
-  it('same DM uid in different spaces maps to different dirs', () => {
-    const a = resolveSessionCwd(base, { kind: 'dm', userId: 'alice', spaceId: 's1' });
-    const b = resolveSessionCwd(base, { kind: 'dm', userId: 'alice', spaceId: 's2' });
+  it('same uid in different spaces maps to different dirs (router key differs)', () => {
+    // Router DM key is `${spaceId}:${uid}` — the resolver just hashes it.
+    const a = resolveSessionCwd(base, { kind: 'dm', sessionKey: 's1:alice' });
+    const b = resolveSessionCwd(base, { kind: 'dm', sessionKey: 's2:alice' });
     expect(a).not.toBe(b);
     expect(basename(a)).toBe(expectedName('dm:s1:alice'));
     expect(basename(b)).toBe(expectedName('dm:s2:alice'));
   });
 
-  it('DM uid without spaceId keeps the legacy hash', () => {
-    const dir = resolveSessionCwd(base, { kind: 'dm', userId: 'alice' });
+  it('hashes the kind-prefixed router key', () => {
+    const dir = resolveSessionCwd(base, { kind: 'dm', sessionKey: 'alice' });
     expect(basename(dir)).toBe(expectedName('dm:alice'));
   });
 
-  it('namespace separation: dm:foo != group:foo', () => {
-    const dm = resolveSessionCwd(base, { kind: 'dm', userId: 'foo' });
-    const grp = resolveSessionCwd(base, { kind: 'group', groupId: 'foo' });
+  it('kind-prefix separation: a dm and group key that are byte-identical differ', () => {
+    const dm = resolveSessionCwd(base, { kind: 'dm', sessionKey: 'foo' });
+    const grp = resolveSessionCwd(base, { kind: 'group', sessionKey: 'foo' });
     expect(dm).not.toBe(grp);
+    expect(basename(dm)).toBe(expectedName('dm:foo'));
+    expect(basename(grp)).toBe(expectedName('group:foo'));
   });
 
-  it('thread != its parent group', () => {
-    const grp = resolveSessionCwd(base, { kind: 'group', groupId: 'gA' });
-    const thr = resolveSessionCwd(base, { kind: 'thread', groupId: 'gA', threadId: 'tX' });
-    expect(grp).not.toBe(thr);
-  });
-
-  it('different thread ids under the same group are isolated', () => {
-    const t1 = resolveSessionCwd(base, { kind: 'thread', groupId: 'g', threadId: 't1' });
-    const t2 = resolveSessionCwd(base, { kind: 'thread', groupId: 'g', threadId: 't2' });
-    expect(t1).not.toBe(t2);
+  it('every group member gets their own sandbox (uid embedded in key)', () => {
+    const memberA = resolveSessionCwd(base, { kind: 'group', sessionKey: 'gA:alice' });
+    const memberB = resolveSessionCwd(base, { kind: 'group', sessionKey: 'gA:bob' });
+    expect(memberA).not.toBe(memberB);
   });
 });
 
 describe('resolveSessionCwd — directory creation', () => {
   it('creates a 16-hex subdir under cwdBase', () => {
-    const dir = resolveSessionCwd(base, { kind: 'dm', userId: 'alice' });
+    const dir = resolveSessionCwd(base, { kind: 'dm', sessionKey: 'alice' });
     expect(existsSync(dir)).toBe(true);
     const stat = statSync(dir);
     expect(stat.isDirectory()).toBe(true);
@@ -129,29 +129,46 @@ describe('resolveSessionCwd — directory creation', () => {
     expect(name).toMatch(/^[0-9a-f]{16}$/);
   });
 
-  it('writes a session provenance marker', () => {
-    const dir = resolveSessionCwd(base, { kind: 'dm', userId: 'alice' });
-    expect(existsSync(join(dir, MARKER))).toBe(true);
+  it('records provenance in the sidecar registry (NOT inside the session dir)', () => {
+    const dir = resolveSessionCwd(base, { kind: 'dm', sessionKey: 'alice' });
+    const name = basename(dir);
+    // Marker lives in the registry, outside the agent's own cwd.
+    expect(existsSync(markerFor(base, name))).toBe(true);
+    // Nothing leaks into the session dir itself.
+    expect(readdirSync(dir)).toHaveLength(0);
   });
 
   it('mkdir is idempotent — repeated calls do not throw', () => {
-    const ctx: SessionCtx = { kind: 'dm', userId: 'alice' };
+    const ctx: SessionCtx = { kind: 'dm', sessionKey: 'alice' };
     expect(() => {
       for (let i = 0; i < 5; i++) resolveSessionCwd(base, ctx);
     }).not.toThrow();
   });
 
+  it('re-creates a missing registry marker on the next resolve (self-heal)', () => {
+    const dir = resolveSessionCwd(base, { kind: 'dm', sessionKey: 'alice' });
+    const name = basename(dir);
+    const marker = markerFor(base, name);
+    expect(existsSync(marker)).toBe(true);
+    // Simulate a first-write failure / external deletion of the marker.
+    rmSync(marker, { force: true });
+    expect(existsSync(marker)).toBe(false);
+    // Next resolve must restore it so the dir stays cleanup-eligible.
+    resolveSessionCwd(base, { kind: 'dm', sessionKey: 'alice' });
+    expect(existsSync(marker)).toBe(true);
+  });
+
   it('creates cwdBase itself if missing', () => {
     const nested = join(base, 'nested', 'deeper');
     expect(existsSync(nested)).toBe(false);
-    const dir = resolveSessionCwd(nested, { kind: 'dm', userId: 'x' });
+    const dir = resolveSessionCwd(nested, { kind: 'dm', sessionKey: 'x' });
     expect(existsSync(dir)).toBe(true);
   });
 });
 
 describe('cleanupExpiredCwds — TTL behavior', () => {
   it('removes a session dir whose mtime is older than ttlMs', () => {
-    const dir = resolveSessionCwd(base, { kind: 'dm', userId: 'stale' });
+    const dir = resolveSessionCwd(base, { kind: 'dm', sessionKey: 'stale' });
     // Force mtime ~8 days in the past
     const oldTime = oldTimeSeconds(8);
     utimesSync(dir, oldTime, oldTime);
@@ -159,27 +176,37 @@ describe('cleanupExpiredCwds — TTL behavior', () => {
     expect(existsSync(dir)).toBe(false);
   });
 
+  it('removes the registry marker alongside the deleted dir', () => {
+    const dir = resolveSessionCwd(base, { kind: 'dm', sessionKey: 'stale' });
+    const name = basename(dir);
+    const oldTime = oldTimeSeconds(8);
+    utimesSync(dir, oldTime, oldTime);
+    cleanupExpiredCwds(base, DEFAULT_CWD_TTL_MS);
+    expect(existsSync(dir)).toBe(false);
+    expect(existsSync(markerFor(base, name))).toBe(false);
+  });
+
   it('preserves a session dir whose mtime is within ttlMs', () => {
-    const dir = resolveSessionCwd(base, { kind: 'dm', userId: 'fresh' });
+    const dir = resolveSessionCwd(base, { kind: 'dm', sessionKey: 'fresh' });
     // mtime is "now" by virtue of just being created
     cleanupExpiredCwds(base, DEFAULT_CWD_TTL_MS);
     expect(existsSync(dir)).toBe(true);
   });
 
   it('refreshes an old active session mtime before cleanup can delete it', () => {
-    const dir = resolveSessionCwd(base, { kind: 'dm', userId: 'active' });
+    const dir = resolveSessionCwd(base, { kind: 'dm', sessionKey: 'active' });
     const oldTime = oldTimeSeconds(8);
     utimesSync(dir, oldTime, oldTime);
 
-    resolveSessionCwd(base, { kind: 'dm', userId: 'active' });
+    resolveSessionCwd(base, { kind: 'dm', sessionKey: 'active' });
     cleanupExpiredCwds(base, DEFAULT_CWD_TTL_MS);
 
     expect(existsSync(dir)).toBe(true);
   });
 
   it('removes only the expired dir when both fresh + stale coexist', () => {
-    const fresh = resolveSessionCwd(base, { kind: 'dm', userId: 'fresh' });
-    const stale = resolveSessionCwd(base, { kind: 'dm', userId: 'stale' });
+    const fresh = resolveSessionCwd(base, { kind: 'dm', sessionKey: 'fresh' });
+    const stale = resolveSessionCwd(base, { kind: 'dm', sessionKey: 'stale' });
     const oldTime = oldTimeSeconds(30);
     utimesSync(stale, oldTime, oldTime);
     cleanupExpiredCwds(base, DEFAULT_CWD_TTL_MS);
@@ -209,7 +236,8 @@ describe('cleanupExpiredCwds — safety', () => {
     expect(existsSync(otherDir)).toBe(true);
   });
 
-  it('does not delete an old 16-hex dir without the session marker', () => {
+  it('does not delete an old 16-hex dir without a registry marker', () => {
+    // A 16-hex dir from some OTHER tool — we never created a registry entry.
     const unrelated = join(base, '0123456789abcdef');
     mkdirSync(unrelated);
     const oldTime = oldTimeSeconds(8);
@@ -220,20 +248,40 @@ describe('cleanupExpiredCwds — safety', () => {
     expect(existsSync(unrelated)).toBe(true);
   });
 
-  it('does not delete a recent 16-hex dir with the session marker', () => {
-    const recent = join(base, 'abcdef0123456789');
+  it('does not delete a 16-hex dir whose marker was deleted from the registry', () => {
+    // Even if an in-cwd marker were forged by the agent, the registry (outside
+    // the cwd) is the source of truth — a missing registry entry protects it.
+    const dir = resolveSessionCwd(base, { kind: 'dm', sessionKey: 'victim' });
+    const name = basename(dir);
+    rmSync(markerFor(base, name), { force: true });
+    // Agent forges an in-cwd marker (old-style) — must NOT make it eligible.
+    writeFileSync(join(dir, '.cc-octo-session'), 'forged');
+    const oldTime = oldTimeSeconds(8);
+    utimesSync(dir, oldTime, oldTime);
+
+    cleanupExpiredCwds(base, DEFAULT_CWD_TTL_MS);
+
+    expect(existsSync(dir)).toBe(true);
+  });
+
+  it('does not delete a recent 16-hex dir with a registry marker', () => {
+    const name = 'abcdef0123456789';
+    const recent = join(base, name);
     mkdirSync(recent);
-    writeFileSync(join(recent, MARKER), '{"created":"now","kind":"dm"}');
+    mkdirSync(join(base, REGISTRY_DIR), { recursive: true });
+    writeFileSync(markerFor(base, name), '{"created":"now","kind":"dm"}');
 
     cleanupExpiredCwds(base, DEFAULT_CWD_TTL_MS);
 
     expect(existsSync(recent)).toBe(true);
   });
 
-  it('deletes an old 16-hex dir with the session marker', () => {
-    const stale = join(base, 'fedcba9876543210');
+  it('deletes an old 16-hex dir with a registry marker', () => {
+    const name = 'fedcba9876543210';
+    const stale = join(base, name);
     mkdirSync(stale);
-    writeFileSync(join(stale, MARKER), '{"created":"old","kind":"dm"}');
+    mkdirSync(join(base, REGISTRY_DIR), { recursive: true });
+    writeFileSync(markerFor(base, name), '{"created":"old","kind":"dm"}');
     const oldTime = oldTimeSeconds(8);
     utimesSync(stale, oldTime, oldTime);
 
@@ -245,7 +293,7 @@ describe('cleanupExpiredCwds — safety', () => {
   it('survives a malformed entry without aborting the sweep', () => {
     // Create one stale + one fresh; even if listing hits an oddball file the
     // sweep should still delete the stale session.
-    const stale = resolveSessionCwd(base, { kind: 'dm', userId: 'stale' });
+    const stale = resolveSessionCwd(base, { kind: 'dm', sessionKey: 'stale' });
     writeFileSync(join(base, 'sidecar.log'), 'noise');
     const oldTime = oldTimeSeconds(30);
     utimesSync(stale, oldTime, oldTime);

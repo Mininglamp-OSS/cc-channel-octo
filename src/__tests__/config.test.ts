@@ -452,6 +452,33 @@ describe('Q1: anthropicBaseUrl', () => {
     process.env.ANTHROPIC_BASE_URL = 'https://standard';
     expect(loadConfig(path).sdk.anthropicBaseUrl).toBe('https://standard');
   });
+
+  it('rejects an http:// (non-localhost) anthropicBaseUrl (SSRF protection)', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      sdk: { anthropicBaseUrl: 'http://evil.example.com' },
+    });
+    expect(() => loadConfig(path)).toThrow(/Unsafe sdk\.anthropicBaseUrl/);
+  });
+
+  it('rejects an anthropicBaseUrl resolving to a private IP literal', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      sdk: { anthropicBaseUrl: 'https://169.254.169.254' },
+    });
+    expect(() => loadConfig(path)).toThrow(/Unsafe sdk\.anthropicBaseUrl/);
+  });
+
+  it('allows http://localhost for local development', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      sdk: { anthropicBaseUrl: 'http://localhost:8080' },
+    });
+    expect(loadConfig(path).sdk.anthropicBaseUrl).toBe('http://localhost:8080');
+  });
 });
 
 // ─── Q2: allowedTools "*" | string[] ───────────────────────────────────
@@ -488,6 +515,20 @@ describe('Q2: allowedTools wildcard', () => {
     const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
     process.env.CC_OCTO_SDK_ALLOWED_TOOLS = ' * ';
     expect(loadConfig(path).sdk.allowedTools).toBe('*');
+  });
+
+  it('CC_OCTO_SDK_ALLOWED_TOOLS with a "*" element anywhere maps to wildcard', () => {
+    // Regression: a CSV containing `*` must collapse to the wildcard sentinel
+    // rather than passing a literal `*` through as a (bogus) tool name.
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    process.env.CC_OCTO_SDK_ALLOWED_TOOLS = '*,Read';
+    expect(loadConfig(path).sdk.allowedTools).toBe('*');
+  });
+
+  it('CC_OCTO_SDK_ALLOWED_TOOLS without "*" stays a CSV array', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    process.env.CC_OCTO_SDK_ALLOWED_TOOLS = 'Read, Glob ,Grep';
+    expect(loadConfig(path).sdk.allowedTools).toEqual(['Read', 'Glob', 'Grep']);
   });
 
   it('env "*" overrides a config-file array', () => {
@@ -545,5 +586,26 @@ describe('Q3: cwdBase + deprecated cwd alias', () => {
     );
     expect(cwdWarnings).toHaveLength(0);
     warnSpy.mockRestore();
+  });
+
+  it('blank config.cwdBase falls back to the default (not "")', () => {
+    // A `"cwdBase": ""` typo must not slip past the nullish fallback and land
+    // sandboxes relative to process.cwd().
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      cwdBase: '   ',
+    });
+    expect(loadConfig(path).cwdBase).toBe(process.cwd());
+  });
+
+  it('blank CC_OCTO_CWDBASE env is ignored (treated as unset)', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      cwdBase: '/explicit/base',
+    });
+    process.env.CC_OCTO_CWDBASE = '  ';
+    expect(loadConfig(path).cwdBase).toBe('/explicit/base');
   });
 });

@@ -2,8 +2,10 @@
  * Agent Bridge config-forwarding tests (P2 nit-2).
  *
  * Covers two SDK option behaviors that previously had no test:
- *  - Q1: `anthropicBaseUrl` is written to `process.env.ANTHROPIC_BASE_URL`
- *        before the SDK call. When unset, process.env stays untouched.
+ *  - Q1: `anthropicBaseUrl` is forwarded via the scoped `options.env`
+ *        (spread over process.env) so it reaches the SDK subprocess without
+ *        mutating the gateway's own global env. When unset, `options.env` is
+ *        omitted entirely.
  *  - Q2: `allowedTools: "*"` is the "no whitelist" sentinel — the option is
  *        omitted entirely so the SDK falls back to its built-in tool set. An
  *        explicit string[] is forwarded as-is.
@@ -70,22 +72,19 @@ describe('queryAgent SDK configuration forwarding', () => {
     }
   });
 
-  it('sets ANTHROPIC_BASE_URL before calling the SDK when configured', async () => {
-    let envAtCall: string | undefined;
-    mockQuery.mockImplementation(() => {
-      envAtCall = process.env.ANTHROPIC_BASE_URL;
-      return createMockStream();
-    });
-
+  it('forwards ANTHROPIC_BASE_URL via scoped options.env, not global process.env', async () => {
     await drain(makeConfig({ anthropicBaseUrl: 'https://gw.example.com' }));
 
     const options = mockQuery.mock.calls[0][0].options;
-    expect(envAtCall).toBe('https://gw.example.com');
-    expect(options.env).toBeUndefined();
-    expect(process.env.ANTHROPIC_BASE_URL).toBe('https://gw.example.com');
+    // Scoped to the subprocess env, spread over process.env to preserve PATH etc.
+    expect(options.env).toBeDefined();
+    expect(options.env.ANTHROPIC_BASE_URL).toBe('https://gw.example.com');
+    expect(options.env.PATH).toBe(process.env.PATH);
+    // The gateway's own global env must NOT be mutated (no cross-request leak).
+    expect(process.env.ANTHROPIC_BASE_URL).toBeUndefined();
   });
 
-  it('does not mutate ANTHROPIC_BASE_URL when not configured', async () => {
+  it('does not set options.env or mutate process.env when not configured', async () => {
     await drain(makeConfig());
 
     const options = mockQuery.mock.calls[0][0].options;

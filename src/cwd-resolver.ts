@@ -1,39 +1,48 @@
 /**
  * Q3: Per-session cwd isolation under a shared `cwdBase`.
  *
- * Each (DM peer | group | thread) maps to a deterministic 16-hex sha256 prefix
- * directory inside `cwdBase`. This prevents one user's session from reading or
- * mutating another user's working tree while letting operators allocate a
- * single disk root for the bot.
+ * Each session maps to a deterministic 16-hex sha256 prefix directory inside
+ * `cwdBase`, so one user's working tree cannot be read or mutated from another
+ * user's session while operators still allocate a single disk root for the bot.
  *
- * The hash inputs are namespaced (`dm:`, `group:`, `group:<id>:thread:<id>`)
- * so that the same string used as a uid vs. a group id can never collide.
+ * The partition key is the *exact* `sessionKey` the SessionRouter already
+ * produced for history (`SessionRouter.sessionKey()`), prefixed by the channel
+ * kind. Reusing the router key verbatim — rather than re-deriving spaceId or
+ * channel_id from the raw message — guarantees the cwd partition can never
+ * drift from the history partition:
  *
- * DM keys may additionally be scoped by `spaceId` so the cwd partition matches
- * SessionRouter.sessionKey(): the same uid messaging from two different spaces
- * gets two history sessions, hence must get two sandboxes too (P0-2).
+ *   - DM:    sessionKey = `${spaceId}:${uid}` (or bare `uid`)   → `dm:<key>`
+ *   - Group: sessionKey = `${channel_id}:${uid}`                → `group:<key>`
+ *
+ * Because the group sessionKey embeds `from_uid`, every group member gets their
+ * OWN sandbox (matching how group history is partitioned per-user), not a
+ * shared per-channel workspace. The `kind` prefix keeps a DM key and a group
+ * key that happen to be byte-identical from colliding.
  */
 
 import { createHash } from 'node:crypto';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   rmSync,
-  statSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 
-export type SessionCtx =
-  | { kind: 'dm'; userId: string; spaceId?: string }
-  | { kind: 'group'; groupId: string }
-  // NOTE: the `thread` variant is reserved for future wiring. The current Octo
-  // BotMessage shape exposes no thread/topic id, so only `dm` and `group` are
-  // ever emitted by index.ts today. Kept here (with hashing + tests) so the
-  // routing contract is ready the moment threads land upstream.
-  | { kind: 'thread'; groupId: string; threadId: string };
+/**
+ * Per-session routing context for cwd isolation. `kind` is the channel class
+ * and `sessionKey` is the router-produced key the session's history is stored
+ * under — see `SessionRouter.sessionKey()`. Passing the router key directly
+ * (instead of re-deriving uid/spaceId/channel_id here) is what keeps the cwd
+ * and history partitions byte-for-byte consistent.
+ */
+export type SessionCtx = {
+  kind: 'dm' | 'group';
+  sessionKey: string;
+};
 
 /** Length of the hex prefix used for subdirectory names. 16 hex = 64 bits — */
 /** ~2^32 sessions before a 1% collision risk, ample headroom for IM use.    */
@@ -45,12 +54,22 @@ const HASH_HEX_LEN = 16;
 const SESSION_DIR_RE = /^[0-9a-f]{16}$/;
 
 /**
- * Provenance marker written into every session dir we create. Cleanup only
- * deletes a 16-hex dir that ALSO contains this marker, so a cwdBase that is
- * accidentally pointed at some other tool's cache of identically-named dirs
- * (e.g. another hex-keyed store) can never be rmSync'd by us (P0-3).
+ * Provenance is recorded in a sidecar *registry* directory at the root of
+ * `cwdBase`, NOT inside each session dir. Each session we create gets a 0-byte
+ * marker `cwdBase/.cc-octo-sessions/<hexname>`. Cleanup only deletes a 16-hex
+ * dir that has a matching registry entry, so:
+ *
+ *   - A `cwdBase` accidentally pointed at another tool's hex-keyed store can
+ *     never be rmSync'd by us (P0-3).
+ *   - The marker lives OUTSIDE the agent's own working directory, so a
+ *     user-driven agent (which operates via relative paths inside its cwd)
+ *     cannot delete its marker to evade cleanup, nor forge a marker for a
+ *     sibling/operator directory to get it deleted. (Absolute-path access is a
+ *     separate, documented limitation — cwd is a starting dir, not a chroot.)
+ *   - The marker is re-created on every resolve if missing, so a transient
+ *     first-write failure cannot permanently exempt a live dir from the TTL.
  */
-const SESSION_MARKER_FILE = '.cc-octo-session';
+const SESSION_REGISTRY_DIR = '.cc-octo-sessions';
 
 /** 7 days — long enough for a vacation, short enough to bound disk growth. */
 export const DEFAULT_CWD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -60,34 +79,33 @@ function hashKey(key: string): string {
 }
 
 function sessionKeyToString(ctx: SessionCtx): string {
-  switch (ctx.kind) {
-    case 'dm':
-      // P0-2: mirror SessionRouter.sessionKey() — scope by space when present
-      // so the same uid in different spaces resolves to different sandboxes.
-      // Omitting spaceId keeps the legacy `dm:<uid>` hash for backward compat.
-      return ctx.spaceId
-        ? `dm:${ctx.spaceId}:${ctx.userId}`
-        : `dm:${ctx.userId}`;
-    case 'group':
-      return `group:${ctx.groupId}`;
-    case 'thread':
-      return `group:${ctx.groupId}:thread:${ctx.threadId}`;
-  }
+  // Prefix the router key with the channel kind so a DM key and a group key
+  // that happen to be byte-identical can never resolve to the same sandbox.
+  return `${ctx.kind}:${ctx.sessionKey}`;
 }
 
 /**
  * Resolve and ensure the per-session cwd exists. Idempotent — safe to call
  * on every turn. Returns the absolute path under `cwdBase`.
+ *
+ * Note: the TTL tracks last *bot turn* (this function bumps the dir mtime on
+ * every call), not arbitrary filesystem activity inside the sandbox. A session
+ * with no inbound message for `ttlMs` is reclaimed even if a background process
+ * is still touching files inside it.
  */
 export function resolveSessionCwd(cwdBase: string, ctx: SessionCtx): string {
-  const dir = join(cwdBase, hashKey(sessionKeyToString(ctx)));
+  const name = hashKey(sessionKeyToString(ctx));
+  const dir = join(cwdBase, name);
   mkdirSync(dir, { recursive: true });
 
-  // P0-3: drop a provenance marker so cleanupExpiredCwds can distinguish our
-  // own session dirs from unrelated 16-hex dirs. Written once; best-effort.
-  const marker = join(dir, SESSION_MARKER_FILE);
+  // Record provenance in the sidecar registry (outside the agent's cwd). Best
+  // effort, but re-attempted on every resolve so a transient failure self-heals
+  // on the next turn rather than exempting the dir from cleanup forever.
+  const registryDir = join(cwdBase, SESSION_REGISTRY_DIR);
+  const marker = join(registryDir, name);
   if (!existsSync(marker)) {
     try {
+      mkdirSync(registryDir, { recursive: true });
       writeFileSync(
         marker,
         JSON.stringify({ created: new Date().toISOString(), kind: ctx.kind }),
@@ -124,8 +142,10 @@ export function resolveSessionCwd(cwdBase: string, ctx: SessionCtx): string {
  * Silent no-op when `cwdBase` does not exist (e.g. first-run before any
  * session has been resolved).
  *
- * A dir is eligible for deletion only when BOTH the name matches the 16-hex
- * pattern AND it carries our `.cc-octo-session` provenance marker (P0-3).
+ * A dir is eligible for deletion only when ALL hold: the name matches the
+ * 16-hex pattern, it is a real directory (not a symlink), and it has a matching
+ * entry in the `.cc-octo-sessions` registry (P0-3). The registry entry is
+ * removed alongside the dir.
  */
 export function cleanupExpiredCwds(
   cwdBase: string,
@@ -139,18 +159,24 @@ export function cleanupExpiredCwds(
     return;
   }
 
+  const registryDir = join(cwdBase, SESSION_REGISTRY_DIR);
   const cutoff = Date.now() - ttlMs;
   for (const name of entries) {
     if (!SESSION_DIR_RE.test(name)) continue; // never touch unrelated files
     const full = join(cwdBase, name);
-    // P0-3: only sweep dirs we provably created. A 16-hex dir without our
-    // marker belongs to someone else — leave it untouched no matter its age.
-    if (!existsSync(join(full, SESSION_MARKER_FILE))) continue;
+    const marker = join(registryDir, name);
+    // P0-3: only sweep dirs we provably created (registry entry present). A
+    // 16-hex dir without a registry entry belongs to someone else — leave it
+    // untouched no matter its age.
+    if (!existsSync(marker)) continue;
     try {
-      const st = statSync(full);
+      // lstatSync (not statSync) so a symlinked entry is never followed; a real
+      // session dir is always a plain directory.
+      const st = lstatSync(full);
       if (!st.isDirectory()) continue;
       if (st.mtimeMs >= cutoff) continue;
       rmSync(full, { recursive: true, force: true });
+      rmSync(marker, { force: true }); // drop the registry entry too
     } catch (err) {
       console.error(
         `[cc-channel-octo] cwd cleanup failed for ${full}: ${String(err)}`,

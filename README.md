@@ -85,10 +85,10 @@ Three-level priority: **environment variables** > **config.json** > **defaults**
 |-------|---------|---------|-------------|
 | `botToken` | `CC_OCTO_BOT_TOKEN` | *(required)* | Octo bot token (`bf_*`) |
 | `apiUrl` | `CC_OCTO_API_URL` | *(required)* | Octo API base URL |
-| `cwdBase` | `CC_OCTO_CWDBASE` | `process.cwd()` | Base directory for per-session sandboxes. Each DM peer and group gets its own SHA-256 hex subdirectory under it; subdirs idle >7d are auto-cleaned every 6h. Thread isolation is reserved until Octo messages expose a thread/topic id. Legacy `cwd` / `CC_OCTO_CWD` still accepted with a deprecation warning. |
+| `cwdBase` | `CC_OCTO_CWDBASE` | `process.cwd()` | Base directory for per-session sandboxes. Each session (DM peer, or individual group member) gets its own SHA-256 hex subdirectory under it, matching how conversation history is partitioned; subdirs idle >7d are auto-cleaned every 6h. Legacy `cwd` / `CC_OCTO_CWD` still accepted with a deprecation warning. |
 | `dataDir` | `CC_OCTO_DATA_DIR` | `./data` | SQLite database directory (created with `0700` permissions) |
 | `sdk.model` | `CC_OCTO_SDK_MODEL` | *(SDK default)* | Claude model override |
-| `sdk.allowedTools` | `CC_OCTO_SDK_ALLOWED_TOOLS` | `"*"` | Either `"*"` (allow every tool the SDK exposes) or an explicit string array whitelist. Env accepts the literal `*` token or a CSV list. |
+| `sdk.allowedTools` | `CC_OCTO_SDK_ALLOWED_TOOLS` | `"*"` | Either `"*"` (allow every tool the SDK exposes) or an explicit string array whitelist. Env accepts a value containing `*` (wildcard) or a CSV list. |
 | `sdk.permissionMode` | `CC_OCTO_SDK_PERMISSION_MODE` | `bypassPermissions` | SDK permission mode |
 | `sdk.maxTurns` | `CC_OCTO_SDK_MAX_TURNS` | *(SDK default)* | Max agentic turns per query |
 | `sdk.systemPrompt` | `CC_OCTO_SDK_SYSTEM_PROMPT` | *(built-in)* | Custom system prompt |
@@ -105,8 +105,14 @@ Three-level priority: **environment variables** > **config.json** > **defaults**
 If you proxy the Claude API through your own gateway (corporate egress, regional
 endpoint, model router, etc.), set `sdk.anthropicBaseUrl` to the gateway origin.
 The value is forwarded to the Claude Agent SDK subprocess as the standard
-`ANTHROPIC_BASE_URL` environment variable, so any deployment that already speaks
+`ANTHROPIC_BASE_URL` environment variable (scoped to the subprocess — it does
+not mutate the gateway's own environment), so any deployment that already speaks
 the Anthropic protocol will Just Work — no code changes required.
+
+Because this endpoint receives the Anthropic API key and all prompt/response
+content, it is SSRF-validated at boot exactly like `apiUrl`: it must be `https://`
+(or `http://localhost` / `http://127.0.0.1` for local development), and may not
+resolve to a private/link-local address. An unsafe value fails fast at startup.
 
 ```jsonc
 {
@@ -145,16 +151,22 @@ the list to reduce risk:
 
 ### 2. `cwdBase` Isolation
 
-**`cwdBase` is the parent directory under which each conversation gets its own
-hashed sandbox.** A 16-hex SHA-256 subdirectory is created per DM peer or group,
-so one user's Claude Code session cannot read or mutate another's working tree.
-Thread-level isolation is reserved until Octo messages expose a thread/topic id.
-Subdirectories idle for more than 7 days are cleaned up automatically every 6
-hours.
+**`cwdBase` is the parent directory under which each session gets its own
+hashed sandbox.** A 16-hex SHA-256 subdirectory is derived from the same
+per-session key used for conversation history, so isolation is **per user** —
+including inside groups, where each member's sessionKey embeds their uid. One
+user's Claude Code session cannot read or mutate another's working tree.
+Subdirectories idle for more than 7 days (measured from the last inbound
+message) are cleaned up automatically every 6 hours.
 
-Any Octo user who can message the bot can still instruct Claude Code to read
-files within *their own* session sandbox, so `cwdBase` itself must not contain
-secrets you don't want exposed.
+**Limitation — cwd is a starting directory, not a chroot.** With `Bash`/`Read`
+in the tool set and `bypassPermissions`, the agent can still be instructed to
+read absolute paths outside the sandbox (e.g. `/etc/passwd`, or the gateway's
+own `config.json`). Per-session `cwdBase` partitions sessions from *each other*;
+it does not confine a single session to its directory. For a hard boundary, run
+the gateway as an unprivileged user in a container/VM and tighten `allowedTools`
+(drop `Bash`). Treat `cwdBase` itself as untrusted ground: any user who can
+message the bot can read files within their own session sandbox.
 
 Do **NOT** put these in `cwdBase`:
 - `config.json` (contains your bot token)
@@ -267,7 +279,7 @@ src/
 ## Known Limitations (v0.1)
 
 - **Text only** — Image, file, and voice messages are not processed (the bot replies with a notice).
-- **Per-session `cwdBase` isolation** — Each DM peer and group gets its own SHA-256 hex sandbox under `cwdBase`; idle sandboxes (>7d) are auto-cleaned every 6h. Thread-level isolation is reserved for a future Octo message shape that carries a thread id.
+- **Per-session `cwdBase` isolation** — Each session (DM peer, or individual group member) gets its own SHA-256 hex sandbox under `cwdBase`, partitioned by the same key as conversation history; idle sandboxes (>7d) are auto-cleaned every 6h. Note: `cwdBase` separates sessions from each other but does not confine a session to its directory (absolute-path reads via Bash/Read remain possible) — see the Security Model section.
 - **Stateless sessions** — Uses the v1 `query()` API. Workspace state (open files, command history) does not persist across messages. The v2 Session API is planned for v0.3.
 - **Single bot** — One bot per process. Multi-bot support is planned for v0.3.
 

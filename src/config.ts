@@ -150,13 +150,17 @@ function readConfigFile(configFilePath: string): PartialConfig {
 
 function mergeConfig(base: Config, override: PartialConfig): Config {
   // Q3: accept legacy `cwd` as an alias for `cwdBase`. cwdBase wins if both
-  // are present; otherwise cwd warns and is used.
-  let cwdBase = override.cwdBase ?? base.cwdBase ?? base.cwd;
-  if (override.cwdBase === undefined && override.cwd !== undefined) {
+  // are present; otherwise cwd warns and is used. Blank strings are treated as
+  // "not provided" so a `"cwdBase": ""` typo cannot slip past the nullish
+  // fallback and land sandboxes relative to process.cwd().
+  const overrideCwdBase = nonBlank(override.cwdBase);
+  const overrideCwd = nonBlank(override.cwd);
+  let cwdBase = overrideCwdBase ?? base.cwdBase ?? base.cwd;
+  if (overrideCwdBase === undefined && overrideCwd !== undefined) {
     console.warn(
       '[cc-channel-octo] WARNING: config.cwd is deprecated, use config.cwdBase instead',
     );
-    cwdBase = override.cwd;
+    cwdBase = overrideCwd;
   }
   return {
     botToken: override.botToken ?? base.botToken,
@@ -191,6 +195,13 @@ function parseCsv(value: string): string[] {
     .filter((s) => s.length > 0);
 }
 
+/** Return the trimmed value, or undefined when it is missing/blank. */
+function nonBlank(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 function parseIntStrict(value: string, name: string, minValue = 1): number {
   if (!/^\d+$/.test(value)) {
     throw new Error(`Invalid integer for ${name}: ${value}`);
@@ -214,24 +225,28 @@ function applyEnv(cfg: Config): Config {
   if (env.CC_OCTO_BOT_TOKEN) next.botToken = env.CC_OCTO_BOT_TOKEN;
   if (env.CC_OCTO_API_URL) next.apiUrl = env.CC_OCTO_API_URL;
   // Q3: CC_OCTO_CWDBASE wins; CC_OCTO_CWD is accepted with a deprecation warning.
-  if (env.CC_OCTO_CWDBASE) {
-    next.cwdBase = env.CC_OCTO_CWDBASE;
-    next.cwd = env.CC_OCTO_CWDBASE;
-  } else if (env.CC_OCTO_CWD) {
+  // Blank/whitespace-only values are ignored (treated as unset).
+  const envCwdBase = nonBlank(env.CC_OCTO_CWDBASE);
+  const envCwd = nonBlank(env.CC_OCTO_CWD);
+  if (envCwdBase) {
+    next.cwdBase = envCwdBase;
+    next.cwd = envCwdBase;
+  } else if (envCwd) {
     console.warn(
       '[cc-channel-octo] WARNING: CC_OCTO_CWD is deprecated, use CC_OCTO_CWDBASE instead',
     );
-    next.cwdBase = env.CC_OCTO_CWD;
-    next.cwd = env.CC_OCTO_CWD;
+    next.cwdBase = envCwd;
+    next.cwd = envCwd;
   }
   if (env.CC_OCTO_DATA_DIR) next.dataDir = env.CC_OCTO_DATA_DIR;
 
   if (env.CC_OCTO_SDK_MODEL) next.sdk.model = env.CC_OCTO_SDK_MODEL;
   if (env.CC_OCTO_SDK_ALLOWED_TOOLS) {
-    // Q2: accept the literal `*` token (with surrounding whitespace tolerated)
-    // as the wildcard form; otherwise treat as CSV whitelist.
-    const raw = env.CC_OCTO_SDK_ALLOWED_TOOLS.trim();
-    next.sdk.allowedTools = raw === '*' ? '*' : parseCsv(env.CC_OCTO_SDK_ALLOWED_TOOLS);
+    // Q2: a `*` token anywhere in the value means "allow every tool" — collapse
+    // to the wildcard sentinel rather than passing a literal `*` through as a
+    // (bogus) tool name. So `*`, ` * `, and `*,Read` all mean wildcard.
+    const tools = parseCsv(env.CC_OCTO_SDK_ALLOWED_TOOLS);
+    next.sdk.allowedTools = tools.includes('*') ? '*' : tools;
   }
   if (env.CC_OCTO_SDK_PERMISSION_MODE) {
     next.sdk.permissionMode = env.CC_OCTO_SDK_PERMISSION_MODE;
@@ -316,6 +331,17 @@ export function loadConfig(configPath?: string): Config {
   if (!isAllowedApiUrl(final.apiUrl)) {
     throw new Error(
       `Unsafe apiUrl: ${final.apiUrl} — must be https:// or http://localhost/http://127.0.0.1 (SSRF protection)`,
+    );
+  }
+  // Q1: the gateway endpoint receives the Anthropic API key and all prompt /
+  // response content, so it gets the same SSRF policy as apiUrl. Without this,
+  // a stray ANTHROPIC_BASE_URL (e.g. inherited from a shared shell profile or
+  // CI env) could silently redirect every model request — and the credential —
+  // to an attacker-controlled or private-network host.
+  if (final.sdk.anthropicBaseUrl && !isAllowedApiUrl(final.sdk.anthropicBaseUrl)) {
+    throw new Error(
+      `Unsafe sdk.anthropicBaseUrl: ${final.sdk.anthropicBaseUrl} — must be https:// ` +
+      `or http://localhost/http://127.0.0.1 (SSRF protection)`,
     );
   }
 

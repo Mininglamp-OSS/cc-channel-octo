@@ -287,17 +287,23 @@ export async function* queryAgent(
   const cwdBase = config.cwdBase ?? config.cwd;
   const cwd = sessionCtx ? resolveSessionCwd(cwdBase, sessionCtx) : cwdBase;
 
-  // Q1: forward ANTHROPIC_BASE_URL through the standard process environment
-  // before invoking the SDK. When unset, leave process.env untouched.
-  if (config.sdk.anthropicBaseUrl) {
-    process.env.ANTHROPIC_BASE_URL = config.sdk.anthropicBaseUrl;
-  }
+  // Q1: forward ANTHROPIC_BASE_URL to the SDK subprocess via the scoped `env`
+  // option instead of mutating the gateway's global process.env. The SDK's
+  // `env` REPLACES the subprocess environment entirely, so spread process.env
+  // first to preserve PATH/HOME/ANTHROPIC_API_KEY. Scoping it here means the
+  // override never leaks across requests and never persists after the field is
+  // cleared (no stale-global problem). When unset, omit `env` so the subprocess
+  // simply inherits process.env.
+  const env = config.sdk.anthropicBaseUrl
+    ? { ...process.env, ANTHROPIC_BASE_URL: config.sdk.anthropicBaseUrl }
+    : undefined;
 
   const stream = sdkQuery({
     prompt: userMessage,
     options: {
       cwd,
       systemPrompt,
+      ...(env ? { env } : {}),
       // Q2: `"*"` means "no whitelist" — drop the option so the SDK falls back
       // to its built-in tool set. An explicit string[] is forwarded as-is.
       ...(config.sdk.allowedTools === '*'

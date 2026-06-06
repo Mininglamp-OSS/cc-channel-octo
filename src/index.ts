@@ -328,21 +328,16 @@ async function handleMessage(
 
       // --- Query agent with structural role separation (Q3 fix) ---
       // userContentForLLM → user role (prompt), history + context → system role (systemPrompt)
-      // Q3 cwd isolation: derive a per-session SessionCtx from channel_type
-      // so resolveSessionCwd can hash to a stable hex subdir under cwdBase.
-      // DM keys on the sender uid plus optional spaceId; groups key on channel_id
-      // (everyone in the room shares the same workspace, matching IM mental
-      // model — a group's "project" is collective). Thread routing is reserved
-      // until BotMessage exposes thread/topic metadata.
-      //
-      // P0-2: SessionRouter.sessionKey() scopes DMs by spaceId when present
-      // (`${spaceId}:${from_uid}`), so the cwd partition must match — the same
-      // uid in two spaces has two histories and therefore needs two sandboxes.
-      // We recover spaceId from the router-produced sessionKey itself (rather
-      // than re-deriving it) so the two can never drift out of sync.
-      const sessionCtx: SessionCtx = isGroup
-        ? { kind: 'group', groupId: channelId }
-        : { kind: 'dm', userId: msg.from_uid, spaceId: dmSpaceIdFromKey(sessionKey, msg.from_uid) };
+      // Q3 cwd isolation: the SessionCtx carries the router-produced sessionKey
+      // verbatim, so the cwd partition is byte-for-byte identical to the history
+      // partition. Group keys embed from_uid (`${channel_id}:${uid}`), so every
+      // group member gets their OWN sandbox — matching per-user group history
+      // and honoring the documented "one user cannot read/mutate another's
+      // working tree" guarantee.
+      const sessionCtx: SessionCtx = {
+        kind: isGroup ? 'group' : 'dm',
+        sessionKey,
+      };
       const rawChunks = queryAgent(userContentForLLM, historyPrefix, contextStr, config, sessionCtx);
 
       // Tee the generator: collect full text while streaming to Octo
@@ -433,24 +428,6 @@ async function handleMessage(
 }
 
 // ─── G1/G11 helpers ───────────────────────────────────────────────────────────────────
-
-/**
- * P0-2: Recover the DM spaceId from the router-produced sessionKey.
- *
- * SessionRouter.sessionKey() builds DM keys as `${spaceId}:${from_uid}` when a
- * space is known, or bare `from_uid` otherwise. We invert that here so the cwd
- * sandbox partition stays byte-for-byte consistent with the history partition,
- * instead of re-deriving spaceId via a parallel extractor that could drift.
- *
- * Returns the spaceId, or undefined when the key is the bare uid (no space).
- */
-function dmSpaceIdFromKey(sessionKey: string, fromUid: string): string | undefined {
-  const suffix = `:${fromUid}`;
-  if (sessionKey.endsWith(suffix) && sessionKey.length > suffix.length) {
-    return sessionKey.slice(0, -suffix.length);
-  }
-  return undefined;
-}
 
 /**
  * Compact rendering of a message for the rolling [Group context] cache.
