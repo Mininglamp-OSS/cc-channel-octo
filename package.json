@@ -15,7 +15,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "prepare": "husky"
+    "prepare": "husky || true"
   },
   "dependencies": {
     "better-sqlite3": "^12.10.0",
@@ -30,6 +30,8 @@
   },
   "devDependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.162",
+    "@commitlint/cli": "^19.6.0",
+    "@commitlint/config-conventional": "^19.6.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/crypto-js": "^4.2.2",
     "@types/ws": "^8.5.14",
