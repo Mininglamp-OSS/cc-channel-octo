@@ -427,7 +427,7 @@ on `main` and have to be redone as a follow-up PR).
 
 ---
 
-## 13. Markdown URL parsing: CommonMark spec compliance
+## 13. Markdown URL parsing: CommonMark spec compliance (depends on §11.4)
 
 Markdown image / link regexes that match `[^)\s]+` for the URL field
 are CommonMark-spec-compliant — CommonMark requires URL-encoded spaces
@@ -438,6 +438,14 @@ by the regex.
 **This is not a security gap**: the image is not processed, so no
 inline render happens, so no XSS path exists. It IS a usability gap:
 legitimate data URIs with literal spaces in parameters won't upload.
+
+**Threat-model dependency (explicit)**: §13's silent-skip design is
+safe ONLY because §11.4 Step 4 (`Content-Disposition: attachment` pin
+at the CDN / storage layer) is in force. Relaxing `[^)\s]+` to accept
+literal spaces widens the set of markdown URLs that reach the upload
+pipeline; any drift in §11.4 Step 4 then re-exposes the inline-render
+path. The two rules are coupled: removing or weakening either one
+requires reverse-verifying the other still holds.
 
 **Action required**: when adding or modifying a markdown URL regex, add
 an inline comment at the regex definition site explaining the design
@@ -458,6 +466,62 @@ const MARKDOWN_IMAGE_RE = /!\[[^\]]*\]\(([^)\s]+)\)/g;
 
 ---
 
+## 14. New §N self-rule: declare trigger + revert-invariant + sunset
+
+Meta-rule. Every new checklist section §N (and every new subsection
+§N.M that introduces a standalone rule) MUST declare three things in
+its opening prose, so the checklist itself remains finite, falsifiable,
+and auditable. Without this, the checklist grows monotonically and
+silently accumulates dead rules whose original trigger is forgotten.
+
+Three mandatory declarations:
+
+1. **Trigger condition** — the concrete code pattern, PR action,
+   review state, or runtime symptom that activates the rule. If you
+   cannot name a trigger, the rule is decoration and must not be added.
+2. **Revert-test invariant** — the §10.5 / §11 reverse-verify analogue
+   for a docs rule: "if I delete this rule from the checklist,
+   what observable failure mode returns?" If the answer is "nothing
+   observable changes," the rule is not adding signal and must not be
+   added.
+3. **Sunset clause** — the upstream condition under which the rule
+   becomes obsolete (spec upgrade, tooling change, language feature
+   landing). Permanent rules write `sunset: none (permanent invariant)`
+   explicitly — that is itself a declaration, not an omission.
+
+Pairs with §2 (reviewer state check) / §12 (author state check) to
+close the rule-system self-reference loop: any destructive or
+irreversible PR action verifies state first; any new permanent rule
+added to the rulebook itself declares its own falsifiability boundary.
+
+### 14.1 Retroactive dogfooding for §10 – §13
+
+Applying §14 backward to the §10 – §13 batch added in this PR
+(documented here so the dogfooding cycle closes inside the same PR):
+
+- **§10 Performance assertions must be reverse-verifiable**
+  - trigger: a test asserts wall-clock / throughput / size in a fixed numeric threshold
+  - revert-invariant: deleting §10 lets PR#46-style 500ms-theatre assertions reappear; the test passes pre- and post-fix with no signal
+  - sunset: none (permanent invariant; perf-theatre risk is intrinsic to fixed-threshold assertions)
+- **§11 Pin assertions at the strictest enforcement boundary**
+  - trigger: a fix touches ≥2 layers of a parse → validate → encode → render → enforce pipeline
+  - revert-invariant: deleting §11 lets layered-defense tests assert at the upstream layer only; PRIMARY-layer drift becomes invisible (PR#45 SVG XSS reproduction)
+  - sunset: none (permanent invariant; defense-in-depth is structural)
+- **§12 Author-side state check before push**
+  - trigger: `git push --force-with-lease` (or any history-rewriting push) to a branch that backs an open PR
+  - revert-invariant: deleting §12 lets the PR#46 dangling-commit incident recur (force-push to a merged PR's branch creates commits that never reach `main`)
+  - sunset: none (permanent invariant; GitHub squash-merge semantics will not change)
+- **§13 Markdown URL parsing: CommonMark spec compliance**
+  - trigger: a markdown URL regex (`MARKDOWN_IMAGE_RE` / `MARKDOWN_LINK_RE` / equivalent) is added or modified
+  - revert-invariant: deleting §13 lets a future maintainer "fix" `[^)\s]+` to accept literal spaces, widening the attacker-input surface that §11.4 Step 4 depends on
+  - sunset: revisit if CommonMark spec changes URL-encoding requirements, or if the markdown parser is replaced with a non-regex implementation
+- **§14 (this section)**
+  - trigger: a new §N or rule-introducing §N.M is added to this checklist
+  - revert-invariant: deleting §14 lets future additions skip trigger / revert / sunset declarations; the checklist grows unbounded and dead rules accumulate silently
+  - sunset: none (permanent invariant; rule-system self-reference is required regardless of rule count)
+
+---
+
 ## Quick recall card
 
 When in doubt, run through this in order:
@@ -475,6 +539,7 @@ When in doubt, run through this in order:
 11. Perf assertions reverse-verified per §10.5? ✓
 12. Assertions pinned at strictest enforcement boundary per §11 (PRIMARY/SECONDARY split when defense is layered)? ✓
 13. Author-side `gh pr view <N> --json state,mergedAt` run before force-push to an open PR's branch? ✓
+14. New §N (or rule-introducing §N.M) declares trigger condition + revert-test invariant + sunset clause per §14? ✓
 
-If any of 1-13 is missing, you are not done.
+If any of 1-14 is missing, you are not done.
 
