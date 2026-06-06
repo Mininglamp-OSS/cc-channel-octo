@@ -725,14 +725,26 @@ describe('sendRichTextCombined', () => {
         mediaUrl: dataUri,
       });
 
-      // SVG variant MUST route to File (type=8), not Image (type=2).
-      const sendBody = JSON.parse(fetchMock.mock.calls[1][1].body as string);
-      expect(sendBody.payload.type).toBe(8);
-      // And COS upload MUST set Content-Disposition: attachment so the CDN
-      // serves SVG as download instead of inline render.
+      // ─── §11 strictest enforcement boundary invariant (PRIMARY ASSERT) ──
+      // The terminal parser the attacker can reach is the BROWSER rendering
+      // a CDN-served object. The strictest enforcement boundary is what the
+      // CDN sends — specifically Content-Disposition: attachment which
+      // forces download instead of inline render regardless of Content-Type.
+      // This is the ACTUAL security invariant; everything upstream (msgType,
+      // app-layer gate) is correlate. Pin assertion to the invariant itself
+      // per REVIEW_CHECKLIST.md §11 / Quick Recall Card #12.
       const putCall = cosPutObjectMock.mock.calls[0][0] as { ContentDisposition?: string };
       expect(putCall.ContentDisposition).toBeDefined();
       expect(putCall.ContentDisposition).toMatch(/^attachment/i);
+
+      // ─── §11 defense-in-depth correlates (SECONDARY ASSERTS) ─────────
+      // These hold in current implementation but are NOT the security
+      // invariant — if msgType drifts to Image while Content-Disposition
+      // stays attachment, the browser still downloads (safe). If both drift,
+      // the PRIMARY assert above catches it. These correlates are kept for
+      // regression visibility but the primary assert is what defends.
+      const sendBody = JSON.parse(fetchMock.mock.calls[1][1].body as string);
+      expect(sendBody.payload.type).toBe(8); // MessageType.File (correlate)
     }
   });
 });
