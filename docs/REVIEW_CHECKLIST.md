@@ -1,7 +1,8 @@
 # Code Review Checklist (cc-channel-octo)
 
 > Living document, distilled from Stage 6 (v0.1.1) review experience.
-> 9 checks that took five reviewers + multiple "按错按钮" failures to sink in.
+> 14 checks (§0 ground rules through §14 rule-system self-reference)
+> that took five reviewers + multiple "按错按钮" failures to sink in.
 > If you skip any of these on a security-adjacent PR, you are repeating
 > someone else's mistake from June 2026.
 
@@ -315,6 +316,10 @@ MUST extend this chain in §9.4 and declare its §14 three clauses.
 
 ## 10. Performance assertions must be reverse-verifiable
 
+- **trigger**: a test asserts wall-clock / throughput / size in a fixed numeric threshold
+- **revert-invariant**: deleting §10 lets PR#46-style 500ms-theatre assertions reappear; the test passes pre- and post-fix with no signal
+- **sunset**: none (permanent invariant; perf-theatre risk is intrinsic to fixed-threshold assertions)
+
 Any test that includes a timing assertion (e.g. `expect(elapsed).toBeLessThan(500)`)
 MUST be reverse-verified: `git revert` the helper / fast-path under test
 and confirm the assertion **fails**. If revert still passes, the assertion
@@ -364,6 +369,10 @@ wall-clock duration on the runner.
 ---
 
 ## 11. Pin assertions at the strictest enforcement boundary
+
+- **trigger**: a fix touches ≥2 layers of a parse → validate → encode → render → enforce pipeline
+- **revert-invariant**: deleting §11 lets layered-defense tests assert at the upstream layer only; PRIMARY-layer drift becomes invisible (PR#45 SVG XSS reproduction)
+- **sunset**: none (permanent invariant; defense-in-depth is structural)
 
 When a defense-in-depth fix lands across multiple layers (in-app filter
 → encoder → storage / CDN / browser), tests MUST assert at the strictest
@@ -519,6 +528,10 @@ both: `REVIEW_CHECKLIST.md §11.1 (PR#45) + §11.5 (PR#49)`.
 
 ## 12. Author-side state check before push
 
+- **trigger**: `git push --force-with-lease` (or any history-rewriting push) to a branch that backs an open PR
+- **revert-invariant**: deleting §12 lets the PR#46 dangling-commit incident recur (force-push to a merged PR's branch creates commits that never reach `main`)
+- **sunset**: none (permanent invariant; GitHub squash-merge semantics will not change)
+
 Mirror of §2 (reviewer-side state check before APPROVED), applied to
 the author side:
 
@@ -547,6 +560,10 @@ on `main` and have to be redone as a follow-up PR).
 ---
 
 ## 13. Markdown URL parsing: CommonMark spec compliance (depends on §11.4)
+
+- **trigger**: a markdown URL regex (`MARKDOWN_IMAGE_RE` / `MARKDOWN_LINK_RE` / equivalent) is added or modified
+- **revert-invariant**: deleting §13 lets a future maintainer "fix" `[^)\s]+` to accept literal spaces, widening the attacker-input surface that §11.4 Step 4 depends on
+- **sunset**: revisit if CommonMark spec changes URL-encoding requirements, or if the markdown parser is replaced with a non-regex implementation
 
 Markdown image / link regexes that match `[^)\s]+` for the URL field
 are CommonMark-spec-compliant — CommonMark requires URL-encoded spaces
@@ -624,61 +641,76 @@ merge; self-classification by the author is not sufficient (this is
 the §14 self-falsification path PR#50 fixup 2 walked into and fixup
 3 corrected).
 
+**Inline at section head is mandatory; centralised audit table is
+supplementary.** "every new checklist section §N MUST declare in
+its opening prose" means each rule-introducing §N (and rule-
+introducing §N.M) starts with its trigger / revert-invariant /
+sunset block as the first content under the heading, before any
+prose. §14.1 keeps a cross-section audit summary table; that table
+is a navigation aid for reviewers, NOT a substitute for inline
+declaration. A section without inline triple at its head is
+non-conformant even if it appears in the §14.1 table (this is the
+§14 self-falsification path PR#50 fixup 3 walked into and fixup 4
+corrected).
+
 Pairs with §2 (reviewer state check) / §12 (author state check) to
 close the rule-system self-reference loop: any destructive or
 irreversible PR action verifies state first; any new permanent rule
 added to the rulebook itself declares its own falsifiability boundary.
 
-### 14.1 Retroactive dogfooding for §9.4 / §10 – §14 / §11.5
+### 14.1 Self-audit summary (cross-section dogfooding table)
 
-Applying §14 backward to every rule-introducing addition shipped in
-this PR (documented here so the dogfooding cycle closes inside the
-same PR, and no new rule lands without its triple inline at the
-section head):
+Audit summary of every rule-introducing addition shipped in this PR.
+This table is a **supplementary** navigation aid for reviewers —
+each row must ALSO appear as an inline triple at the corresponding
+section head. Per §14 "Inline at section head is mandatory;
+centralised audit table is supplementary," a section with no inline
+triple is non-conformant even if it appears in this table.
 
-- **§9.4 Evolution narrative §9 → §11 cross-parser stack progression**
-  — triple inline at section head. Trigger: new §N supersedes earlier
-  §M's primary defense role. Revert-invariant: §11 appears ex-nihilo
-  to first-time readers. Sunset: none.
-- **§10 Performance assertions must be reverse-verifiable**
-  - trigger: a test asserts wall-clock / throughput / size in a fixed numeric threshold
-  - revert-invariant: deleting §10 lets PR#46-style 500ms-theatre assertions reappear; the test passes pre- and post-fix with no signal
-  - sunset: none (permanent invariant; perf-theatre risk is intrinsic to fixed-threshold assertions)
-- **§11 Pin assertions at the strictest enforcement boundary**
-  - trigger: a fix touches ≥2 layers of a parse → validate → encode → render → enforce pipeline
-  - revert-invariant: deleting §11 lets layered-defense tests assert at the upstream layer only; PRIMARY-layer drift becomes invisible (PR#45 SVG XSS reproduction)
-  - sunset: none (permanent invariant; defense-in-depth is structural)
-- **§11.5 Case study: legacy `image/svg` PR#49 dual-layer reverse-fail**
-  — triple inline at section head. Trigger: any new hardening on a
-  previously-§11-covered surface. Revert-invariant: §11 rests on N=1
-  evidence. Sunset: ≥3 independent case studies → promote to §11.0 lede.
-- **§12 Author-side state check before push**
-  - trigger: `git push --force-with-lease` (or any history-rewriting push) to a branch that backs an open PR
-  - revert-invariant: deleting §12 lets the PR#46 dangling-commit incident recur (force-push to a merged PR's branch creates commits that never reach `main`)
-  - sunset: none (permanent invariant; GitHub squash-merge semantics will not change)
-- **§13 Markdown URL parsing: CommonMark spec compliance**
-  - trigger: a markdown URL regex (`MARKDOWN_IMAGE_RE` / `MARKDOWN_LINK_RE` / equivalent) is added or modified
-  - revert-invariant: deleting §13 lets a future maintainer "fix" `[^)\s]+` to accept literal spaces, widening the attacker-input surface that §11.4 Step 4 depends on
-  - sunset: revisit if CommonMark spec changes URL-encoding requirements, or if the markdown parser is replaced with a non-regex implementation
-- **§14 (this section)**
-  - trigger: a new §N or rule-introducing §N.M is added to this checklist
-  - revert-invariant: deleting §14 lets future additions skip trigger / revert / sunset declarations; the checklist grows unbounded and dead rules accumulate silently
-  - sunset: none (permanent invariant; rule-system self-reference is required regardless of rule count)
+| Section | Trigger (one-line) | Revert-invariant (one-line) | Sunset (one-line) | Inline triple at section head |
+|---------|---------------------|------------------------------|-------------------|--------------------------------|
+| §9.4 | new §N supersedes earlier §M's primary defense role | §11 appears ex-nihilo to first-time readers | none (permanent) | ✓ |
+| §10 | test asserts fixed wall-clock / throughput / size threshold | PR#46-style 500ms-theatre assertions reappear | none (permanent) | ✓ |
+| §11 | fix touches ≥2 layers of a defense-in-depth pipeline | layered-defense tests assert only at upstream layer | none (permanent) | ✓ |
+| §11.5 | new hardening on previously-§11-covered surface | §11 rests on N=1 evidence | ≥3 case studies → promote to §11.0 lede | ✓ |
+| §12 | `git push --force-with-lease` to branch backing open PR | PR#46 dangling-commit incident recurs | none (permanent) | ✓ |
+| §13 | markdown URL regex added or modified | future "fix" widens attacker-input surface §11.4 depends on | CommonMark spec change OR non-regex parser | ✓ |
+| §14 | new §N or rule-introducing §N.M added | future additions skip triple; checklist grows unbounded | none (permanent) | ✓ |
 
-**Self-falsification audit (PR#50 fixup 2 → fixup 3 correction)**
+**Self-falsification audit (PR#50 fixup 2 → fixup 3 → fixup 4)**
 
 Fixup 2 (commit 07107599) introduced an "Non-rule additions are
-exempt" paragraph here that classified §9.4 and §11.5 as pure
+exempt" paragraph in §14.1 that classified §9.4 and §11.5 as pure
 evidence, exempt from the triple. That classification was the author
 asserting non-rule status of their own additions — exactly the
-self-classification path the revised §14 "Scope" paragraph above
-blocks. Reviewer (齐静春, 09:29 GMT+8) independently identified both
-§9.4 and §11.5 as introducing new normative claims (§9.4 = "lineage
-MUST be documented when superseding"; §11.5 = "N≥2 cases required to
-promote anecdote to pattern"). Fixup 3 removes the exemption
-paragraph, adds triples inline at the §9.4 and §11.5 section heads,
-and strengthens §14 with the independent-reviewer-ack requirement
-so the failure mode cannot recur.
+self-classification path the §14 "Scope" paragraph above blocks.
+Reviewer (齐静春, 09:29 GMT+8) independently identified both §9.4 and
+§11.5 as introducing new normative claims. Fixup 3 (commit 47066460)
+removed the exemption paragraph and added triples inline at §9.4 and
+§11.5 section heads.
+
+Fixup 3 still left a second §14 self-falsification mode in place:
+§10 / §11 / §12 / §13 triples lived ONLY inside this §14.1
+retroactive dogfooding section, not inline at the section heads.
+§14's literal rule ("every new checklist section §N MUST declare in
+its opening prose") was therefore still partially violated.
+Reviewers Steve and 齐静春 independently caught this on head 8ca325b2
+/ 07107599 (Steve: "§10-§13 各节开头缺 trigger / revert-invariant /
+sunset 声明, §14.1 集中补了 retroactive dogfooding 但各节 inline 没有";
+齐静春 09:30 GMT+8: "集中 ≠ inline"). Fixup 4 (this commit) moves
+each triple inline at its section head, demotes §14.1 to a
+supplementary cross-section audit summary table, and strengthens
+§14 "Scope" with the explicit inline-mandatory / table-supplementary
+clause so the failure mode cannot recur.
+
+**§14 self-falsification cardinality so far: N=2** (fixup 2
+self-exemption / fixup 3 centralised-not-inline). Per §11.5 sunset
+clause analogue ("≥3 independent cases → promote pattern to §N.0
+lede"), if a third independent self-falsification mode emerges on
+PR#50 itself, §14 will be considered for promotion to a §0.x ground
+rule rather than a §N rule — the rule about rules belongs above
+the rule list, not inside it. (Open question for follow-up; out of
+PR#50 scope.)
 
 ---
 
