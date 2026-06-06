@@ -249,6 +249,56 @@ If you find yourself adding a sixth variant check, stop and rewrite the
 validator to defer to the spec parser plus a defense-in-depth boundary
 guard (see §9.2 + §11).
 
+### 9.4 Evolution narrative: §9 → §11 cross-parser stack progression
+
+§10 – §13 are not four unrelated rules stacked next to §9. They are
+the recursive extension of §9 into the multi-layer defense-in-depth
+regime. Read in lineage order:
+
+- **§9 (PR#38 era)** — attacker-input validation against a single
+  downstream parser. "Enumerate ALL canonical-equivalent forms" solves
+  the single-parser bypass class (IPv6 v4-mapped hex, `%2e%2e`,
+  encoded form path traversal). The implicit threat model assumes one
+  validator, one parser, one boundary.
+- **§9.2 (cross-parser meta-rule)** — first generalisation. When the
+  attacker input flows through N parsers (in-app MIME canonical →
+  RFC 2397 data-URI → CDN serving), enumerating canonical forms in
+  parser #1 is insufficient: parser #2 / #3 each accept their own
+  superset. The fix is "defer to the spec parser" — still per-parser,
+  but architecturally aware that there is more than one.
+- **§11 (PR#45 era, PR#47 split)** — second generalisation. When N
+  parsers are stacked into a defense-in-depth chain, the question is
+  no longer "did each parser canonicalise correctly?" but "which
+  parser is the terminal one the attacker reaches?" PRIMARY /
+  SECONDARY pinning is the answer: pin the assertion at the strictest
+  enforcement boundary the attacker actually hits (the browser
+  fetching the CDN object), treat upstream layers as regression
+  correlates. PR#45 SVG XSS shipped 3 layers; PR#47 split the unified
+  test into PRIMARY/SECONDARY (Step 1 of full §11 application).
+- **§11.5 (PR#49 era, dual-layer reverse-fail)** — third generalisation
+  and confirmation. A natural-traffic legacy `image/svg` hardening
+  produced the cleanest reverse-verify case study: each of the two
+  layers independently fails when reverted, so neither is silently
+  covered by the other. Two independent case studies (PR#45 reviewer
+  reproduction + PR#49 natural traffic) is the minimum cardinality to
+  promote the pattern from anecdote to rule.
+- **§10 / §12 / §13 / §14** — orthogonal supporting infrastructure for
+  the same regime: §10 keeps perf assertions falsifiable so the
+  defense-in-depth tests themselves cannot decay into theatre; §12
+  keeps author-side history operations from invalidating the
+  reviewer-side checks the chain depends on; §13 keeps a single-parser
+  pre-condition (markdown URL regex) load-bearing for §11.4 Step 4;
+  §14 keeps the rule set itself finite and falsifiable so the chain
+  can grow without becoming unauditable.
+
+Reader test: if you cannot answer "which earlier rule was insufficient,
+and what new attacker capability forced the generalisation?" for a
+given §N, then §N is misfiled and should either be merged into the
+earlier rule or rewritten with the lineage made explicit.
+
+Milestone PR chain: PR#38 (§9) → PR#45 (§9.2 + §11.1) → PR#47 (§11.2 Step 1) → PR#49 (§11.5 dual-layer reverse-fail). The next milestone PR adding a rule
+MUST extend this chain in §9.4 and declare its §14 three clauses.
+
 ---
 
 ## 10. Performance assertions must be reverse-verifiable
@@ -396,6 +446,46 @@ whenever you write a MIME-type filter:
    the upload layer — this is the strictest enforcement boundary per
    §11, and is the PRIMARY assertion in any related test.
 
+### 11.5 Case study: legacy `image/svg` PR#49 dual-layer reverse-fail
+
+PR#49 hardened against the legacy `image/svg` MIME (without the `+xml`
+suffix) which Firefox in some legacy contexts has been observed to
+inline-render as SVG. The fix lands at both layers of the §11.1 stack;
+the new test `media-upload.test.ts` asserts the PRIMARY invariant
+first and the SECONDARY correlate second per the §11.3 comment
+template. The reverse-verify experiment then proves each layer
+independently load-bearing:
+
+- drop `isSafeInlineImage`'s `|| 'image/svg'` clause → SECONDARY
+  (`payload.type === 8`) FAIL
+- drop `uploadFileToCOS`'s `|| ct === 'image/svg'` clause → PRIMARY
+  (`/^attachment/i`) FAIL
+
+Both layers independently load-bearing is the standard §11 case
+study: neither layer is silently covered by the other, so neither can
+be deleted as decorative without observable test failure. Contrast
+with the failure mode §11.1 calls out ("if reverting Layer 1 doesn't
+fail the SECONDARY assertion, the SECONDARY assertion is silently
+covered by upstream defense-in-depth and should be split into a narrow
+test that pins Layer 1 in isolation per §11.2") — PR#49 is the
+positive control showing the desired post-split state.
+
+Why this case study matters more than §11.1 (PR#45) alone:
+
+- PR#45 was reviewer-reproduction-driven (synthetic). PR#49 was
+  natural-traffic hardening (real attacker-reachable edge surfaced by
+  reviewer cross-check).
+- PR#45 needed PR#47 to split PRIMARY/SECONDARY post-hoc. PR#49
+  shipped PRIMARY/SECONDARY pinned in the same PR, dogfooding §11.3
+  on first try.
+- Two independent case studies (PR#45 + PR#49) is the minimum
+  cardinality to promote PRIMARY/SECONDARY pinning from "PR#45-specific
+  pattern" to "§11 cross-pattern rule." Single case = anecdote, two
+  cases = pattern.
+
+For the matching `Refs:` block in any future §11-related PR, cite
+both: `REVIEW_CHECKLIST.md §11.1 (PR#45) + §11.5 (PR#49)`.
+
 ---
 
 ## 12. Author-side state check before push
@@ -519,6 +609,14 @@ Applying §14 backward to the §10 – §13 batch added in this PR
   - trigger: a new §N or rule-introducing §N.M is added to this checklist
   - revert-invariant: deleting §14 lets future additions skip trigger / revert / sunset declarations; the checklist grows unbounded and dead rules accumulate silently
   - sunset: none (permanent invariant; rule-system self-reference is required regardless of rule count)
+
+**Non-rule additions are exempt** (case studies, narratives, evidence
+extensions). §9.4 (evolution narrative) and §11.5 (PR#49 case study)
+shipped in this same PR do NOT introduce new rules — they extend the
+evidence base / lineage of §9 and §11 respectively. §14 applies to
+rule-introducing additions only; case study / narrative additions
+file under the parent §N's existing trigger / revert-invariant /
+sunset declarations.
 
 ---
 
