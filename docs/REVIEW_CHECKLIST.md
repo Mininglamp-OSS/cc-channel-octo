@@ -233,14 +233,228 @@ the boundary we control.
 
 ### 9.3 Recurrence count
 
-The four "修了一半" findings from PR#38 (v4-mapped IPv6 hex /
-cross-host redirect header reuse / encoded path traversal / server-side
-`%2F` decoding) are all instances of the same root pattern: implementing
+The **five** "修了一半" findings on the same root pattern (implementing
 attacker-input validation by enumerating one canonical form when the
-downstream parser will accept several.
+downstream parser accepts several):
 
-If you find yourself adding a fifth variant check, stop and rewrite the
-validator to defer to the spec parser instead.
+1. PR#38 — IPv6 v4-mapped hex (`[::ffff:7f00:1]`)
+2. PR#38 — cross-host redirect header reuse leaking `Authorization`
+3. PR#38 — encoded path traversal (`%2e%2e/`, `%2E%2E/`, `..%2f..`)
+4. PR#38 (server-side audit ticket) — `%2F` server-side decoding variance
+5. PR#45 — SVG XSS cross-parser: in-app MIME canonical / RFC 2397
+   data-URI parser / CDN serving Content-Disposition all needed
+   independent enforcement; "fix one, leave two" mode
+
+If you find yourself adding a sixth variant check, stop and rewrite the
+validator to defer to the spec parser plus a defense-in-depth boundary
+guard (see §9.2 + §11).
+
+---
+
+## 10. Performance assertions must be reverse-verifiable
+
+Any test that includes a timing assertion (e.g. `expect(elapsed).toBeLessThan(500)`)
+MUST be reverse-verified: `git revert` the helper / fast-path under test
+and confirm the assertion **fails**. If revert still passes, the assertion
+is theatre and must be deleted (not relaxed by raising the threshold).
+
+Why: V8 string optimizations, RAM bandwidth, internal representation,
+and CPU frequency scaling all decouple big-O analysis from wall-clock
+time in micro-benchmarks. PR#46 had a `truncateByBytes` perf assertion
+asserting `< 500ms` for a payload that completed in 49ms even after
+reverting the `O(n)` walk-back helper to the naive `O(n²)` implementation
+— so the assertion never could have caught the regression it claimed to
+guard. Two reviewers (齐静春, 王大锤) independently reached the same finding
+by running the reverse-verify experiment.
+
+### 10.1 What to keep, what to delete
+
+| Assertion kind | Keep? | Why |
+|----------------|-------|-----|
+| byte-safety / correctness invariant | yes | covers real win, regression-visible |
+| order-of-magnitude perf bound (e.g. `< 60s` on 100KB) | maybe | only if revert reliably fails on the CI runner; document the headroom |
+| micro-benchmark threshold (e.g. `< 500ms`) | **no** | V8 optimization makes naive impl pass too; misleading |
+
+Byte-safety / correctness assertions are the actual security or
+behavioural win. If a perf assertion is added "for safety", apply
+§10.5 reverse-verify before merging.
+
+### 10.5 Reverse-verify protocol (operationalisation)
+
+Before merging any test with a timing assertion:
+
+1. `git revert <helper-commit>` (or stash the fast-path).
+2. Re-run the test on the same CI runner / fresh worktree.
+3. If the test still passes, the perf assertion is theatre. **Delete
+   the perf assertion** in this PR. Do NOT raise the threshold to make
+   it "work" — raising the threshold preserves the lie.
+4. Keep correctness / byte-safety assertions in the same test; those
+   cover the real win.
+5. Document the reverse-verify result in the PR description so future
+   maintainers know why the perf assertion is absent.
+
+This rule applies symmetrically to `setTimeout`-based heuristics,
+`performance.now()` deltas, and any test whose pass/fail depends on
+wall-clock duration on the runner.
+
+---
+
+## 11. Pin assertions at the strictest enforcement boundary
+
+When a defense-in-depth fix lands across multiple layers (in-app filter
+→ encoder → storage / CDN / browser), tests MUST assert at the strictest
+enforcement boundary — the parser the attacker actually reaches — not
+at the most convenient or most familiar in-process layer.
+
+The assertion that *cannot* be bypassed by drift in upstream layers is
+the PRIMARY assertion. Upstream layer assertions are SECONDARY
+correlates: they help regression visibility but they don't enforce the
+security invariant.
+
+**Reverse-verify rule** (per §10.5 dogfooded onto §11): if reverting
+the change does NOT fail the test, the test is not testing the change.
+PRIMARY and SECONDARY assertions must each independently fail when
+their respective layer is reverted; if only one fails for both reverts,
+one of them is decorative.
+
+### 11.1 Case study: SVG XSS PR#45 P1-5 hardening test
+
+Terminal parser the attacker can reach = the BROWSER fetching the CDN
+object. The strictest enforcement boundary is what the CDN serves —
+specifically `Content-Disposition: attachment`, which forces download
+regardless of `Content-Type` drift.
+
+- **PRIMARY** (load-bearing): `expect(putCall.ContentDisposition).toMatch(/^attachment/i)`
+  — what the CDN sends, what the browser enforces.
+- **SECONDARY** (correlate): `expect(sendBody.payload.type).toBe(8)`
+  — `MessageType.File` in the IM payload. Helps the IM bubble UX and
+  catches mis-routing, but if msgType drifts to `Image` while
+  Content-Disposition stays `attachment`, the browser still downloads.
+
+Both must independently fail when their layer reverts (verified for
+PR#47 — see PR#47 review COMMENTED record on a4577a3). If reverting
+Layer 1 doesn't fail the SECONDARY assertion, the SECONDARY assertion
+is silently covered by upstream defense-in-depth and should be split
+into a narrow test that pins Layer 1 in isolation (per §11.2).
+
+### 11.2 Multi-layer fix → multi-narrow-test pattern
+
+When a fix touches N layers of defense-in-depth, prefer N narrow tests
+(each pinning one layer's invariant in isolation) over one broad test
+that asserts the end-to-end outcome.
+
+Why: a broad end-to-end test passes as long as ANY layer enforces the
+invariant, so it can silently hide that an upstream layer has stopped
+working. Narrow tests force each layer to carry its own weight.
+
+PR#45 SVG XSS hardening shipped 3 layers (in-app MIME canonical /
+RFC 2397 data-URI parser / CDN Content-Disposition); the unified test
+asserted only the end-to-end outcome. PR#47 split the assertion into
+PRIMARY/SECONDARY structure (Step 1). Splitting into 3 layer-pinned
+tests is the full §11 application (王大锤 PR#45 review #1 follow-up,
+recommended for PR#48 / PR#49 follow-up).
+
+### 11.3 Comment template (PRIMARY / SECONDARY)
+
+When test structure encodes a layered defense, annotate the boundary
+explicitly so the next maintainer doesn't have to re-derive the model:
+
+```typescript
+// ─── §11 strictest enforcement boundary invariant (PRIMARY ASSERT) ──
+// The terminal parser the attacker can reach is <X>. The strictest
+// enforcement boundary is <Y>, which is what the <terminal parser>
+// actually enforces regardless of upstream drift. Pin assertion to the
+// invariant itself per REVIEW_CHECKLIST.md §11.
+expect(<strict-boundary-invariant>).toMatch(...);
+
+// ─── §11 defense-in-depth correlates (SECONDARY ASSERTS) ─────────
+// These hold in current implementation but are NOT the security
+// invariant — if <upstream layer> drifts while <strict boundary> still
+// holds, the user is still safe. Kept for regression visibility.
+expect(<upstream-correlate>).toBe(...);
+```
+
+### 11.4 MIME-type canonicalisation: a 4-step checklist
+
+MIME types are the most common attacker-input field where strictest
+enforcement boundary thinking matters. PR#45 SVG XSS hardened against
+three variants of the same root issue — apply this 4-step pattern
+whenever you write a MIME-type filter:
+
+1. **Strip parameters**: `contentType.split(';')[0].trim()`. `image/svg+xml; charset=utf-8` and `image/svg+xml` must canonicalise to the same value before comparison.
+2. **Lowercase**: `.toLowerCase()`. MIME types and the `image/` prefix are case-insensitive per RFC 6838 §4.2; `Image/Svg+Xml` is the same type as `image/svg+xml`.
+3. **RFC 2397 data URI handling**: when extracting from `data:` URLs,
+   parse the MIME segment up to the first `;` or `,` boundary — NOT a
+   regex that assumes no parameters. `data:image/svg+xml;base64,...`,
+   `data:Image/Svg+Xml;charset=utf-8;base64,...`, and
+   `data:IMAGE/SVG+XML ;base64,...` (with a stray space) must all
+   normalize to the canonical MIME for downstream checks.
+4. **Content-Disposition pin at storage / CDN layer**: even after a
+   correct in-app MIME canonical check, the CDN-served object can be
+   rendered inline by the browser based on `Content-Type` alone. Pin
+   `Content-Disposition: attachment` for SVG / unknown image types at
+   the upload layer — this is the strictest enforcement boundary per
+   §11, and is the PRIMARY assertion in any related test.
+
+---
+
+## 12. Author-side state check before push
+
+Mirror of §2 (reviewer-side state check before APPROVED), applied to
+the author side:
+
+Before `git push --force-with-lease` to a branch that backs an open PR,
+run:
+
+```bash
+gh pr view <N> --repo <owner/repo> --json state,mergedAt
+```
+
+If `state` is `MERGED` or `mergedAt` is non-null, **STOP**. Force-pushing
+to a merged PR's branch creates dangling commits (the branch HEAD drifts
+to a SHA that's never on `main`). The fix is to open a follow-up PR
+from the latest `main`, not to amend the merged one.
+
+The symmetric reviewer-side check (§2) verifies no newer
+`CHANGES_REQUESTED` review supersedes the head you're about to approve.
+Together the two form the author/reviewer state-check pair: any time
+you take a destructive or irreversible PR action, verify state first.
+
+This rule was introduced after the PR#46 dangling-commit incident
+(commits 34cdeed / 15de583 amended onto a force-pushed branch after
+the PR had already squash-merged as d0abb5b; the amendments are not
+on `main` and have to be redone as a follow-up PR).
+
+---
+
+## 13. Markdown URL parsing: CommonMark spec compliance
+
+Markdown image / link regexes that match `[^)\s]+` for the URL field
+are CommonMark-spec-compliant — CommonMark requires URL-encoded spaces
+(`%20`) inside `(...)`. A markdown URL with a literal space (e.g.
+`![](data:image/svg+xml; charset=utf-8,...)`) will be silently skipped
+by the regex.
+
+**This is not a security gap**: the image is not processed, so no
+inline render happens, so no XSS path exists. It IS a usability gap:
+legitimate data URIs with literal spaces in parameters won't upload.
+
+**Action required**: when adding or modifying a markdown URL regex, add
+an inline comment at the regex definition site explaining the design
+choice, so the next maintainer doesn't "fix" the regex to accept
+spaces and accidentally widen the attacker-input surface.
+
+Example annotation (place at `MARKDOWN_IMAGE_RE` / `MARKDOWN_LINK_RE`
+definition):
+
+```typescript
+// CommonMark spec requires URL-encoded spaces (%20); spaced URLs in
+// markdown ![](...) are silent-skipped by design (image isn't processed
+// = no inline render = no XSS gap). Do not relax `[^)\s]+` to accept
+// spaces — that widens the attacker-input surface that §11.4 MIME
+// canonicalisation depends on. See REVIEW_CHECKLIST.md §13.
+const MARKDOWN_IMAGE_RE = /!\[[^\]]*\]\(([^)\s]+)\)/g;
+```
 
 ---
 
@@ -258,5 +472,9 @@ When in doubt, run through this in order:
 8. Byte-safe truncation probed at N × max-seq boundaries? ✓
 9. URL validation deferred to canonical parser? ✓
 10. Canonical-equivalent forms enumerated for attacker input? ✓
+11. Perf assertions reverse-verified per §10.5? ✓
+12. Assertions pinned at strictest enforcement boundary per §11 (PRIMARY/SECONDARY split when defense is layered)? ✓
+13. Author-side `gh pr view <N> --json state,mergedAt` run before force-push to an open PR's branch? ✓
 
-If any of 1-10 is missing, you are not done.
+If any of 1-13 is missing, you are not done.
+
