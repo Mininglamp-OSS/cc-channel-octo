@@ -486,6 +486,15 @@ whenever you write a MIME-type filter:
   evidence base" to a §11.0 lede so the rule is stated up front and
   the case studies move below as evidence.
 
+**Note on PR ordering**: PR#49 is APPROVED and merge-pending at the
+time §11.5 lands; per PR#50 description merge ordering (#50 → #47
+→ #48 → #49), the docs infrastructure precedes its case-study
+references by design. The reverse-fail experiments cite PR#49's
+already-shipped code (`isSafeInlineImage` / `uploadFileToCOS`),
+not speculative future state — the code is verifiable on PR#49 head
+`1e2bff45` at the time this section lands. This is forward reference
+to reviewed code, not anticipation of unwritten code.
+
 PR#49 hardened against the legacy `image/svg` MIME (without the `+xml`
 suffix) which Firefox in some legacy contexts has been observed to
 inline-render as SVG. The fix lands at both layers of the §11.1 stack;
