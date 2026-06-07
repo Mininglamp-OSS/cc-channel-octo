@@ -53,6 +53,15 @@ CREATE TABLE IF NOT EXISTS group_members (
   PRIMARY KEY(group_id, uid)
 );
 
+-- v0.3 /reset barrier: the message_seq at which a session was intentionally
+-- cleared. Kept in a SEPARATE table (no FK to sessions) so it SURVIVES
+-- deleteSession() and a process restart — G4 cold-start backfill consults it to
+-- avoid resurrecting pre-reset history. One row per session that ever reset.
+CREATE TABLE IF NOT EXISTS reset_barriers (
+  session_id TEXT PRIMARY KEY,
+  reset_seq INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id, id);
 `;
 
@@ -78,6 +87,8 @@ export class SessionStore {
   private selectRecentMessages!: PreparedStatement;
   private deleteExpired!: PreparedStatement;
   private deleteSessionStmt!: PreparedStatement;
+  private upsertResetBarrier!: PreparedStatement;
+  private selectResetBarrier!: PreparedStatement;
 
   /** Tracks the last message_seq at which the bot replied, per group session key. */
   private lastBotReplySeq = new Map<string, number>();
@@ -123,6 +134,14 @@ export class SessionStore {
     );
     this.deleteExpired = this.adapter.prepare('DELETE FROM sessions WHERE updated_at < ?');
     this.deleteSessionStmt = this.adapter.prepare('DELETE FROM sessions WHERE id = ?');
+    this.upsertResetBarrier = this.adapter.prepare(
+      'INSERT INTO reset_barriers (session_id, reset_seq) VALUES (?, ?) ' +
+        'ON CONFLICT(session_id) DO UPDATE SET reset_seq = excluded.reset_seq ' +
+        'WHERE excluded.reset_seq > reset_barriers.reset_seq',
+    );
+    this.selectResetBarrier = this.adapter.prepare(
+      'SELECT reset_seq FROM reset_barriers WHERE session_id = ?',
+    );
   }
 
   getOrCreate(id: string, channelId: string, channelType: number): Session {
@@ -176,6 +195,27 @@ export class SessionStore {
 
   deleteSession(sessionId: string): void {
     this.deleteSessionStmt.run(sessionId);
+  }
+
+  /**
+   * v0.3 /reset: record a barrier so cold-start backfill never resurrects
+   * history at or before `resetSeq`. Persisted independently of the session row
+   * (survives deleteSession + restart). Monotonic — a later reset raises the
+   * barrier, an out-of-order/older seq is ignored.
+   *
+   * `resetSeq` is the message_seq of the /reset command itself; everything up to
+   * and including it is considered intentionally discarded.
+   */
+  setResetBarrier(sessionId: string, resetSeq: number): void {
+    this.upsertResetBarrier.run(sessionId, resetSeq);
+  }
+
+  /** Return the reset barrier seq for a session, or undefined if never reset. */
+  getResetBarrier(sessionId: string): number | undefined {
+    const row = this.selectResetBarrier.get(sessionId) as
+      | { reset_seq: number }
+      | undefined;
+    return row?.reset_seq;
   }
 
   close(): void {

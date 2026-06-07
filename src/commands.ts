@@ -13,6 +13,12 @@
  * A command is scoped to the sessionKey of the message — in a group, `/reset`
  * only clears the calling member's own session (group history is per-user), not
  * the whole room.
+ *
+ * Note: commands are handled inside the router's processing callback, AFTER the
+ * per-session rate limit is applied. A user who has exhausted their token bucket
+ * therefore cannot run `/reset` or `/help` until it refills — control commands
+ * are rate-limited like normal messages. This is intentional (a flooder should
+ * not get a rate-limit bypass via slash commands); documented in the README.
  */
 
 import type { Config } from './config.js';
@@ -85,12 +91,17 @@ function renderConfig(config: Config): string {
  * Returns `{ handled: false }` when the text is not a command (caller proceeds
  * with the normal agent pipeline). When handled, returns the reply to send and
  * performs any side effect (e.g. clearing history) immediately.
+ *
+ * `messageSeq` is the seq of the command message itself; `/reset` records it as
+ * a persisted barrier so cold-start group backfill cannot resurrect pre-reset
+ * history on a later turn.
  */
 export function handleCommand(
   body: string,
   sessionKey: string,
   store: SessionStore,
   config: Config,
+  messageSeq?: number,
 ): CommandResult {
   const parsed = parseCommand(body);
   if (!parsed) return NOT_A_COMMAND;
@@ -100,6 +111,12 @@ export function handleCommand(
       // Scoped to THIS sessionKey only — in a group, clears the caller's own
       // per-user history, never the whole room.
       store.deleteSession(sessionKey);
+      // Persist a barrier at this message_seq so G4 cold-start backfill (which
+      // refetches channel history when the local cache is empty) cannot
+      // re-seed the history we just cleared — even across a process restart.
+      if (messageSeq !== undefined) {
+        store.setResetBarrier(sessionKey, messageSeq);
+      }
       return { handled: true, reply: '✓ Conversation history cleared. Starting fresh.' };
     }
     case 'config': {

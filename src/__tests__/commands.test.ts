@@ -109,6 +109,29 @@ describe('handleCommand', () => {
     expect(store.buildHistoryPrefix('group:bob', 40)).toContain('bob msg');
   });
 
+  it('/reset records a persisted reset barrier at the command message_seq', () => {
+    store.getOrCreate(KEY, 'ch', 2);
+    handleCommand('/reset', KEY, store, config, 42);
+    expect(store.getResetBarrier(KEY)).toBe(42);
+  });
+
+  it('/reset barrier is monotonic — a later reset raises it, an older one does not', () => {
+    handleCommand('/reset', KEY, store, config, 10);
+    handleCommand('/reset', KEY, store, config, 25);
+    expect(store.getResetBarrier(KEY)).toBe(25);
+    // Out-of-order/older seq must not lower the barrier.
+    handleCommand('/reset', KEY, store, config, 5);
+    expect(store.getResetBarrier(KEY)).toBe(25);
+  });
+
+  it('/reset without a message_seq still clears history (no barrier set)', () => {
+    store.getOrCreate(KEY, 'ch', 2);
+    store.appendUser(KEY, 'x', 1);
+    handleCommand('/reset', KEY, store, config);
+    expect(store.buildHistoryPrefix(KEY, 40)).toBe('');
+    expect(store.getResetBarrier(KEY)).toBeUndefined();
+  });
+
   it('/config shows non-sensitive settings without leaking secrets', () => {
     const r = handleCommand('/config', KEY, store, makeConfig({ allowedTools: ['Read', 'Grep'] }));
     expect(r.handled).toBe(true);

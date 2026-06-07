@@ -150,7 +150,7 @@ export async function handleMessage(
       // messages carry cleanContent; non-text payloads skip this entirely.
       // Scoped to this sessionKey (per-user, even in groups).
       if (result.cleanContent !== undefined) {
-        const command = handleCommand(result.cleanContent, sessionKey, store, config);
+        const command = handleCommand(result.cleanContent, sessionKey, store, config, msg.message_seq);
         if (command.handled) {
           if (command.reply) {
             await sendMessage({
@@ -345,7 +345,11 @@ export async function handleMessage(
             // turns (PR#33 follow-up: previously every backfilled message
             // was stored as user, which made the LLM see its own past words
             // as if the user had said them).
-            seedHistoryFromApi(store, sessionKey, apiMessages, botId);
+            //
+            // v0.3 /reset barrier: skip any historical message at or before the
+            // reset point so a cleared conversation is not resurrected here.
+            const resetBarrier = store.getResetBarrier(sessionKey);
+            seedHistoryFromApi(store, sessionKey, apiMessages, botId, resetBarrier);
             historyPrefix = store.buildSegmentedHistoryPrefix(sessionKey, config.context.historyLimit);
           }
         } catch (err) {
@@ -493,12 +497,19 @@ function seedHistoryFromApi(
   sessionKey: string,
   apiMessages: HistoricalMessage[],
   botId: string,
+  resetBarrier?: number,
 ): void {
   // Older messages first — sync API returns newest-first depending on pull_mode.
   const ordered = apiMessages
     .slice()
     .sort((a, b) => (a.message_seq ?? 0) - (b.message_seq ?? 0));
   for (const m of ordered) {
+    // v0.3 /reset barrier: never resurrect messages at or before the reset
+    // point. Messages with no seq are treated as un-orderable and skipped when a
+    // barrier exists (we cannot prove they post-date the reset).
+    if (resetBarrier !== undefined && (m.message_seq ?? 0) <= resetBarrier) {
+      continue;
+    }
     const placeholder = resolveHistoricalMessagePlaceholder(m.type, m.name);
     const content = m.content && m.content.trim() !== ''
       ? m.content

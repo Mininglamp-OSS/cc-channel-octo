@@ -14,6 +14,9 @@ While the major version is `0`, minor releases may carry breaking changes.
   history, `/config` shows the active non-sensitive settings, `/help` lists
   commands. Handled before the agent query, scoped per-user (even in groups), so
   a command never reaches the LLM or leaks into another member's group context.
+  `/reset` records a persisted reset barrier (by `message_seq`) so group
+  cold-start backfill cannot resurrect the cleared history, even across a
+  process restart. Commands are subject to the normal per-session rate limit.
 
 ## [0.2.0] - 2026-06-07
 
