@@ -6,12 +6,23 @@
  * injected into the agent's system prompt as a trusted instruction block, so a
  * group can have its own persona / rules without code changes.
  *
- * SECURITY: these files are OPERATOR-controlled, NOT agent- or user-writable.
- * They live in `config.groupConfigDir` (a path the operator manages), never in
- * the per-session cwd sandbox (which the agent can write). That's the whole
- * point — system-prompt-level instructions must come from a trusted source.
- * The lookup is filename-pinned to a sanitized id so a crafted group/thread id
- * can't traverse out of the config dir.
+ * SECURITY — read carefully. The `[Group instructions]` block is injected into
+ * the system prompt UNSANITIZED, so its contents are trusted. That trust holds
+ * ONLY if the file is writable solely by the operator (the gateway process user).
+ *
+ * Placing `groupConfigDir` outside `cwdBase` is necessary but NOT sufficient:
+ * under the shipped defaults (`allowedTools: '*'`, `bypassPermissions`) the agent
+ * has `Bash`/`Write` and can write ABSOLUTE paths anywhere the gateway user can
+ * write — `cwdBase` is a starting dir, not a chroot. So a malicious user in one
+ * group could drive the agent to write `<groupConfigDir>/<otherGroup>.md` and
+ * inject persistent, trusted instructions into a different group.
+ *
+ * The real protection is OS-level: `groupConfigDir` and its files MUST be made
+ * non-writable by the gateway process user (e.g. root-owned, mode 0755/0644),
+ * and/or the deployment hardened (drop `Bash`, sandboxed FS, unprivileged user).
+ * As cheap defense-in-depth, loadGroupConfig() refuses to inject a file that is
+ * group- or world-writable. The group id is filename-pinned to a safe slug so a
+ * crafted id can't traverse out of the config dir.
  */
 
 import { closeSync, existsSync, openSync, readSync, statSync } from 'node:fs';
@@ -51,7 +62,21 @@ export function loadGroupConfig(
   const path = join(groupConfigDir, `${groupId}.md`);
   try {
     if (!existsSync(path)) return undefined;
-    if (!statSync(path).isFile()) return undefined;
+    const st = statSync(path);
+    if (!st.isFile()) return undefined;
+    // Defense-in-depth: refuse a group/world-writable file. Its contents are
+    // injected UNSANITIZED into the system prompt, so a file anyone-but-the-
+    // operator can write is an untrusted injection sink. This catches the most
+    // common misconfiguration; it is NOT a substitute for proper OS perms +
+    // a hardened deployment (the agent can still write operator-owned paths
+    // under default Bash/bypassPermissions — see the module header).
+    if ((st.mode & 0o022) !== 0) {
+      console.error(
+        `[cc-channel-octo] refusing group config ${path}: file is group/world-writable ` +
+        `(mode ${(st.mode & 0o777).toString(8)}). Make it writable only by the gateway user.`,
+      );
+      return undefined;
+    }
     // Read at most MAX+1 bytes so a mistakenly huge file can't block the event
     // loop or allocate unbounded memory on every group turn. Reading one extra
     // byte lets us detect (and mark) truncation.

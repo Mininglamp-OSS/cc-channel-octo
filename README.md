@@ -142,7 +142,9 @@ Leave the field unset to talk to Anthropic's public endpoint directly.
 Give a specific group its own persona or rules without code changes: set
 `groupConfigDir` to a directory you control, and drop a `<groupId>.md` file in
 it (the group's channel id, e.g. `s12_345.md`). Its contents are injected into
-that group's system prompt as a trusted `[Group instructions]` block.
+that group's system prompt as a trusted, **unsanitized** `[Group instructions]`
+block. Only groups use this; DMs key on the peer uid. The key is the channel id,
+so all topics under one `CommunityTopic` channel id share the same file.
 
 ```bash
 CC_OCTO_GROUP_CONFIG_DIR=/home/deploy/cc-octo-groups npm start
@@ -150,10 +152,23 @@ CC_OCTO_GROUP_CONFIG_DIR=/home/deploy/cc-octo-groups npm start
 #   Always answer in formal English and cite sources.
 ```
 
-These files are **operator-controlled** — they must live outside the per-session
-`cwdBase` sandbox (which the agent can write), since they shape the system
-prompt. Files larger than 16 KiB are truncated; an unsafe group id (path
-separators, `..`) is ignored. Only groups use this; DMs key on the peer uid.
+> ⚠️ **Security — this is a trusted, unsanitized prompt-injection sink.** Its
+> safety depends entirely on the files being writable **only** by the operator.
+> Putting `groupConfigDir` outside `cwdBase` is required (the gateway refuses
+> otherwise) but **not sufficient**: under the shipped defaults (`allowedTools:
+> "*"` + `bypassPermissions`) the agent has `Bash`/`Write` and can write
+> **absolute** paths outside `cwdBase` — `cwdBase` is a starting dir, not a
+> chroot (see [Security Model](#security-model)). A malicious user could then
+> have the agent write `<groupConfigDir>/<otherGroup>.md` and inject persistent,
+> trusted instructions into another group. So you **must**:
+> - make `groupConfigDir` and its files **non-writable by the gateway process
+>   user** (e.g. root-owned, mode `0755`/`0644`), and/or
+> - harden the deployment (drop `Bash` from `allowedTools`, run unprivileged,
+>   sandbox the filesystem).
+>
+> As defense-in-depth the gateway refuses to inject a group/world-writable file,
+> but that is a backstop, not the guarantee. Files larger than 16 KiB are
+> truncated; an unsafe group id (path separators, `..`) is ignored.
 
 ### Multi-bot
 

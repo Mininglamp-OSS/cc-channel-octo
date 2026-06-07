@@ -3,8 +3,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs';
+import { tmpdir, platform } from 'node:os';
 import { join } from 'node:path';
 import { loadGroupConfig, MAX_GROUP_CONFIG_BYTES } from '../group-config.js';
 
@@ -67,5 +67,28 @@ describe('loadGroupConfig', () => {
   it('does not throw when groupConfigDir does not exist', () => {
     expect(() => loadGroupConfig(join(dir, 'missing'), 'g1')).not.toThrow();
     expect(loadGroupConfig(join(dir, 'missing'), 'g1')).toBeUndefined();
+  });
+
+  const itPosix = platform() === 'win32' ? it.skip : it;
+
+  itPosix('refuses a world-writable file (defense-in-depth)', () => {
+    const p = join(dir, 'g1.md');
+    writeFileSync(p, 'instructions');
+    chmodSync(p, 0o646); // world-writable
+    expect(loadGroupConfig(dir, 'g1')).toBeUndefined();
+  });
+
+  itPosix('refuses a group-writable file', () => {
+    const p = join(dir, 'g1.md');
+    writeFileSync(p, 'instructions');
+    chmodSync(p, 0o664); // group-writable
+    expect(loadGroupConfig(dir, 'g1')).toBeUndefined();
+  });
+
+  itPosix('accepts an owner-only / non-group-writable file', () => {
+    const p = join(dir, 'g1.md');
+    writeFileSync(p, 'instructions');
+    chmodSync(p, 0o644); // owner-write, others read-only
+    expect(loadGroupConfig(dir, 'g1')).toBe('instructions');
   });
 });
