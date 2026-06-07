@@ -261,6 +261,10 @@ export function buildPrompt(historyPrefix: string, groupContext: string, message
  * @param groupContext - Group chat context string (may be empty)
  * @param config - Application config (sdk.* fields used)
  * @param sessionCtx - Per-session routing context for cwd isolation (Q3)
+ * @param onToolUse - Optional callback fired with each tool name as the agent
+ *   invokes it (v0.3 tool progress). The bridge stays a pure reporter — it does
+ *   not dedup or rate-limit; the caller decides how to surface progress. A
+ *   throwing callback must never break the stream, so calls are guarded.
  * @yields string chunks of assistant text output
  */
 export async function* queryAgent(
@@ -269,6 +273,7 @@ export async function* queryAgent(
   groupContext: string,
   config: Config,
   sessionCtx?: SessionCtx,
+  onToolUse?: (toolName: string) => void,
 ): AsyncIterable<string> {
   const permissionMode = toPermissionMode(config.sdk.permissionMode);
   const settingSources = toSettingSources(config.sdk.settingSources);
@@ -327,6 +332,15 @@ export async function* queryAgent(
         for (const block of content) {
           if (block.type === 'text' && block.text) {
             yield block.text;
+          } else if (block.type === 'tool_use' && onToolUse) {
+            // v0.3 tool progress: report the tool name. Guard the callback so a
+            // throw never propagates into the SDK stream and kills the turn.
+            const name = typeof block.name === 'string' ? block.name : 'tool';
+            try {
+              onToolUse(name);
+            } catch (err) {
+              console.error(`[cc-channel-octo] onToolUse callback threw: ${String(err)}`);
+            }
           }
         }
       } else if (message.type === 'result') {
