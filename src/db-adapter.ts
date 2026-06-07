@@ -3,7 +3,7 @@
  * Enables future migration to node:sqlite when it reaches GA.
  */
 
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
 
@@ -30,8 +30,25 @@ class BetterSqliteAdapter implements DbAdapter {
   private readonly db: Database.Database;
 
   constructor(dbPath: string) {
-    const dir = dirname(dbPath);
-    mkdirSync(dir, { recursive: true });
+    // The data directory holds chat-history SQLite files, so it must be
+    // owner-only (0700) as documented in README / CONTRIBUTING. The in-memory
+    // path has no backing directory — skip all filesystem setup for it (and
+    // never chmod the process cwd that dirname(':memory:') resolves to).
+    if (dbPath !== ':memory:') {
+      const dir = dirname(dbPath);
+      // `mode` on mkdirSync is masked by umask, and a pre-existing directory is
+      // left untouched — so chmod afterwards to enforce 0700 unconditionally.
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      try {
+        chmodSync(dir, 0o700);
+      } catch (err) {
+        // Best-effort: a non-POSIX FS (or a dir we don't own) may reject chmod.
+        // Don't crash startup — log so the operator can tighten it manually.
+        console.warn(
+          `[cc-channel-octo] WARNING: could not enforce 0700 on dataDir ${dir}: ${String(err)}`,
+        );
+      }
+    }
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
