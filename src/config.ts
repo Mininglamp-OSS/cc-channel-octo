@@ -628,21 +628,22 @@ export function resolveBotConfigs(config: Config): Config[] {
     return resolved;
   });
 
-  // Multi-bot webhook: every webhook bot must bind a DISTINCT host:port:path,
-  // otherwise the second server fails with EADDRINUSE at runtime. Fail fast at
-  // config time with a clear message instead.
+  // Multi-bot webhook: each bot runs its own HTTP server, so the OS bind
+  // identity is host:port (NOT host:port:path — two servers can't share a port
+  // even with different paths). Require a distinct host:port per webhook bot and
+  // fail fast here instead of hitting EADDRINUSE at runtime.
   const seenBinds = new Map<string, string>();
   for (const c of resolvedBots) {
     if (c.transport !== 'webhook') continue;
     const host = c.webhook?.host ?? '127.0.0.1';
     const port = c.webhook?.port ?? 8787;
-    const path = c.webhook?.path ?? '/octo/webhook';
-    const bind = `${host}:${port}${path}`;
+    const bind = `${host}:${port}`;
     const prev = seenBinds.get(bind);
     if (prev) {
       throw new Error(
-        `Multi-bot: bots "${prev}" and "${c.botId}" both bind the webhook ` +
-        `endpoint ${bind}. Give each webhook bot a distinct host/port/path.`,
+        `Multi-bot: bots "${prev}" and "${c.botId}" both bind webhook ${bind}. ` +
+        `Each webhook bot needs a distinct host:port (a separate path is not enough — ` +
+        `one HTTP server per bot binds the whole port).`,
       );
     }
     seenBinds.set(bind, c.botId ?? '');

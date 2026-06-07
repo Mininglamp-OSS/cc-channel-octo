@@ -225,9 +225,10 @@ messages. Bodies are capped at 256 KiB. The server binds `127.0.0.1` by default;
 put TLS termination / the public hop in front of it (a reverse proxy), and post
 the Octo message JSON (top-level, or under `message`/`data`) to the path.
 
-In multi-bot mode, each webhook bot needs a **distinct** `host:port:path` —
-add `transport`/`webhook` overrides per `bots[]` entry; startup fails fast if two
-bots would bind the same endpoint.
+In multi-bot mode, each webhook bot needs a **distinct** `host:port` (a separate
+path is not enough — one HTTP server per bot binds the whole port) — add
+`transport`/`webhook` overrides per `bots[]` entry; startup fails fast if two
+bots would bind the same `host:port`.
 
 ## Security Model
 

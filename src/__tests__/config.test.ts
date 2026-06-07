@@ -982,7 +982,7 @@ describe('v1.0: multi-bot webhook binds', () => {
     expect(bots[0].webhook?.secret).toBe('top');
   });
 
-  it('rejects two webhook bots that bind the same host:port:path', () => {
+  it('rejects two webhook bots that bind the same host:port', () => {
     const cfg = loadConfig(writeConfig({
       apiUrl: 'https://a', transport: 'webhook',
       webhook: { secret: 'top', port: 8000 },
@@ -991,16 +991,28 @@ describe('v1.0: multi-bot webhook binds', () => {
         { id: 'b', botToken: 'bf_2' }, // inherits port 8000 → collision
       ],
     }));
-    expect(() => resolveBotConfigs(cfg)).toThrow(/bind the webhook endpoint/i);
+    expect(() => resolveBotConfigs(cfg)).toThrow(/both bind webhook/i);
   });
 
-  it('distinct paths on the same port are allowed', () => {
+  it('rejects distinct paths on the same port (one server per bot binds the whole port)', () => {
     const cfg = loadConfig(writeConfig({
       apiUrl: 'https://a', transport: 'webhook',
       webhook: { secret: 'top', port: 8000 },
       bots: [
         { id: 'a', botToken: 'bf_1', webhook: { path: '/a' } },
         { id: 'b', botToken: 'bf_2', webhook: { path: '/b' } },
+      ],
+    }));
+    expect(() => resolveBotConfigs(cfg)).toThrow(/distinct host:port/i);
+  });
+
+  it('allows the same port on different hosts', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a', transport: 'webhook',
+      webhook: { secret: 'top', port: 8000 },
+      bots: [
+        { id: 'a', botToken: 'bf_1', webhook: { host: '127.0.0.1' } },
+        { id: 'b', botToken: 'bf_2', webhook: { host: '127.0.0.2' } },
       ],
     }));
     expect(() => resolveBotConfigs(cfg)).not.toThrow();

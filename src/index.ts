@@ -169,6 +169,11 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   // where a sibling bot's message slips through unrecognized.
   const onInbound = (msg: BotMessage): void => {
     if (gateway.draining) return;
+    // Drop self-authored messages. The WS path filters these in
+    // OctoGateway.handleMessage(); webhook mode calls onInbound directly, so
+    // apply the same guard here (otherwise a bot's own group message could be
+    // cached into group context as un-processed chatter).
+    if (msg.from_uid === gateway.botId) return;
     const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId)
       .catch((err) => {
         console.error(`[cc-channel-octo] ${label}Unhandled message handler error:`, err instanceof Error ? err.message : err);
@@ -203,11 +208,14 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   // the process "ready" with no inbound endpoint.
   const connect = async (): Promise<void> => {
     if (useWebhook && webhookServer) {
-      // Start REST runtime services (heartbeat + token refresh + signal-based
-      // graceful shutdown) WITHOUT opening the WS — webhook mode still depends
-      // on REST for outbound sends and needs the same lifecycle as the WS path.
-      gateway.startServices();
+      // Bind the HTTP server FIRST so a bind failure (e.g. port taken) throws
+      // before we start the heartbeat / signal handlers — otherwise a failed
+      // start could leave those services + the lock running for this stack.
       await webhookServer.listen(); // rejects on bind error → propagates to main()
+      // Then start REST runtime services (heartbeat + token refresh + signal-
+      // based graceful shutdown) WITHOUT opening the WS — webhook mode still
+      // depends on REST for outbound sends and needs the same lifecycle.
+      gateway.startServices();
       console.log(`[cc-channel-octo] ${label}Bot ready (webhook): id=${gateway.botId}`);
     } else {
       gateway.connect();
