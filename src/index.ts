@@ -70,8 +70,20 @@ async function main(): Promise<void> {
 
   // Handlers are wired and siblings registered — now open every transport. From
   // this point inbound messages are dispatched, never ACK'd-and-dropped. Awaited
-  // so a webhook bind failure surfaces as a startup error.
-  await Promise.all(stacks.map((s) => s.connect()));
+  // so a webhook bind failure surfaces as a startup error. On a partial failure
+  // (e.g. one bot's port is taken), shut down the stacks that did start so we
+  // don't leave bound servers / open stores dangling before the fatal exit.
+  const connected: BotStack[] = [];
+  try {
+    for (const s of stacks) {
+      await s.connect();
+      connected.push(s);
+    }
+  } catch (err) {
+    console.error('[cc-channel-octo] Startup failed during transport connect; cleaning up...');
+    await Promise.allSettled(connected.map((s) => s.shutdown()));
+    throw err;
+  }
 
   // Wire a single process-wide shutdown that drains every bot, so N gateways
   // don't each call process.exit. The per-gateway signal handlers are disabled

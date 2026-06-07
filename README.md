@@ -225,6 +225,10 @@ messages. Bodies are capped at 256 KiB. The server binds `127.0.0.1` by default;
 put TLS termination / the public hop in front of it (a reverse proxy), and post
 the Octo message JSON (top-level, or under `message`/`data`) to the path.
 
+In multi-bot mode, each webhook bot needs a **distinct** `host:port:path` —
+add `transport`/`webhook` overrides per `bots[]` entry; startup fails fast if two
+bots would bind the same endpoint.
+
 ## Security Model
 
 cc-channel-octo runs Claude Code in **headless automation mode**. There is no terminal for interactive permission prompts, so `bypassPermissions` is the default. Security relies on two mechanisms:

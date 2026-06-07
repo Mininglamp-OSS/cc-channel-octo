@@ -18,7 +18,10 @@ While the major version is `0`, minor releases may carry breaking changes.
   `x-webhook-secret` or `?secret=`, constant-time compared; startup fails without
   it), bodies are capped at 256 KiB, the bind host defaults to `127.0.0.1`, and
   each valid POST feeds the same message pipeline as the WS path. Config gains
-  `transport` + `webhook.{host,port,path,secret}`.
+  `transport` + `webhook.{host,port,path,secret}`, overridable per bot in
+  `bots[]`; multi-bot webhook binds must be distinct (validated at config time)
+  and webhook mode preserves the full REST lifecycle (heartbeat, token refresh,
+  graceful shutdown) without opening the WS.
 - **Per-group instructions** (v1.0, GROUP.md) — set `groupConfigDir`
   (`CC_OCTO_GROUP_CONFIG_DIR`) to a directory of `<groupId>.md` files; a matching
   file's contents are injected into that group's system prompt as a trusted

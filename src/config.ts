@@ -159,6 +159,19 @@ export interface BotOverride {
   botBlocklist?: string[];
   allowedBotUids?: string[];
   mentionFreeGroups?: string[];
+  /** v1.0: per-bot inbound transport (defaults to the top-level `transport`). */
+  transport?: 'websocket' | 'webhook';
+  /**
+   * v1.0: per-bot webhook server settings, merged over the top-level `webhook`.
+   * In multi-bot webhook mode each bot MUST bind a distinct host:port (and may
+   * use distinct paths/secrets); resolveBotConfigs() rejects colliding binds.
+   */
+  webhook?: {
+    host?: string;
+    port?: number;
+    path?: string;
+    secret?: string;
+  };
 }
 
 type PartialConfig = {
@@ -549,7 +562,7 @@ export function resolveBotConfigs(config: Config): Config[] {
 
   const seenIds = new Set<string>();
   const seenTokens = new Set<string>();
-  return bots.map((bot, i) => {
+  const resolvedBots = bots.map((bot, i) => {
     if (!bot.botToken) {
       throw new Error(`Multi-bot: bots[${i}] is missing required botToken`);
     }
@@ -587,6 +600,10 @@ export function resolveBotConfigs(config: Config): Config[] {
       botBlocklist: bot.botBlocklist ?? config.botBlocklist,
       allowedBotUids: bot.allowedBotUids ?? config.allowedBotUids,
       mentionFreeGroups: bot.mentionFreeGroups ?? config.mentionFreeGroups,
+      transport: bot.transport ?? config.transport,
+      webhook: (bot.webhook || config.webhook)
+        ? { ...config.webhook, ...(bot.webhook ?? {}) }
+        : undefined,
       sdk: {
         ...config.sdk,
         ...(bot.model !== undefined ? { model: bot.model } : {}),
@@ -602,8 +619,36 @@ export function resolveBotConfigs(config: Config): Config[] {
     // (a per-bot cwdBase override could place groupConfigDir inside the bot's
     // own writable sandbox, which the top-level check in loadConfig can't see).
     assertGroupConfigDirOutsideCwd(resolved);
+    // Webhook mode needs a secret per bot (same rule as single-bot loadConfig).
+    if (resolved.transport === 'webhook' && !resolved.webhook?.secret) {
+      throw new Error(
+        `Multi-bot: bot "${id}" uses webhook transport but has no webhook.secret`,
+      );
+    }
     return resolved;
   });
+
+  // Multi-bot webhook: every webhook bot must bind a DISTINCT host:port:path,
+  // otherwise the second server fails with EADDRINUSE at runtime. Fail fast at
+  // config time with a clear message instead.
+  const seenBinds = new Map<string, string>();
+  for (const c of resolvedBots) {
+    if (c.transport !== 'webhook') continue;
+    const host = c.webhook?.host ?? '127.0.0.1';
+    const port = c.webhook?.port ?? 8787;
+    const path = c.webhook?.path ?? '/octo/webhook';
+    const bind = `${host}:${port}${path}`;
+    const prev = seenBinds.get(bind);
+    if (prev) {
+      throw new Error(
+        `Multi-bot: bots "${prev}" and "${c.botId}" both bind the webhook ` +
+        `endpoint ${bind}. Give each webhook bot a distinct host/port/path.`,
+      );
+    }
+    seenBinds.set(bind, c.botId ?? '');
+  }
+
+  return resolvedBots;
 }
 
 /** Join two path segments without importing node:path into the type surface. */

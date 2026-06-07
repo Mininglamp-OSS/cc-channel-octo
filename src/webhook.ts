@@ -18,7 +18,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type { BotMessage } from './octo/types.js';
 
 /** Max inbound body we will buffer before rejecting (256 KiB). */
@@ -35,12 +35,15 @@ const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8787;
 const DEFAULT_PATH = '/octo/webhook';
 
-/** Constant-time string compare that won't leak length via early return. */
+/**
+ * Constant-time secret compare. Both sides are SHA-256'd to a fixed 32-byte
+ * digest first, so neither the comparison time NOR an early length check leaks
+ * the expected secret's length.
+ */
 function secretMatches(provided: string | undefined, expected: string): boolean {
-  if (!provided) return false;
-  const a = Buffer.from(provided);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) return false;
+  if (provided === undefined) return false;
+  const a = createHash('sha256').update(provided).digest();
+  const b = createHash('sha256').update(expected).digest();
   return timingSafeEqual(a, b);
 }
 

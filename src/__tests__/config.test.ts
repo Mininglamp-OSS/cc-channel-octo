@@ -959,3 +959,71 @@ describe('v1.0: webhook transport', () => {
     expect(loadConfig(path).transport).toBeUndefined();
   });
 });
+
+// ─── v1.0: multi-bot + webhook ─────────────────────────────────────────
+
+describe('v1.0: multi-bot webhook binds', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('allows multiple webhook bots with distinct ports', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a', transport: 'webhook',
+      webhook: { secret: 'top' },
+      bots: [
+        { id: 'a', botToken: 'bf_1', webhook: { port: 8001 } },
+        { id: 'b', botToken: 'bf_2', webhook: { port: 8002 } },
+      ],
+    }));
+    const bots = resolveBotConfigs(cfg);
+    expect(bots[0].webhook?.port).toBe(8001);
+    expect(bots[1].webhook?.port).toBe(8002);
+    // secret inherited from top-level webhook block
+    expect(bots[0].webhook?.secret).toBe('top');
+  });
+
+  it('rejects two webhook bots that bind the same host:port:path', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a', transport: 'webhook',
+      webhook: { secret: 'top', port: 8000 },
+      bots: [
+        { id: 'a', botToken: 'bf_1' },
+        { id: 'b', botToken: 'bf_2' }, // inherits port 8000 → collision
+      ],
+    }));
+    expect(() => resolveBotConfigs(cfg)).toThrow(/bind the webhook endpoint/i);
+  });
+
+  it('distinct paths on the same port are allowed', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a', transport: 'webhook',
+      webhook: { secret: 'top', port: 8000 },
+      bots: [
+        { id: 'a', botToken: 'bf_1', webhook: { path: '/a' } },
+        { id: 'b', botToken: 'bf_2', webhook: { path: '/b' } },
+      ],
+    }));
+    expect(() => resolveBotConfigs(cfg)).not.toThrow();
+  });
+
+  it('rejects a webhook bot with no secret (inherited or own)', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a',
+      bots: [{ id: 'a', botToken: 'bf_1', transport: 'webhook', webhook: { port: 8000 } }],
+    }));
+    expect(() => resolveBotConfigs(cfg)).toThrow(/no webhook.secret/i);
+  });
+
+  it('per-bot transport override: one websocket, one webhook', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a',
+      bots: [
+        { id: 'ws', botToken: 'bf_1' },
+        { id: 'wh', botToken: 'bf_2', transport: 'webhook', webhook: { port: 8000, secret: 's' } },
+      ],
+    }));
+    const bots = resolveBotConfigs(cfg);
+    expect(bots[0].transport).toBeUndefined();
+    expect(bots[1].transport).toBe('webhook');
+  });
+});
