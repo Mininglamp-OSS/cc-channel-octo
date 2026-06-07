@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { join } from 'node:path';
 import { mkdtempSync, writeFileSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { loadConfig } from '../config.js';
+import { loadConfig, resolveBotConfigs } from '../config.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -651,4 +651,118 @@ describe('v0.3: tool progress toggle', () => {
       expect(loadConfig(path).sdk.toolProgress).toBe(false);
     },
   );
+});
+
+// ─── v0.3: multi-bot (resolveBotConfigs) ───────────────────────────────
+
+describe('v0.3: resolveBotConfigs', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('single-bot config resolves to one entry with botId "default"', () => {
+    const cfg = loadConfig(writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' }));
+    const bots = resolveBotConfigs(cfg);
+    expect(bots).toHaveLength(1);
+    expect(bots[0].botId).toBe('default');
+    expect(bots[0].botToken).toBe('bf_t');
+  });
+
+  it('expands a bots[] array into one config per entry', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a',
+      dataDir: '/data',
+      cwdBase: '/sand',
+      bots: [
+        { id: 'support', botToken: 'bf_1' },
+        { id: 'ops', botToken: 'bf_2' },
+      ],
+    }));
+    const bots = resolveBotConfigs(cfg);
+    expect(bots.map((b) => b.botId)).toEqual(['support', 'ops']);
+    expect(bots.map((b) => b.botToken)).toEqual(['bf_1', 'bf_2']);
+  });
+
+  it('namespaces dataDir + cwdBase per bot id by default (isolation)', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a',
+      dataDir: '/data',
+      cwdBase: '/sand',
+      bots: [{ id: 'support', botToken: 'bf_1' }],
+    }));
+    const [bot] = resolveBotConfigs(cfg);
+    expect(bot.dataDir).toBe('/data/support');
+    expect(bot.cwdBase).toBe('/sand/support');
+  });
+
+  it('honors explicit per-bot dataDir/cwdBase overrides', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a',
+      bots: [{ id: 'x', botToken: 'bf_1', dataDir: '/custom/d', cwdBase: '/custom/c' }],
+    }));
+    const [bot] = resolveBotConfigs(cfg);
+    expect(bot.dataDir).toBe('/custom/d');
+    expect(bot.cwdBase).toBe('/custom/c');
+  });
+
+  it('applies per-bot model/systemPrompt overrides onto sdk', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a',
+      sdk: { model: 'base-model' },
+      bots: [
+        { id: 'a', botToken: 'bf_1', model: 'opus' },
+        { id: 'b', botToken: 'bf_2' }, // inherits base model
+      ],
+    }));
+    const bots = resolveBotConfigs(cfg);
+    expect(bots[0].sdk.model).toBe('opus');
+    expect(bots[1].sdk.model).toBe('base-model');
+  });
+
+  it('per-bot config carries no nested bots field', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a',
+      bots: [{ id: 'a', botToken: 'bf_1' }],
+    }));
+    expect(resolveBotConfigs(cfg)[0].bots).toBeUndefined();
+  });
+
+  it('throws on a missing per-bot token', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a',
+      bots: [{ id: 'a', botToken: '' }],
+    }));
+    expect(() => resolveBotConfigs(cfg)).toThrow(/missing required botToken/i);
+  });
+
+  it('throws on duplicate bot ids', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a',
+      bots: [{ id: 'x', botToken: 'bf_1' }, { id: 'x', botToken: 'bf_2' }],
+    }));
+    expect(() => resolveBotConfigs(cfg)).toThrow(/duplicate bot id/i);
+  });
+
+  it('throws on duplicate bot tokens', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a',
+      bots: [{ id: 'a', botToken: 'bf_same' }, { id: 'b', botToken: 'bf_same' }],
+    }));
+    expect(() => resolveBotConfigs(cfg)).toThrow(/duplicate botToken/i);
+  });
+
+  it('loadConfig allows a missing top-level botToken when bots[] is present', () => {
+    // No top-level botToken, but bots provide their own.
+    expect(() => loadConfig(writeConfig({
+      apiUrl: 'https://a',
+      bots: [{ id: 'a', botToken: 'bf_1' }],
+    }))).not.toThrow();
+  });
+
+  it('rejects an unsafe per-bot apiUrl override', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a',
+      bots: [{ id: 'a', botToken: 'bf_1', apiUrl: 'http://169.254.169.254' }],
+    }));
+    expect(() => resolveBotConfigs(cfg)).toThrow(/unsafe apiUrl/i);
+  });
 });

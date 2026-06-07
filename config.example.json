@@ -12,6 +12,7 @@
     "_comment_allowed_tools": "Q2: either '*' (allow every tool the SDK exposes) or an explicit string[] whitelist, e.g. ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebFetch', 'WebSearch']. Env override CC_OCTO_SDK_ALLOWED_TOOLS accepts the same two shapes (a value containing '*' means wildcard; otherwise CSV).",
     "allowedTools": "*",
     "permissionMode": "bypassPermissions",
+    "_comment_tool_progress": "v0.3: set toolProgress=true to post '🔧 Running <tool>…' notices as the agent invokes tools (deduped, capped per turn). Env override: CC_OCTO_SDK_TOOL_PROGRESS=true. Off by default.",
     "settingSources": ["user"]
   },
 
@@ -25,6 +26,8 @@
   },
 
   "botBlocklist": [],
+
+  "_comment_multi_bot": "v0.3 multi-bot: to run several bots in one process, add a top-level \"bots\" array instead of (or alongside) the single botToken above. Each entry needs its own botToken and an id; it inherits all top-level fields and may override apiUrl/dataDir/cwdBase/model/systemPrompt/botBlocklist/etc. By default each bot's dataDir and cwdBase are namespaced by id so bots never share history or sandboxes. Example: \"bots\": [{ \"id\": \"support\", \"botToken\": \"bf_AAA\" }, { \"id\": \"ops\", \"botToken\": \"bf_BBB\", \"model\": \"claude-opus-4-8\" }]",
 
   "_comment_mention_free": "G12: group_ids listed here process every text message without requiring an @bot mention. Use group channel IDs as strings. Env override: CC_OCTO_MENTION_FREE_GROUPS (csv).",
   "mentionFreeGroups": []

@@ -6,7 +6,7 @@
  * OctoGateway.start → setMessageHandler wiring the full pipeline.
  */
 
-import { loadConfig } from './config.js';
+import { loadConfig, resolveBotConfigs } from './config.js';
 import { createAdapter } from './db-adapter.js';
 import { SessionStore } from './session-store.js';
 import { OctoGateway } from './gateway.js';
@@ -35,17 +35,54 @@ async function main(): Promise<void> {
 
   // --- Config ---
   const config = loadConfig();
-  // Q3: loadConfig() always populates cwdBase from defaults; the `?? cwd`
-  // fallback is only here for hand-built Config objects in tests/imports.
+  // v0.3 multi-bot: expand into one concrete Config per bot. Single-bot configs
+  // resolve to a 1-element array, so the loop below is the same code path.
+  const botConfigs = resolveBotConfigs(config);
+  const multi = botConfigs.length > 1;
+  if (multi) {
+    console.log(`[cc-channel-octo] Multi-bot mode: starting ${botConfigs.length} bots`);
+  }
+
+  // Each bot runs a fully independent stack (gateway + router + store + cwd
+  // cleanup), isolated by its own dataDir/cwdBase. They share nothing stateful,
+  // so per-user history and sandboxes never cross between bots.
+  const stacks = await Promise.all(botConfigs.map((c) => startBot(c, multi)));
+
+  // Wire a single process-wide shutdown that drains every bot, so N gateways
+  // don't each call process.exit. The per-gateway signal handlers are disabled
+  // in multi-bot mode (handleSignals=false); we own the signals here.
+  if (multi) {
+    const shutdownAll = async (signal: string): Promise<void> => {
+      console.log(`[cc-channel-octo] Received ${signal}, shutting down ${stacks.length} bots...`);
+      await Promise.allSettled(stacks.map((s) => s.shutdown()));
+      process.exit(0);
+    };
+    process.once('SIGINT', () => void shutdownAll('SIGINT'));
+    process.once('SIGTERM', () => void shutdownAll('SIGTERM'));
+  }
+
+  console.log('[cc-channel-octo] Ready — listening for messages');
+}
+
+interface BotStack {
+  botId: string;
+  shutdown: () => Promise<void>;
+}
+
+/**
+ * Start one bot's full pipeline. `ownSignals` is true for the single-bot case
+ * (the gateway registers its own SIGINT/SIGTERM handlers); false in multi-bot
+ * mode where main() owns a single combined shutdown.
+ */
+async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): Promise<BotStack> {
+  const label = multi ? `[${config.botId}] ` : '';
   const cwdBase = config.cwdBase ?? config.cwd;
   console.log(
-    `[cc-channel-octo] Config loaded: apiUrl=${config.apiUrl}, cwdBase=${cwdBase}, ` +
+    `[cc-channel-octo] ${label}Config loaded: apiUrl=${config.apiUrl}, cwdBase=${cwdBase}, ` +
     `dataDir=${config.dataDir}, sdk.model=${config.sdk.model ?? 'default'}, ` +
     `sdk.allowedTools=${config.sdk.allowedTools === '*' ? '*' : `[${config.sdk.allowedTools.join(',')}]`}, ` +
     `sdk.permissionMode=${config.sdk.permissionMode}, ` +
-    `rateLimit=${config.rateLimit.maxPerMinute} req/min, ` +
-    `context.maxContextChars=${config.context.maxContextChars}, ` +
-    `context.historyLimit=${config.context.historyLimit}`,
+    `rateLimit=${config.rateLimit.maxPerMinute} req/min`,
   );
 
   // --- Q3: per-session cwd cleanup (7d TTL) ---
@@ -54,20 +91,16 @@ async function main(): Promise<void> {
   const cwdCleanupTimer = setInterval(() => {
     cleanupExpiredCwds(cwdBase);
   }, CWD_CLEANUP_INTERVAL_MS);
-  // Allow the process to exit cleanly even if this timer is the only thing
-  // keeping the event loop alive (e.g. tests, single-shot smoke runs).
   cwdCleanupTimer.unref();
 
-  // --- Database ---
+  // --- Database (per-bot dataDir → no cross-bot history) ---
   const dbPath = join(config.dataDir, 'cc-octo.db');
   const adapter = createAdapter(dbPath);
   const store = new SessionStore(adapter);
   store.init();
-
-  // Clean expired sessions on startup
   const cleaned = store.cleanExpired();
   if (cleaned > 0) {
-    console.log(`[cc-channel-octo] Cleaned ${cleaned} expired session(s)`);
+    console.log(`[cc-channel-octo] ${label}Cleaned ${cleaned} expired session(s)`);
   }
 
   // --- Group context ---
@@ -77,11 +110,11 @@ async function main(): Promise<void> {
   // --- Stream relay ---
   const streamRelay = new StreamRelay();
 
-  // --- Gateway ---
-  const gateway = new OctoGateway(config);
+  // --- Gateway. In multi-bot mode main() owns shutdown signals, so the gateway
+  // must NOT register its own (N gateways racing process.exit). ---
+  const gateway = new OctoGateway(config, { handleSignals: !multi });
   await gateway.start();
-
-  console.log(`[cc-channel-octo] Bot started: id=${gateway.botId}`);
+  console.log(`[cc-channel-octo] ${label}Bot started: id=${gateway.botId}`);
 
   // --- Session router ---
   const router = new SessionRouter(config, gateway.botId, gateway.ownerUid);
@@ -89,13 +122,11 @@ async function main(): Promise<void> {
   // --- Active handler tracking (Q6: in-flight drain on shutdown) ---
   const activeHandlers = new Set<Promise<void>>();
 
-  // --- Message handler ---
   gateway.setMessageHandler((msg: BotMessage) => {
-    if (gateway.draining) return; // Extra guard: drop during shutdown
+    if (gateway.draining) return;
     const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId)
       .catch((err) => {
-        // Q8: catch unhandled rejections from fire-and-forget handlers
-        console.error('[cc-channel-octo] Unhandled message handler error:', err instanceof Error ? err.message : err);
+        console.error(`[cc-channel-octo] ${label}Unhandled message handler error:`, err instanceof Error ? err.message : err);
       })
       .finally(() => {
         activeHandlers.delete(p);
@@ -103,15 +134,17 @@ async function main(): Promise<void> {
     activeHandlers.add(p);
   });
 
-  // --- Q6 + Q7: Shutdown callback (drain handlers + close store) ---
-  gateway.setShutdownCallback(async () => {
-    clearInterval(cwdCleanupTimer); // Q3: stop the periodic cwd cleanup
+  const shutdown = async (): Promise<void> => {
+    clearInterval(cwdCleanupTimer);
     await gateway.stop(activeHandlers);
-    store.close(); // Q7: explicitly close SQLite (WAL checkpoint)
-  });
+    store.close();
+  };
+  // Single-bot: the gateway's own SIGINT/SIGTERM handler invokes this.
+  gateway.setShutdownCallback(shutdown);
 
-  console.log('[cc-channel-octo] Ready — listening for messages');
+  return { botId: gateway.botId, shutdown };
 }
+
 
 /**
  * Process a single inbound message through the full pipeline: route → context →

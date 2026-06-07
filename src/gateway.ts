@@ -37,7 +37,10 @@ export class OctoGateway {
   private heartbeatFailCount = 0;
   private readonly MAX_HEARTBEAT_FAILURES = 3;
 
-  constructor(private readonly config: Config) {
+  constructor(
+    private readonly config: Config,
+    private readonly options: { handleSignals?: boolean } = {},
+  ) {
     this.lockFilePath = join(config.dataDir, 'gateway.lock');
   }
 
@@ -60,7 +63,12 @@ export class OctoGateway {
     this.acquireLock();
     await this.registerAndConnect();
     this.startHeartbeat();
-    this.setupShutdownHandlers();
+    // Multi-bot: the orchestrator owns a single combined SIGINT/SIGTERM handler,
+    // so individual gateways skip registering their own (default true keeps the
+    // single-bot behavior unchanged).
+    if (this.options.handleSignals !== false) {
+      this.setupShutdownHandlers();
+    }
   }
 
   /** Whether the gateway is draining (rejecting new messages). */
