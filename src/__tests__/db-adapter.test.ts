@@ -1,8 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { createAdapter } from '../db-adapter.js';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, statSync, mkdirSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, platform } from 'node:os';
 
 describe('DbAdapter', () => {
   let tmpDir: string;
@@ -75,6 +75,30 @@ describe('DbAdapter', () => {
     const adapter = createAdapter(':memory:');
     const fk = adapter.prepare('PRAGMA foreign_keys').get() as { foreign_keys: number };
     expect(fk.foreign_keys).toBe(1);
+    adapter.close();
+  });
+
+  // dataDir holds chat-history SQLite — README/CONTRIBUTING promise 0700.
+  const itPosix = platform() === 'win32' ? it.skip : it;
+
+  itPosix('creates the data directory with 0700 permissions', () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'db-adapter-perm-'));
+    const dir = join(tmpDir, 'data');
+    const adapter = createAdapter(join(dir, 'cc-octo.db'));
+    const mode = statSync(dir).mode & 0o777;
+    expect(mode).toBe(0o700);
+    adapter.close();
+  });
+
+  itPosix('tightens a pre-existing world-readable data directory to 0700', () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'db-adapter-perm2-'));
+    const dir = join(tmpDir, 'data');
+    // Operator (or a prior umask) left it 0755 — adapter must clamp it down.
+    mkdirSync(dir, { recursive: true });
+    chmodSync(dir, 0o755);
+    const adapter = createAdapter(join(dir, 'cc-octo.db'));
+    const mode = statSync(dir).mode & 0o777;
+    expect(mode).toBe(0o700);
     adapter.close();
   });
 });
