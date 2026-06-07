@@ -3,7 +3,7 @@
  * Three-level priority: env > config.json > defaults.
  */
 
-import { readFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, existsSync, statSync, realpathSync } from 'node:fs';
 import { resolve as resolvePath, sep } from 'node:path';
 import { isAllowedApiUrl } from './url-policy.js';
 
@@ -428,24 +428,44 @@ export function loadConfig(configPath?: string): Config {
     );
   }
 
-  // v1.0 GROUP.md trust boundary: groupConfigDir contents are injected UNSANITIZED
-  // into the system prompt, so it must be operator-controlled — NOT the same as,
-  // nor nested under, the agent-writable cwdBase. Otherwise a user-driven agent
-  // could write its own future system-prompt instructions. Enforce with resolved
-  // paths so `.`/`..`/symlink-free traversal can't slip a nested dir past us.
-  if (final.groupConfigDir) {
-    const cwdBaseResolved = resolvePath(final.cwdBase ?? final.cwd);
-    const groupDirResolved = resolvePath(final.groupConfigDir);
-    if (groupDirResolved === cwdBaseResolved || isPathInside(groupDirResolved, cwdBaseResolved)) {
-      throw new Error(
-        `Unsafe groupConfigDir: ${final.groupConfigDir} is the same as or nested under ` +
-        `cwdBase (${final.cwdBase ?? final.cwd}). It must be operator-controlled and ` +
-        `outside the agent-writable sandbox, since its files are injected into the system prompt.`,
-      );
-    }
-  }
+  // v1.0 GROUP.md trust boundary — checked here for the single-bot/top-level
+  // case; resolveBotConfigs() re-checks each bot AFTER applying per-bot cwdBase
+  // overrides (a per-bot cwdBase could otherwise swallow groupConfigDir).
+  assertGroupConfigDirOutsideCwd(final);
 
   return final;
+}
+
+/**
+ * Enforce that `groupConfigDir` (whose files are injected UNSANITIZED into the
+ * system prompt) is not the same as, nor nested under, the agent-writable
+ * `cwdBase`. Otherwise a user-driven agent could write its own future
+ * system-prompt instructions.
+ *
+ * Uses realpathSync.native for paths that exist (so symlinks can't dodge the
+ * boundary) and falls back to lexical resolve() for not-yet-created dirs.
+ */
+function assertGroupConfigDirOutsideCwd(cfg: Config): void {
+  if (!cfg.groupConfigDir) return;
+  const cwdBase = cfg.cwdBase ?? cfg.cwd;
+  const cwdBaseResolved = canonicalize(cwdBase);
+  const groupDirResolved = canonicalize(cfg.groupConfigDir);
+  if (groupDirResolved === cwdBaseResolved || isPathInside(groupDirResolved, cwdBaseResolved)) {
+    throw new Error(
+      `Unsafe groupConfigDir: ${cfg.groupConfigDir} is the same as or nested under ` +
+      `cwdBase (${cwdBase}). It must be operator-controlled and outside the ` +
+      `agent-writable sandbox, since its files are injected into the system prompt.`,
+    );
+  }
+}
+
+/** Resolve to a real path when it exists (defeats symlink dodges), else lexical. */
+function canonicalize(p: string): string {
+  try {
+    return realpathSync.native(p);
+  } catch {
+    return resolvePath(p);
+  }
 }
 
 /** True when `child` is strictly inside `parent` (both already resolved). */
@@ -523,6 +543,10 @@ export function resolveBotConfigs(config: Config): Config[] {
         `Multi-bot: unsafe apiUrl for bot "${id}": ${resolved.apiUrl} (SSRF protection)`,
       );
     }
+    // Re-check the GROUP.md trust boundary against THIS bot's resolved cwdBase
+    // (a per-bot cwdBase override could place groupConfigDir inside the bot's
+    // own writable sandbox, which the top-level check in loadConfig can't see).
+    assertGroupConfigDirOutsideCwd(resolved);
     return resolved;
   });
 }

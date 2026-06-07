@@ -767,6 +767,28 @@ describe('v0.3: resolveBotConfigs', () => {
     expect(() => resolveBotConfigs(cfg)).toThrow(/unsafe apiUrl/i);
   });
 
+  it('re-checks the GROUP.md boundary against a per-bot cwdBase override', () => {
+    // Top-level passes (groups dir is outside top-level cwdBase), but the bot's
+    // own cwdBase override would swallow groupConfigDir — must be rejected.
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a',
+      cwdBase: '/srv/sandboxes',
+      groupConfigDir: '/srv/octo/groups',
+      bots: [{ id: 'a', botToken: 'bf_1', cwdBase: '/srv/octo' }],
+    }));
+    expect(() => resolveBotConfigs(cfg)).toThrow(/Unsafe groupConfigDir/);
+  });
+
+  it('allows a per-bot cwdBase that stays clear of groupConfigDir', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a',
+      cwdBase: '/srv/sandboxes',
+      groupConfigDir: '/srv/octo/groups',
+      bots: [{ id: 'a', botToken: 'bf_1', cwdBase: '/srv/other' }],
+    }));
+    expect(() => resolveBotConfigs(cfg)).not.toThrow();
+  });
+
   it.each(['../ops', 'a/b', '.', '..', 'a\\b', 'with space'])(
     'rejects path-traversal/invalid bot id %j',
     (badId) => {
