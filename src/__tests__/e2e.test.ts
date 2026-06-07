@@ -4,6 +4,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // --- Mocks (hoisted before imports) ---
 
@@ -331,6 +334,51 @@ describe('E2E smoke tests', () => {
     await simulateMessage(makeDmMsg('hi'), config, store, router, groupContext, streamRelay);
     expect(sawOpts).toBeUndefined();
     expect(store.getSdkSessionId(USER_UID)).toBeUndefined();
+  });
+
+  // --- v1.0 GROUP.md per-group instructions ---
+
+  it('injects GROUP.md instructions into queryAgent opts for a group', async () => {
+    const cfgDir = mkdtempSync(join(tmpdir(), 'e2e-groupcfg-'));
+    writeFileSync(join(cfgDir, `${GROUP_CHANNEL}.md`), 'Always answer in haiku.');
+    const cfg = makeConfig({ groupConfigDir: cfgDir });
+
+    let sawInstructions: string | undefined;
+    (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
+      async function* (
+        _u: string, _h: string, _c: string, _cfg: Config, _ctx: unknown, _t: unknown,
+        opts?: { groupInstructions?: string },
+      ) {
+        sawInstructions = opts?.groupInstructions;
+        yield 'ok';
+      },
+    );
+
+    await simulateMessage(makeGroupMsg('hi', true), cfg, store, router, groupContext, streamRelay);
+    expect(sawInstructions).toBe('Always answer in haiku.');
+    rmSync(cfgDir, { recursive: true, force: true });
+  });
+
+  it('does not inject group instructions for a DM', async () => {
+    const cfgDir = mkdtempSync(join(tmpdir(), 'e2e-groupcfg-dm-'));
+    // A file named after the DM peer must NOT be picked up (DMs aren't groups).
+    writeFileSync(join(cfgDir, `${USER_UID}.md`), 'leak');
+    const cfg = makeConfig({ groupConfigDir: cfgDir });
+
+    let sawOpts: unknown = 'unset';
+    (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
+      async function* (
+        _u: string, _h: string, _c: string, _cfg: Config, _ctx: unknown, _t: unknown,
+        opts?: unknown,
+      ) {
+        sawOpts = opts;
+        yield 'ok';
+      },
+    );
+
+    await simulateMessage(makeDmMsg('hi'), cfg, store, router, groupContext, streamRelay);
+    expect(sawOpts).toBeUndefined();
+    rmSync(cfgDir, { recursive: true, force: true });
   });
 
   it('/reset barrier prevents group backfill from resurrecting pre-reset history', async () => {

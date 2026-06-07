@@ -117,10 +117,17 @@ export function buildSystemPrompt(
   historyPrefix: string,
   groupContext: string,
   customPrompt?: string,
+  groupInstructions?: string,
 ): string {
   const parts: string[] = [SECURITY_PROMPT_PREFIX];
   if (customPrompt) {
     parts.push(customPrompt);
+  }
+  if (groupInstructions) {
+    // v1.0 GROUP.md: operator-provided, trusted per-group instructions. Placed
+    // after the global custom prompt so a group can specialize behavior. NOT
+    // sanitized like group context — this is a trusted operator file, not chat.
+    parts.push(`[Group instructions]\n${groupInstructions}`);
   }
   if (groupContext) {
     // S3/PM-P1-B fix: group context lines are user-authored chat messages.
@@ -280,16 +287,18 @@ export async function* queryAgent(
   config: Config,
   sessionCtx?: SessionCtx,
   onToolUse?: (toolName: string) => void,
-  opts?: { resume?: string; onSessionId?: (id: string) => void },
+  opts?: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string },
 ): AsyncIterable<string> {
   const permissionMode = toPermissionMode(config.sdk.permissionMode);
   const settingSources = toSettingSources(config.sdk.settingSources);
 
-  // Build system prompt: non-overridable security prefix + custom + context + history
+  // Build system prompt: non-overridable security prefix + custom + group
+  // instructions (v1.0 GROUP.md) + context + history
   const systemPrompt = buildSystemPrompt(
     historyPrefix,
     groupContext,
     config.sdk.systemPrompt,
+    opts?.groupInstructions,
   );
 
   // Q3: per-session cwd under cwdBase — creates the directory on first use.

@@ -6,6 +6,7 @@
   "_comment_cwd_base": "Q3: base directory for per-session cwd isolation. Each session gets a 16-hex SHA-256 subdirectory under this path; subdirs idle for >7d are auto-cleaned every 6h. Env override: CC_OCTO_CWDBASE (legacy CC_OCTO_CWD still accepted with a deprecation warning).",
   "cwdBase": "/path/to/isolated/sandbox-root",
   "dataDir": "./data",
+  "_comment_group_config_dir": "v1.0: optional directory of per-group instruction files (<groupId>.md). A matching file's contents are injected into that group's system prompt as trusted custom instructions. Operator-controlled — keep it OUTSIDE cwdBase (the agent can write there). Env override: CC_OCTO_GROUP_CONFIG_DIR. Omit to disable.",
 
   "sdk": {
     "_comment_anthropic_base_url": "Q1: Optional self-hosted Claude API gateway base URL. Forwarded to the SDK subprocess (scoped, not via global process.env). Must be https:// (or http://localhost for dev) — it is SSRF-validated at boot like apiUrl. To enable, add a real \"anthropicBaseUrl\": \"https://your-gateway.example.com\" key here, or set the ANTHROPIC_BASE_URL env var (highest priority, Anthropic SDK standard name, no CC_OCTO_ prefix). Leave it out entirely to use Anthropic's public endpoint.",

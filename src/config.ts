@@ -32,6 +32,13 @@ export interface Config {
    */
   cwd: string;
   dataDir: string;
+  /**
+   * v1.0: directory of per-group instruction files (`<groupId>.md`). When set,
+   * a matching file's contents are injected into the system prompt as trusted
+   * custom instructions for that group. Operator-controlled — must NOT be the
+   * per-session cwd sandbox (which the agent can write). Unset = feature off.
+   */
+  groupConfigDir?: string;
   sdk: {
     model?: string;
     /**
@@ -138,6 +145,7 @@ type PartialConfig = {
   /** Q3 deprecated alias — maps to cwdBase with a warning. */
   cwd?: string;
   dataDir?: string;
+  groupConfigDir?: string;
   sdk?: Partial<Config['sdk']>;
   rateLimit?: Partial<Config['rateLimit']>;
   context?: Partial<Config['context']>;
@@ -228,6 +236,7 @@ function mergeConfig(base: Config, override: PartialConfig): Config {
     // Keep deprecated `cwd` in sync so any legacy reader still sees a value.
     cwd: cwdBase ?? base.cwd,
     dataDir: override.dataDir ?? base.dataDir,
+    groupConfigDir: override.groupConfigDir ?? base.groupConfigDir,
     sdk: {
       ...base.sdk,
       ...(override.sdk ?? {}),
@@ -299,6 +308,7 @@ function applyEnv(cfg: Config): Config {
     next.cwd = envCwd;
   }
   if (env.CC_OCTO_DATA_DIR) next.dataDir = env.CC_OCTO_DATA_DIR;
+  if (env.CC_OCTO_GROUP_CONFIG_DIR) next.groupConfigDir = env.CC_OCTO_GROUP_CONFIG_DIR;
 
   if (env.CC_OCTO_SDK_MODEL) next.sdk.model = env.CC_OCTO_SDK_MODEL;
   if (env.CC_OCTO_SDK_ALLOWED_TOOLS) {

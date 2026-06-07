@@ -85,6 +85,27 @@ describe('buildSystemPrompt', () => {
     expect(result).toContain('decline and explain why');
   });
 
+  it('includes a [Group instructions] section when groupInstructions provided (v1.0)', () => {
+    const result = buildSystemPrompt('', '', undefined, 'Always answer in French.');
+    expect(result).toContain('[Group instructions]');
+    expect(result).toContain('Always answer in French.');
+    // Ordered after the security prefix.
+    expect(result.indexOf('untrusted IM users')).toBeLessThan(result.indexOf('[Group instructions]'));
+  });
+
+  it('omits the [Group instructions] section when not provided', () => {
+    const result = buildSystemPrompt('', '', 'custom');
+    expect(result).not.toContain('[Group instructions]');
+  });
+
+  it('orders group instructions before group context and history content', () => {
+    const result = buildSystemPrompt('[user]: HISTLINE', 'CTXLINE', 'custom', 'GROUPRULES');
+    // Compare against unique content tokens (the security prefix itself mentions
+    // the [Group context]/[Conversation history] marker words, so match content).
+    expect(result.indexOf('GROUPRULES')).toBeLessThan(result.indexOf('CTXLINE'));
+    expect(result.indexOf('CTXLINE')).toBeLessThan(result.indexOf('HISTLINE'));
+  });
+
   it('includes group context section when provided', () => {
     const result = buildSystemPrompt('', 'Alice: hello\nBob: world');
     expect(result).toContain('[Group context]');
