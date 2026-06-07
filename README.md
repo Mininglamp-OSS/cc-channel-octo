@@ -276,9 +276,9 @@ src/
     └── types.ts        # Protocol type definitions
 ```
 
-## Known Limitations (v0.1)
+## Known Limitations (v0.2)
 
-- **Text only** — Image, file, and voice messages are not processed (the bot replies with a notice).
+- **No slash commands** — `/reset`, `/config` and similar in-chat controls are not yet implemented (planned for v0.3).
 - **Per-session `cwdBase` isolation** — Each session (DM peer, or individual group member) gets its own SHA-256 hex sandbox under `cwdBase`, partitioned by the same key as conversation history; idle sandboxes (>7d) are auto-cleaned every 6h. Note: `cwdBase` separates sessions from each other but does not confine a session to its directory (absolute-path reads via Bash/Read remain possible) — see the Security Model section.
 - **Stateless sessions** — Uses the v1 `query()` API. Workspace state (open files, command history) does not persist across messages. The v2 Session API is planned for v0.3.
 - **Single bot** — One bot per process. Multi-bot support is planned for v0.3.
@@ -287,10 +287,10 @@ src/
 
 | Version | Scope |
 |---------|-------|
-| **v0.1** *(current)* | Text messaging, streaming, session persistence, rate limiting, security model |
-| **v0.2** | Media reception (image/file), `/reset` and `/config` commands |
-| **v0.3** | v2 Session API, multi-bot support, tool progress display |
-| **v1.0** | Media sending, GROUP.md/THREAD.md configuration, webhook mode |
+| **v0.1** | Text messaging, streaming, session persistence, rate limiting, security model |
+| **v0.2** *(current)* | Media reception & sending (image/file/RichText), @mention, group context, per-session `cwdBase` isolation, self-hosted gateway, SSRF/prompt-injection hardening |
+| **v0.3** | v2 Session API, multi-bot support, `/reset` and `/config` commands, tool progress display |
+| **v1.0** | GROUP.md/THREAD.md configuration, webhook mode |
 
 ## Contributing
 
