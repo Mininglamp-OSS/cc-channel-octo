@@ -14,6 +14,8 @@ vi.mock('../octo/api.js', () => ({
   sendTyping: vi.fn().mockResolvedValue(undefined),
   sendReadReceipt: vi.fn().mockResolvedValue(undefined),
   getGroupMembers: vi.fn().mockResolvedValue([]),
+  // G4 backfill path in the real handleMessage — default to no history.
+  getChannelMessages: vi.fn().mockResolvedValue([]),
   getUploadCredentials: vi.fn().mockResolvedValue({
     bucket: 'b', region: 'r', key: 'k',
     credentials: { tmpSecretId: 'i', tmpSecretKey: 'k', sessionToken: 't' },
@@ -50,8 +52,8 @@ import { SessionRouter } from '../session-router.js';
 import { GroupContext } from '../group-context.js';
 import { StreamRelay } from '../stream-relay.js';
 import { createAdapter, type DbAdapter } from '../db-adapter.js';
-import { queryAgent, sanitizeForSystemPrompt } from '../agent-bridge.js';
-import { resolveContent } from '../inbound.js';
+import { queryAgent } from '../agent-bridge.js';
+import { handleMessage } from '../index.js';
 import {
   sendMessage,
   sendReadReceipt,
@@ -131,8 +133,12 @@ function mockQueryYield(...texts: string[]): void {
 }
 
 /**
- * Simulate the handleMessage pipeline from index.ts.
- * Mirrors the real pipeline logic without importing the non-exported function.
+ * Drive the REAL pipeline. Previously this test reimplemented handleMessage as
+ * a hand-copied replica, which drifted from index.ts (e.g. it never threaded the
+ * PR#51 per-session cwd `sessionCtx` into queryAgent). We now import the real
+ * exported handleMessage so the e2e tests fail if the production pipeline
+ * changes. The wrapper only fills in the fixed BOT_ID so the 25 call sites stay
+ * unchanged.
  */
 async function simulateMessage(
   msg: BotMessage,
@@ -142,142 +148,7 @@ async function simulateMessage(
   groupContext: GroupContext,
   streamRelay: StreamRelay,
 ): Promise<void> {
-  const channelId = msg.channel_id ?? '';
-  const channelType = msg.channel_type ?? ChannelType.DM;
-  const isGroup =
-    channelType === ChannelType.Group || channelType === ChannelType.CommunityTopic;
-
-  let wasProcessed = false;
-  const routeResult = await router.routeAndHandle(msg, async (result) => {
-    wasProcessed = true;
-    const { sessionKey } = result;
-
-    try {
-    store.getOrCreate(sessionKey, channelId, channelType);
-
-    let contextStr = '';
-    if (isGroup) {
-      await groupContext.refreshMembers(channelId, config.apiUrl, config.botToken);
-      contextStr = groupContext.buildContext(channelId);
-      if (msg.payload.type === MessageType.Text && msg.payload.content) {
-        groupContext.pushMessage(
-          channelId,
-          msg.from_uid,
-          msg.from_name ?? msg.from_uid,
-          msg.payload.content,
-          msg.timestamp,
-        );
-      }
-    }
-
-    const userContent = msg.payload.content ?? '';
-
-    // G1: resolve non-text payloads through inbound.resolveContent.
-    const resolved = resolveContent(msg.payload, config.apiUrl);
-    const bodyText = result.cleanContent ?? resolved.text;
-
-    // G3 + S3: Extract quoted/replied message content for LLM context (truncated + sanitized).
-    let quotePrefix = '';
-    const replyData = msg.payload?.reply;
-    if (replyData) {
-      const replyPayload = replyData?.payload;
-      const rawReplyContent = replyPayload?.content ?? '';
-      const rawReplyFrom = replyData.from_name ?? replyData.from_uid ?? 'unknown';
-      if (rawReplyContent) {
-        const QUOTE_MAX_BYTES = 4_096;
-        let truncated = rawReplyContent;
-        if (Buffer.byteLength(rawReplyContent, 'utf-8') > QUOTE_MAX_BYTES) {
-          truncated = rawReplyContent.slice(0, QUOTE_MAX_BYTES);
-          while (Buffer.byteLength(truncated, 'utf-8') > QUOTE_MAX_BYTES) {
-            truncated = truncated.slice(0, -1);
-          }
-          truncated += '…[truncated]';
-        }
-        const replyFrom = String(rawReplyFrom)
-          .replace(/[\]\r\n]/g, ' ')
-          .slice(0, 128);
-        const sanitizedBody = sanitizeForSystemPrompt(truncated);
-        quotePrefix = sanitizeForSystemPrompt(
-          `[Quoted message from ${replyFrom}]: ${sanitizedBody}\n---\n`,
-        );
-      }
-    }
-    const userContentForLLM = quotePrefix + bodyText;
-
-    const historyPrefix = store.buildSegmentedHistoryPrefix(sessionKey, config.context.historyLimit);
-    store.appendUser(sessionKey, userContent, msg.message_seq);
-
-    const rawChunks = queryAgent(userContentForLLM, historyPrefix, contextStr, config);
-
-    const collected: string[] = [];
-    async function* teeChunks(): AsyncIterable<string> {
-      for await (const chunk of rawChunks) {
-        collected.push(chunk);
-        yield chunk;
-      }
-    }
-
-    await streamRelay.deliver(
-      channelId,
-      channelType,
-      teeChunks(),
-      config.apiUrl,
-      config.botToken,
-      config.maxResponseChars,
-    );
-
-    // G8: Send read receipt after processing (fire-and-forget)
-    if (msg.message_id && msg.channel_id && msg.channel_type !== undefined) {
-      sendReadReceipt({
-        apiUrl: config.apiUrl,
-        botToken: config.botToken,
-        channelId: msg.channel_id,
-        channelType: msg.channel_type,
-        messageIds: [msg.message_id],
-      }).catch((err) => console.error(`readReceipt failed: ${String(err)}`));
-    }
-
-    const fullResponse = collected.join('');
-    if (fullResponse) {
-      store.appendAssistant(sessionKey, fullResponse, msg.message_seq);
-      store.setLastBotReplySeq(sessionKey, msg.message_seq);
-    }
-    } catch (err) {
-      console.error('simulateMessage error:', err);
-      try {
-        await sendMessage({
-          apiUrl: config.apiUrl,
-          botToken: config.botToken,
-          channelId,
-          channelType,
-          content: 'An error occurred while processing your message. Please try again.',
-        });
-      } catch {
-        /* swallow */
-      }
-    }
-  });
-
-  // C1 / P2.5 mirror: suppress group context cache for actively-rejected msgs
-  const SUPPRESS = new Set(['rate_limited', 'oversized']);
-  const suppressCache = !!routeResult?.rejectionReason && SUPPRESS.has(routeResult.rejectionReason);
-
-  if (
-    !wasProcessed &&
-    isGroup &&
-    !msg.streamOn &&
-    !suppressCache &&
-    msg.payload.type === MessageType.Text &&
-    msg.payload.content
-  ) {
-    groupContext.pushMessage(
-      channelId,
-      msg.from_uid,
-      msg.from_name ?? msg.from_uid,
-      msg.payload.content,
-      msg.timestamp,
-    );
-  }
+  await handleMessage(msg, config, store, router, groupContext, streamRelay, BOT_ID);
 }
 
 // --- Tests ---
@@ -347,6 +218,27 @@ describe('E2E smoke tests', () => {
     const history = store.buildHistoryPrefix(sessionKey, 40);
     expect(history).toContain('[user]: What is this code?');
     expect(history).toContain('[assistant]: Hello from Claude');
+  });
+
+  // --- 2b. PR#51 per-session cwd wiring (regression: was uncovered) ---
+
+  it('DM threads a dm SessionCtx (kind+sessionKey) into queryAgent', async () => {
+    await simulateMessage(makeDmMsg('Hi'), config, store, router, groupContext, streamRelay);
+
+    // 5th positional arg of queryAgent is the SessionCtx that resolveSessionCwd
+    // hashes into the per-session cwd. USER_UID has no `s`-prefix → no spaceId →
+    // bare-uid DM sessionKey.
+    const ctx = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][4];
+    expect(ctx).toEqual({ kind: 'dm', sessionKey: USER_UID });
+  });
+
+  it('Group threads a per-member group SessionCtx into queryAgent', async () => {
+    await simulateMessage(makeGroupMsg('hi', true), config, store, router, groupContext, streamRelay);
+
+    // Group sessionKey embeds from_uid (`channel_id:uid`), so each member gets
+    // their own cwd — the exact PR#51 behavior the old replica never exercised.
+    const ctx = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][4];
+    expect(ctx).toEqual({ kind: 'group', sessionKey: `${GROUP_CHANNEL}:${USER_UID}` });
   });
 
   // --- 3. Group non-@mention does NOT trigger ---

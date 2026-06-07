@@ -24,6 +24,7 @@ import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } f
 import { buildInlinedFileBody, truncateUtf8ByBytes } from './file-inline-wrap.js';
 import { Buffer } from 'node:buffer';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 async function main(): Promise<void> {
   // --- Q8: Global unhandled rejection handler ---
@@ -111,7 +112,12 @@ async function main(): Promise<void> {
   console.log('[cc-channel-octo] Ready — listening for messages');
 }
 
-async function handleMessage(
+/**
+ * Process a single inbound message through the full pipeline: route → context →
+ * agent query → stream → persist. Exported so tests can drive the real pipeline
+ * (not a replica) — `main()` is the only production caller.
+ */
+export async function handleMessage(
   msg: BotMessage,
   config: ReturnType<typeof loadConfig>,
   store: SessionStore,
@@ -483,7 +489,13 @@ function seedHistoryFromApi(
   }
 }
 
-main().catch((err) => {
-  console.error('[cc-channel-octo] Fatal error:', String(err));
-  process.exit(1);
-});
+// Only auto-start the gateway when this module is run directly (production
+// entrypoint), NOT when it is imported (e.g. tests importing handleMessage).
+// `process.argv[1]` is undefined under `node -e`/`--input-type`, so guard it.
+const entrypoint = process.argv[1];
+if (entrypoint && import.meta.url === pathToFileURL(entrypoint).href) {
+  main().catch((err) => {
+    console.error('[cc-channel-octo] Fatal error:', String(err));
+    process.exit(1);
+  });
+}
