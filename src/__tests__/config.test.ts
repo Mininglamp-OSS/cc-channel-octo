@@ -29,6 +29,7 @@ const CC_VARS = [
   'CC_OCTO_CONTEXT_HISTORY_LIMIT', 'CC_OCTO_BOT_BLOCKLIST',
   'CC_OCTO_MENTION_FREE_GROUPS', 'CC_OCTO_MAX_RESPONSE_CHARS',
   'ANTHROPIC_BASE_URL', 'CC_OCTO_SDK_TOOL_PROGRESS', 'CC_OCTO_SDK_PERSISTENT_SESSION',
+  'CC_OCTO_GROUP_CONFIG_DIR',
 ];
 
 function setup() {
@@ -816,5 +817,61 @@ describe('v0.3: persistent session toggle', () => {
     });
     process.env.CC_OCTO_SDK_PERSISTENT_SESSION = val;
     expect(loadConfig(path).sdk.persistentSession).toBe(false);
+  });
+});
+
+// ─── v1.0: groupConfigDir trust-boundary validation ────────────────────
+
+describe('v1.0: groupConfigDir must be outside cwdBase', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('accepts a groupConfigDir outside cwdBase', () => {
+    const path = writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a',
+      cwdBase: '/srv/octo/sandboxes', groupConfigDir: '/srv/octo/groups',
+    });
+    expect(loadConfig(path).groupConfigDir).toBe('/srv/octo/groups');
+  });
+
+  it('rejects groupConfigDir equal to cwdBase', () => {
+    const path = writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a',
+      cwdBase: '/srv/octo', groupConfigDir: '/srv/octo',
+    });
+    expect(() => loadConfig(path)).toThrow(/Unsafe groupConfigDir/);
+  });
+
+  it('rejects groupConfigDir nested under cwdBase (file config)', () => {
+    const path = writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a',
+      cwdBase: '/srv/octo', groupConfigDir: '/srv/octo/groups',
+    });
+    expect(() => loadConfig(path)).toThrow(/Unsafe groupConfigDir/);
+  });
+
+  it('rejects nested groupConfigDir expressed with .. (resolved-path check)', () => {
+    const path = writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a',
+      cwdBase: '/srv/octo', groupConfigDir: '/srv/octo/x/../groups',
+    });
+    expect(() => loadConfig(path)).toThrow(/Unsafe groupConfigDir/);
+  });
+
+  it('rejects nested groupConfigDir set via env (CC_OCTO_GROUP_CONFIG_DIR)', () => {
+    const path = writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a', cwdBase: '/srv/octo',
+    });
+    process.env.CC_OCTO_GROUP_CONFIG_DIR = '/srv/octo/groups';
+    expect(() => loadConfig(path)).toThrow(/Unsafe groupConfigDir/);
+  });
+
+  it('does not reject a sibling dir that shares a name prefix with cwdBase', () => {
+    // /srv/octo-groups is NOT inside /srv/octo — guard against naive prefix match.
+    const path = writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a',
+      cwdBase: '/srv/octo', groupConfigDir: '/srv/octo-groups',
+    });
+    expect(loadConfig(path).groupConfigDir).toBe('/srv/octo-groups');
   });
 });

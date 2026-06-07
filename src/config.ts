@@ -4,6 +4,7 @@
  */
 
 import { readFileSync, existsSync, statSync } from 'node:fs';
+import { resolve as resolvePath, sep } from 'node:path';
 import { isAllowedApiUrl } from './url-policy.js';
 
 /**
@@ -427,7 +428,30 @@ export function loadConfig(configPath?: string): Config {
     );
   }
 
+  // v1.0 GROUP.md trust boundary: groupConfigDir contents are injected UNSANITIZED
+  // into the system prompt, so it must be operator-controlled — NOT the same as,
+  // nor nested under, the agent-writable cwdBase. Otherwise a user-driven agent
+  // could write its own future system-prompt instructions. Enforce with resolved
+  // paths so `.`/`..`/symlink-free traversal can't slip a nested dir past us.
+  if (final.groupConfigDir) {
+    const cwdBaseResolved = resolvePath(final.cwdBase ?? final.cwd);
+    const groupDirResolved = resolvePath(final.groupConfigDir);
+    if (groupDirResolved === cwdBaseResolved || isPathInside(groupDirResolved, cwdBaseResolved)) {
+      throw new Error(
+        `Unsafe groupConfigDir: ${final.groupConfigDir} is the same as or nested under ` +
+        `cwdBase (${final.cwdBase ?? final.cwd}). It must be operator-controlled and ` +
+        `outside the agent-writable sandbox, since its files are injected into the system prompt.`,
+      );
+    }
+  }
+
   return final;
+}
+
+/** True when `child` is strictly inside `parent` (both already resolved). */
+function isPathInside(child: string, parent: string): boolean {
+  const parentWithSep = parent.endsWith(sep) ? parent : parent + sep;
+  return child.startsWith(parentWithSep);
 }
 
 /**

@@ -14,7 +14,7 @@
  * can't traverse out of the config dir.
  */
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 /** Max bytes of an instruction file we will inject (keeps the prompt bounded). */
@@ -52,13 +52,25 @@ export function loadGroupConfig(
   try {
     if (!existsSync(path)) return undefined;
     if (!statSync(path).isFile()) return undefined;
-    let content = readFileSync(path, 'utf-8');
-    if (Buffer.byteLength(content, 'utf-8') > MAX_GROUP_CONFIG_BYTES) {
-      // Byte-safe truncation to a valid UTF-8 boundary.
-      content = content.slice(0, MAX_GROUP_CONFIG_BYTES);
-      while (Buffer.byteLength(content, 'utf-8') > MAX_GROUP_CONFIG_BYTES) {
-        content = content.slice(0, -1);
-      }
+    // Read at most MAX+1 bytes so a mistakenly huge file can't block the event
+    // loop or allocate unbounded memory on every group turn. Reading one extra
+    // byte lets us detect (and mark) truncation.
+    const fd = openSync(path, 'r');
+    let content: string;
+    let wasTruncated = false;
+    try {
+      const buf = Buffer.allocUnsafe(MAX_GROUP_CONFIG_BYTES + 1);
+      const bytesRead = readSync(fd, buf, 0, MAX_GROUP_CONFIG_BYTES + 1, 0);
+      wasTruncated = bytesRead > MAX_GROUP_CONFIG_BYTES;
+      const slice = buf.subarray(0, Math.min(bytesRead, MAX_GROUP_CONFIG_BYTES));
+      content = slice.toString('utf-8');
+    } finally {
+      closeSync(fd);
+    }
+    if (wasTruncated) {
+      // The slice may end mid-codepoint; trim back to a valid UTF-8 boundary by
+      // dropping any trailing replacement char produced by a split sequence.
+      content = content.replace(/�+$/, '');
       content += '\n[… group config truncated]';
     }
     const trimmed = content.trim();
