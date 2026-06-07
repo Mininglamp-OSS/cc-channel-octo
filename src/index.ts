@@ -383,7 +383,34 @@ export async function handleMessage(
         kind: isGroup ? 'group' : 'dm',
         sessionKey,
       };
-      const rawChunks = queryAgent(userContentForLLM, historyPrefix, contextStr, config, sessionCtx);
+
+      // v0.3 tool progress (opt-in): send a brief "🔧 Running <tool>…" notice as
+      // the agent invokes tools. Dedup consecutive identical tools and cap the
+      // number of notices per turn so a tool-heavy run doesn't spam the channel.
+      let onToolUse: ((toolName: string) => void) | undefined;
+      if (config.sdk.toolProgress) {
+        let lastTool = '';
+        let noticeCount = 0;
+        const MAX_TOOL_NOTICES = 10;
+        onToolUse = (toolName: string): void => {
+          if (toolName === lastTool) return; // collapse repeats (e.g. Read×5)
+          lastTool = toolName;
+          if (noticeCount >= MAX_TOOL_NOTICES) return;
+          noticeCount++;
+          // Fire-and-forget — never block or fail the agent stream on a notice.
+          sendMessage({
+            apiUrl: config.apiUrl,
+            botToken: config.botToken,
+            channelId,
+            channelType,
+            content: `🔧 Running ${toolName}…`,
+          }).catch((err) =>
+            console.error(`[cc-channel-octo] tool-progress send failed: ${String(err)}`),
+          );
+        };
+      }
+
+      const rawChunks = queryAgent(userContentForLLM, historyPrefix, contextStr, config, sessionCtx, onToolUse);
 
       // Tee the generator: collect full text while streaming to Octo
       const collected: string[] = [];

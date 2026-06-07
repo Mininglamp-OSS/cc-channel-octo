@@ -239,4 +239,88 @@ describe('queryAgent', () => {
     }
     expect(chunks).toEqual(['actual content']);
   });
+
+  // --- v0.3 tool progress: onToolUse callback ---
+
+  it('fires onToolUse for each tool_use block, in order', async () => {
+    const stream = createMockStream([
+      {
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', name: 'Bash', input: {} },
+            { type: 'text', text: 'thinking' },
+            { type: 'tool_use', name: 'Read', input: {} },
+          ],
+        },
+      },
+    ]);
+    mockQuery.mockReturnValue(stream);
+
+    const tools: string[] = [];
+    const chunks: string[] = [];
+    for await (const chunk of queryAgent('test', '', '', makeConfig(), undefined, (t) => tools.push(t))) {
+      chunks.push(chunk);
+    }
+    expect(tools).toEqual(['Bash', 'Read']);
+    expect(chunks).toEqual(['thinking']);
+  });
+
+  it('uses a fallback name when a tool_use block has no name', async () => {
+    const stream = createMockStream([
+      { type: 'assistant', message: { content: [{ type: 'tool_use', input: {} }] } },
+    ]);
+    mockQuery.mockReturnValue(stream);
+
+    const tools: string[] = [];
+    for await (const _ of queryAgent('t', '', '', makeConfig(), undefined, (t) => tools.push(t))) {
+      void _;
+    }
+    expect(tools).toEqual(['tool']);
+  });
+
+  it('a throwing onToolUse callback never breaks the stream', async () => {
+    const stream = createMockStream([
+      {
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', name: 'Bash', input: {} },
+            { type: 'text', text: 'still here' },
+          ],
+        },
+      },
+    ]);
+    mockQuery.mockReturnValue(stream);
+
+    const chunks: string[] = [];
+    const onToolUse = (): void => {
+      throw new Error('callback boom');
+    };
+    for await (const chunk of queryAgent('t', '', '', makeConfig(), undefined, onToolUse)) {
+      chunks.push(chunk);
+    }
+    expect(chunks).toEqual(['still here']);
+  });
+
+  it('does not require onToolUse (tool_use blocks are simply ignored)', async () => {
+    const stream = createMockStream([
+      {
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', name: 'Bash', input: {} },
+            { type: 'text', text: 'ok' },
+          ],
+        },
+      },
+    ]);
+    mockQuery.mockReturnValue(stream);
+
+    const chunks: string[] = [];
+    for await (const chunk of queryAgent('t', '', '', makeConfig())) {
+      chunks.push(chunk);
+    }
+    expect(chunks).toEqual(['ok']);
+  });
 });

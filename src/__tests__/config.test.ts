@@ -28,7 +28,7 @@ const CC_VARS = [
   'CC_OCTO_RATE_LIMIT_MAX_PER_MINUTE', 'CC_OCTO_CONTEXT_MAX_CHARS',
   'CC_OCTO_CONTEXT_HISTORY_LIMIT', 'CC_OCTO_BOT_BLOCKLIST',
   'CC_OCTO_MENTION_FREE_GROUPS', 'CC_OCTO_MAX_RESPONSE_CHARS',
-  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_BASE_URL', 'CC_OCTO_SDK_TOOL_PROGRESS',
 ];
 
 function setup() {
@@ -608,4 +608,47 @@ describe('Q3: cwdBase + deprecated cwd alias', () => {
     process.env.CC_OCTO_CWDBASE = '  ';
     expect(loadConfig(path).cwdBase).toBe('/explicit/base');
   });
+});
+
+// ─── v0.3: sdk.toolProgress ────────────────────────────────────────────
+
+describe('v0.3: tool progress toggle', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('defaults to undefined (off)', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    expect(loadConfig(path).sdk.toolProgress).toBeUndefined();
+  });
+
+  it('reads sdk.toolProgress=true from the config file', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      sdk: { toolProgress: true },
+    });
+    expect(loadConfig(path).sdk.toolProgress).toBe(true);
+  });
+
+  it.each(['true', '1', 'yes', 'on', 'TRUE', 'On'])(
+    'CC_OCTO_SDK_TOOL_PROGRESS=%s enables it',
+    (val) => {
+      const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+      process.env.CC_OCTO_SDK_TOOL_PROGRESS = val;
+      expect(loadConfig(path).sdk.toolProgress).toBe(true);
+    },
+  );
+
+  it.each(['false', '0', 'no', 'off', ''])(
+    'CC_OCTO_SDK_TOOL_PROGRESS=%s disables it',
+    (val) => {
+      const path = writeConfig({
+        botToken: 'bf_t',
+        apiUrl: 'https://a',
+        sdk: { toolProgress: true },
+      });
+      process.env.CC_OCTO_SDK_TOOL_PROGRESS = val;
+      expect(loadConfig(path).sdk.toolProgress).toBe(false);
+    },
+  );
 });

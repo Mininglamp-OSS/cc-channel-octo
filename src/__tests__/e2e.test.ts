@@ -228,6 +228,49 @@ describe('E2E smoke tests', () => {
     expect(reply).toContain('permissionMode');
   });
 
+  // --- v0.3 tool progress display ---
+
+  it('sends 🔧 progress messages when sdk.toolProgress is on, deduped', async () => {
+    // Mock queryAgent to drive the onToolUse callback (6th arg) like the SDK
+    // would, then yield the final answer.
+    (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
+      async function* (
+        _u: string, _h: string, _c: string, _cfg: Config, _ctx: unknown,
+        onToolUse?: (t: string) => void,
+      ) {
+        onToolUse?.('Bash');
+        onToolUse?.('Bash'); // consecutive repeat → collapsed
+        onToolUse?.('Read');
+        yield 'done';
+      },
+    );
+
+    const cfg = makeConfig({ sdk: { ...config.sdk, toolProgress: true } });
+    await simulateMessage(makeDmMsg('do work'), cfg, store, router, groupContext, streamRelay);
+
+    const sent = (sendMessage as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0].content as string);
+    const progress = sent.filter((s) => s.startsWith('🔧 Running'));
+    expect(progress).toEqual(['🔧 Running Bash…', '🔧 Running Read…']); // repeat collapsed
+    // The final answer is still delivered.
+    expect(sent.some((s) => s.includes('done'))).toBe(true);
+  });
+
+  it('sends NO progress messages when toolProgress is off (default)', async () => {
+    (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
+      async function* (
+        _u: string, _h: string, _c: string, _cfg: Config, _ctx: unknown,
+        onToolUse?: (t: string) => void,
+      ) {
+        onToolUse?.('Bash'); // callback should be undefined → no-op
+        yield 'done';
+      },
+    );
+
+    await simulateMessage(makeDmMsg('do work'), config, store, router, groupContext, streamRelay);
+    const sent = (sendMessage as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0].content as string);
+    expect(sent.some((s) => s.startsWith('🔧 Running'))).toBe(false);
+  });
+
   it('/reset barrier prevents group backfill from resurrecting pre-reset history', async () => {
     // Regression for the PR #62 review finding: /reset deletes the local
     // session, but G4 cold-start backfill could refetch + re-seed the same

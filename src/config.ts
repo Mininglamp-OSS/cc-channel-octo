@@ -47,6 +47,13 @@ export interface Config {
     systemPrompt?: string;
     settingSources: string[];
     /**
+     * v0.3: when true, the bot sends brief "🔧 Running <tool>…" progress
+     * messages as the agent invokes tools, so users see activity during long
+     * tool-heavy turns. Default false — it adds extra chat messages, so it is
+     * opt-in. Env: `CC_OCTO_SDK_TOOL_PROGRESS=true`.
+     */
+    toolProgress?: boolean;
+    /**
      * Q1: Override the upstream Claude API endpoint (e.g. self-hosted gateway).
      * Forwarded to the SDK subprocess via the standard `ANTHROPIC_BASE_URL`
      * environment variable. Env priority: `ANTHROPIC_BASE_URL` > this field.
@@ -257,6 +264,10 @@ function applyEnv(cfg: Config): Config {
   if (env.CC_OCTO_SDK_SYSTEM_PROMPT) next.sdk.systemPrompt = env.CC_OCTO_SDK_SYSTEM_PROMPT;
   if (env.CC_OCTO_SDK_SETTING_SOURCES) {
     next.sdk.settingSources = parseCsv(env.CC_OCTO_SDK_SETTING_SOURCES);
+  }
+  // v0.3: tool-progress messages. Accept the usual truthy spellings.
+  if (env.CC_OCTO_SDK_TOOL_PROGRESS !== undefined) {
+    next.sdk.toolProgress = /^(1|true|yes|on)$/i.test(env.CC_OCTO_SDK_TOOL_PROGRESS.trim());
   }
   // Q1: ANTHROPIC_BASE_URL uses the Anthropic SDK standard variable name
   // (no CC_OCTO_ prefix) so operators can reuse existing gateway configs.

@@ -18,6 +18,7 @@ Users talk to a bot in Octo (DM or group @mention). The bot sends messages to Cl
 ## Features
 
 - **Streaming output** — Real-time response delivery via Octo's stream API with 800 ms throttled flushes, typing indicators, and automatic fallback to plain messages.
+- **Tool progress** *(opt-in)* — With `sdk.toolProgress` enabled, the bot posts brief `🔧 Running <tool>…` notices as the agent invokes tools, so users see activity during long tool-heavy turns (deduped + capped per turn).
 - **Group chat awareness** — Responds only to @mentions. Injects recent group conversation as context so Claude understands the discussion.
 - **Session persistence** — SQLite-backed conversation history (40-message sliding window) with automatic 7-day expiry.
 - **In-chat commands** — `/reset` clears your own session's stored history (not the shared recent-group-context cache), `/config` shows the active settings, `/help` lists commands. Scoped per-user (even in groups); subject to the same per-session rate limit as normal messages.
@@ -94,6 +95,7 @@ Three-level priority: **environment variables** > **config.json** > **defaults**
 | `sdk.maxTurns` | `CC_OCTO_SDK_MAX_TURNS` | *(SDK default)* | Max agentic turns per query |
 | `sdk.systemPrompt` | `CC_OCTO_SDK_SYSTEM_PROMPT` | *(built-in)* | Custom system prompt |
 | `sdk.settingSources` | `CC_OCTO_SDK_SETTING_SOURCES` | `user` | Comma-separated setting sources (e.g. `user,project`) |
+| `sdk.toolProgress` | `CC_OCTO_SDK_TOOL_PROGRESS` | `false` | When true, post `🔧 Running <tool>…` notices as the agent invokes tools (deduped, capped per turn) |
 | `sdk.anthropicBaseUrl` | `ANTHROPIC_BASE_URL` | *(unset)* | Override the upstream Claude API endpoint. See [Self-hosted gateway](#self-hosted-gateway) below. |
 | `rateLimit.maxPerMinute` | `CC_OCTO_RATE_LIMIT_MAX_PER_MINUTE` | `5` | Max requests per minute per session |
 | `context.maxContextChars` | `CC_OCTO_CONTEXT_MAX_CHARS` | `6000` | Max characters of group context injected into prompts |
@@ -289,7 +291,7 @@ src/
 |---------|-------|
 | **v0.1** | Text messaging, streaming, session persistence, rate limiting, security model |
 | **v0.2** *(current)* | Media reception & sending (image/file/RichText), @mention, group context, per-session `cwdBase` isolation, self-hosted gateway, SSRF/prompt-injection hardening |
-| **v0.3** | v2 Session API, multi-bot support, tool progress display |
+| **v0.3** | v2 Session API, multi-bot support |
 | **v1.0** | GROUP.md/THREAD.md configuration, webhook mode |
 
 ## Contributing

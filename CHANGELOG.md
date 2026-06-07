@@ -10,6 +10,11 @@ While the major version is `0`, minor releases may carry breaking changes.
 
 ### Added
 
+- **Tool progress display** (v0.3, opt-in) — with `sdk.toolProgress`
+  (`CC_OCTO_SDK_TOOL_PROGRESS=true`), the bot posts brief `🔧 Running <tool>…`
+  notices as the agent invokes tools. `queryAgent` gained a non-breaking
+  `onToolUse` callback (guarded so a throwing callback never breaks the stream);
+  `index.ts` dedups consecutive repeats and caps notices per turn.
 - **In-chat slash commands** (v0.3) — `/reset` clears the current session's
   history, `/config` shows the active non-sensitive settings, `/help` lists
   commands. Handled before the agent query, scoped per-user (even in groups), so
