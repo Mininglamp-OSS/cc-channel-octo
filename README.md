@@ -139,9 +139,11 @@ Leave the field unset to talk to Anthropic's public endpoint directly.
 
 To run several bots from one process, add a `bots` array instead of (or in
 addition to) the single top-level `botToken`. Each entry needs its own
-`botToken` and an `id`, inherits every top-level field, and may override
-`apiUrl`, `dataDir`, `cwdBase`, `model`, `systemPrompt`, `botBlocklist`, and the
-mention lists:
+`botToken` and should set a stable `id` (slug: letters, digits, `.`, `_`, `-`).
+If `id` is omitted it falls back to the positional `bot0`, `bot1`, … — which
+works but produces index-dependent directory names, so prefer an explicit id.
+Each entry inherits every top-level field and may override `apiUrl`, `dataDir`,
+`cwdBase`, `model`, `systemPrompt`, `botBlocklist`, and the mention lists:
 
 ```jsonc
 {

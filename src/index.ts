@@ -46,14 +46,17 @@ async function main(): Promise<void> {
   // Each bot runs a fully independent stack (gateway + router + store + cwd
   // cleanup), isolated by its own dataDir/cwdBase. They share nothing stateful,
   // so per-user history and sandboxes never cross between bots.
+  //
+  // Two-phase startup so no WebSocket ACKs a message before its handler is
+  // ready: startBot() registers over REST (gets botId) and installs the message
+  // handler, but does NOT open the socket. We then cross-register sibling bot
+  // ids, and only AFTER that connect every socket.
   const stacks = await Promise.all(botConfigs.map((c) => startBot(c, multi)));
 
   // Multi-bot loop guard: make every router aware of ALL bot ids in this
   // process, so a mention-free group can't let one bot reply to another's
-  // messages (knownBotUids → looksLikeBot → dropped). Done after all gateways
-  // started (botIds are only known post-registration) but BEFORE any router
-  // begins handling messages, so there is no window where a sibling bot's
-  // message could slip through unrecognized.
+  // messages (knownBotUids → looksLikeBot → dropped). botIds are known after
+  // register() (REST), before any socket is open.
   if (multi) {
     const allBotIds = stacks.map((s) => s.botId);
     for (const s of stacks) {
@@ -63,8 +66,9 @@ async function main(): Promise<void> {
     }
   }
 
-  // Now that cross-registration is done, let every bot start handling messages.
-  for (const s of stacks) s.beginHandling();
+  // Handlers are wired and siblings registered — now open every socket. From
+  // this point inbound messages are dispatched, never ACK'd-and-dropped.
+  for (const s of stacks) s.connect();
 
   // Wire a single process-wide shutdown that drains every bot, so N gateways
   // don't each call process.exit. The per-gateway signal handlers are disabled
@@ -85,7 +89,7 @@ async function main(): Promise<void> {
 interface BotStack {
   botId: string;
   router: SessionRouter;
-  beginHandling: () => void;
+  connect: () => void;
   shutdown: () => Promise<void>;
 }
 
@@ -133,8 +137,10 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   // --- Gateway. In multi-bot mode main() owns shutdown signals, so the gateway
   // must NOT register its own (N gateways racing process.exit). ---
   const gateway = new OctoGateway(config, { handleSignals: !multi });
-  await gateway.start();
-  console.log(`[cc-channel-octo] ${label}Bot started: id=${gateway.botId}`);
+  // Phase 1: register over REST (gets botId) — does NOT open the socket yet, so
+  // no message can arrive before the handler below is installed.
+  await gateway.register();
+  console.log(`[cc-channel-octo] ${label}Bot registered: id=${gateway.botId}`);
 
   // --- Session router ---
   const router = new SessionRouter(config, gateway.botId, gateway.ownerUid);
@@ -142,22 +148,26 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   // --- Active handler tracking (Q6: in-flight drain on shutdown) ---
   const activeHandlers = new Set<Promise<void>>();
 
-  // Wiring the message handler is deferred to beginHandling() so the orchestrator
-  // can register all sibling bot ids into this router FIRST — otherwise there is
-  // a startup window where a mention-free group could deliver a sibling bot's
-  // message before this router knows it's a bot.
-  const beginHandling = (): void => {
-    gateway.setMessageHandler((msg: BotMessage) => {
-      if (gateway.draining) return;
-      const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId)
-        .catch((err) => {
-          console.error(`[cc-channel-octo] ${label}Unhandled message handler error:`, err instanceof Error ? err.message : err);
-        })
-        .finally(() => {
-          activeHandlers.delete(p);
-        });
-      activeHandlers.add(p);
-    });
+  // Install the message handler NOW (before the socket opens). The socket is
+  // opened later via connect(), after main() has cross-registered sibling bot
+  // ids — so there is no window where a message is ACK'd and dropped, nor one
+  // where a sibling bot's message slips through unrecognized.
+  gateway.setMessageHandler((msg: BotMessage) => {
+    if (gateway.draining) return;
+    const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId)
+      .catch((err) => {
+        console.error(`[cc-channel-octo] ${label}Unhandled message handler error:`, err instanceof Error ? err.message : err);
+      })
+      .finally(() => {
+        activeHandlers.delete(p);
+      });
+    activeHandlers.add(p);
+  });
+
+  // Phase 2 (called by main() after cross-registration): open the socket.
+  const connect = (): void => {
+    gateway.connect();
+    console.log(`[cc-channel-octo] ${label}Bot connected: id=${gateway.botId}`);
   };
 
   const shutdown = async (): Promise<void> => {
@@ -168,7 +178,7 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   // Single-bot: the gateway's own SIGINT/SIGTERM handler invokes this.
   gateway.setShutdownCallback(shutdown);
 
-  return { botId: gateway.botId, router, beginHandling, shutdown };
+  return { botId: gateway.botId, router, connect, shutdown };
 }
 
 

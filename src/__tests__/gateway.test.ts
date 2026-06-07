@@ -341,3 +341,51 @@ describe('Heartbeat consecutive failures', () => {
     await gw.stop();
   });
 });
+
+// ─── 5. Two-phase startup (v0.3 multi-bot lifecycle) ────────────────────
+
+describe('Two-phase startup: register() then connect()', () => {
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'cc-octo-gw-2p-'));
+    vi.clearAllMocks();
+    setupMocks();
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('register() populates botId WITHOUT opening the socket', async () => {
+    const gw = new OctoGateway(makeConfig());
+    await gw.register();
+    expect(gw.botId).toBe('bot-123');
+    expect(gw.ownerUid).toBe('owner-1');
+    // No socket constructed yet — the WS only opens in connect().
+    expect(vi.mocked(WKSocket)).not.toHaveBeenCalled();
+    await gw.stop();
+  });
+
+  it('a message handler can be installed between register() and connect()', async () => {
+    const gw = new OctoGateway(makeConfig());
+    await gw.register();
+    // Wiring the handler before connect() is the whole point — no throw, no socket.
+    expect(() => gw.setMessageHandler(() => {})).not.toThrow();
+    expect(vi.mocked(WKSocket)).not.toHaveBeenCalled();
+    gw.connect();
+    expect(vi.mocked(WKSocket)).toHaveBeenCalledTimes(1);
+    await gw.stop();
+  });
+
+  it('connect() before register() throws (lifecycle guard)', () => {
+    const gw = new OctoGateway(makeConfig());
+    expect(() => gw.connect()).toThrow(/before register/i);
+  });
+
+  it('start() still does register + connect in one call (back-compat)', async () => {
+    const gw = new OctoGateway(makeConfig());
+    await gw.start();
+    expect(gw.botId).toBe('bot-123');
+    expect(vi.mocked(WKSocket)).toHaveBeenCalledTimes(1);
+    await gw.stop();
+  });
+});
