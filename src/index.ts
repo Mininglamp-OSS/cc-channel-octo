@@ -68,9 +68,10 @@ async function main(): Promise<void> {
     }
   }
 
-  // Handlers are wired and siblings registered — now open every socket. From
-  // this point inbound messages are dispatched, never ACK'd-and-dropped.
-  for (const s of stacks) s.connect();
+  // Handlers are wired and siblings registered — now open every transport. From
+  // this point inbound messages are dispatched, never ACK'd-and-dropped. Awaited
+  // so a webhook bind failure surfaces as a startup error.
+  await Promise.all(stacks.map((s) => s.connect()));
 
   // Wire a single process-wide shutdown that drains every bot, so N gateways
   // don't each call process.exit. The per-gateway signal handlers are disabled
@@ -91,7 +92,7 @@ async function main(): Promise<void> {
 interface BotStack {
   botId: string;
   router: SessionRouter;
-  connect: () => void;
+  connect: () => Promise<void>;
   shutdown: () => Promise<void>;
 }
 
@@ -186,9 +187,15 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   }
 
   // Phase 2 (called by main() after cross-registration): open the transport.
-  const connect = (): void => {
+  // Async + awaited so a webhook bind failure fails startup instead of leaving
+  // the process "ready" with no inbound endpoint.
+  const connect = async (): Promise<void> => {
     if (useWebhook && webhookServer) {
-      void webhookServer.listen();
+      // Start REST runtime services (heartbeat + token refresh + signal-based
+      // graceful shutdown) WITHOUT opening the WS — webhook mode still depends
+      // on REST for outbound sends and needs the same lifecycle as the WS path.
+      gateway.startServices();
+      await webhookServer.listen(); // rejects on bind error → propagates to main()
       console.log(`[cc-channel-octo] ${label}Bot ready (webhook): id=${gateway.botId}`);
     } else {
       gateway.connect();

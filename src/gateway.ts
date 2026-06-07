@@ -102,6 +102,20 @@ export class OctoGateway {
     const reg = this.registration;
     this.socket = this.createSocket(reg.ws_url, reg.robot_id, reg.im_token);
     this.socket.connect();
+    this.startServices();
+  }
+
+  /**
+   * Start the REST-backed runtime services that must run regardless of inbound
+   * transport: the heartbeat / token-refresh loop and (unless handleSignals is
+   * false) the SIGINT/SIGTERM shutdown handlers. Called by connect() for the WS
+   * path, and directly by webhook mode — which opens no socket but still needs
+   * heartbeat + graceful shutdown. Idempotent-safe to call once per gateway.
+   */
+  startServices(): void {
+    if (!this.registration) {
+      throw new Error('OctoGateway.startServices() called before register()');
+    }
     this.startHeartbeat();
     // Multi-bot: the orchestrator owns a single combined SIGINT/SIGTERM handler,
     // so individual gateways skip registering their own (default true keeps the

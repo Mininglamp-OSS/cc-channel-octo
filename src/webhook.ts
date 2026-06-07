@@ -60,10 +60,17 @@ export function parseWebhookBody(raw: string): BotMessage | null {
   // Octo may wrap the message under `message`/`data`, or send it at top level.
   const rec = obj as Record<string, unknown>;
   const candidate = (rec.message ?? rec.data ?? rec) as Record<string, unknown>;
+  // Validate the fields the downstream pipeline relies on. message_seq and
+  // timestamp are required numbers (history segmentation + ordering use them);
+  // payload must be an object with a numeric `type`.
+  const payload = candidate.payload as Record<string, unknown> | undefined | null;
   if (
     typeof candidate.message_id !== 'string' ||
     typeof candidate.from_uid !== 'string' ||
-    typeof candidate.payload !== 'object' || candidate.payload === null
+    typeof candidate.message_seq !== 'number' ||
+    typeof candidate.timestamp !== 'number' ||
+    !payload || typeof payload !== 'object' ||
+    typeof payload.type !== 'number'
   ) {
     return null;
   }

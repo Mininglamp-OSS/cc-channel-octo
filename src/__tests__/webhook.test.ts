@@ -44,6 +44,15 @@ describe('parseWebhookBody', () => {
     expect(parseWebhookBody(JSON.stringify({ from_uid: 'u', payload: {} }))).toBeNull();
     expect(parseWebhookBody(JSON.stringify({ message_id: 'x', from_uid: 'u' }))).toBeNull();
   });
+
+  it('returns null when message_seq/timestamp/payload.type are missing or wrong type', () => {
+    const base = validMsg();
+    expect(parseWebhookBody(JSON.stringify({ ...base, message_seq: undefined }))).toBeNull();
+    expect(parseWebhookBody(JSON.stringify({ ...base, message_seq: '1' }))).toBeNull();
+    expect(parseWebhookBody(JSON.stringify({ ...base, timestamp: undefined }))).toBeNull();
+    expect(parseWebhookBody(JSON.stringify({ ...base, payload: { content: 'x' } }))).toBeNull();
+    expect(parseWebhookBody(JSON.stringify({ ...base, payload: null }))).toBeNull();
+  });
 });
 
 describe('WebhookServer (real HTTP round-trip)', () => {

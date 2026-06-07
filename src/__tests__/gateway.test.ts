@@ -388,4 +388,18 @@ describe('Two-phase startup: register() then connect()', () => {
     expect(vi.mocked(WKSocket)).toHaveBeenCalledTimes(1);
     await gw.stop();
   });
+
+  it('startServices() runs heartbeat + shutdown WITHOUT opening a socket (webhook mode)', async () => {
+    const gw = new OctoGateway(makeConfig());
+    await gw.register();
+    gw.startServices();
+    // No WebSocket created — webhook mode opens no socket.
+    expect(vi.mocked(WKSocket)).not.toHaveBeenCalled();
+    await gw.stop();
+  });
+
+  it('startServices() before register() throws', () => {
+    const gw = new OctoGateway(makeConfig());
+    expect(() => gw.startServices()).toThrow(/before register/i);
+  });
 });
