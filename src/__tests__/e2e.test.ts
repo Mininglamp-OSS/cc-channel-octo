@@ -271,6 +271,68 @@ describe('E2E smoke tests', () => {
     expect(sent.some((s) => s.startsWith('🔧 Running'))).toBe(false);
   });
 
+  // --- v0.3 persistent (v2) sessions ---
+
+  it('persistent session: captures session_id, then resumes it with empty history', async () => {
+    const cfg = makeConfig({ sdk: { ...config.sdk, persistentSession: true } });
+    const seen: Array<{ history: string; resume: string | undefined }> = [];
+    (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
+      async function* (
+        _u: string, history: string, _c: string, _cfg: Config, _ctx: unknown,
+        _onToolUse: unknown,
+        opts?: { resume?: string; onSessionId?: (id: string) => void },
+      ) {
+        seen.push({ history, resume: opts?.resume });
+        opts?.onSessionId?.('sdk-session-1');
+        yield 'ok';
+      },
+    );
+
+    // Turn 1: no prior session → no resume, history present, captures the id.
+    await simulateMessage(makeDmMsg('first'), cfg, store, router, groupContext, streamRelay);
+    expect(seen[0].resume).toBeUndefined();
+    expect(store.getSdkSessionId(USER_UID)).toBe('sdk-session-1');
+
+    // Turn 2: resumes the captured id, history suppressed (lives in SDK session).
+    await simulateMessage(makeDmMsg('second'), cfg, store, router, groupContext, streamRelay);
+    expect(seen[1].resume).toBe('sdk-session-1');
+    expect(seen[1].history).toBe('');
+  });
+
+  it('persistent session: /reset clears the stored SDK session id', async () => {
+    const cfg = makeConfig({ sdk: { ...config.sdk, persistentSession: true } });
+    (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
+      async function* (
+        _u: string, _h: string, _c: string, _cfg: Config, _ctx: unknown, _t: unknown,
+        opts?: { onSessionId?: (id: string) => void },
+      ) {
+        opts?.onSessionId?.('sdk-session-2');
+        yield 'ok';
+      },
+    );
+    await simulateMessage(makeDmMsg('hello'), cfg, store, router, groupContext, streamRelay);
+    expect(store.getSdkSessionId(USER_UID)).toBe('sdk-session-2');
+
+    await simulateMessage(makeDmMsg('/reset'), cfg, store, router, groupContext, streamRelay);
+    expect(store.getSdkSessionId(USER_UID)).toBeUndefined();
+  });
+
+  it('non-persistent (default) never sets sessionOpts / SDK session id', async () => {
+    let sawOpts: unknown = 'unset';
+    (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
+      async function* (
+        _u: string, _h: string, _c: string, _cfg: Config, _ctx: unknown, _t: unknown,
+        opts?: unknown,
+      ) {
+        sawOpts = opts;
+        yield 'ok';
+      },
+    );
+    await simulateMessage(makeDmMsg('hi'), config, store, router, groupContext, streamRelay);
+    expect(sawOpts).toBeUndefined();
+    expect(store.getSdkSessionId(USER_UID)).toBeUndefined();
+  });
+
   it('/reset barrier prevents group backfill from resurrecting pre-reset history', async () => {
     // Regression for the PR #62 review finding: /reset deletes the local
     // session, but G4 cold-start backfill could refetch + re-seed the same

@@ -120,6 +120,9 @@ export function handleCommand(
       if (messageSeq !== undefined) {
         store.setResetBarrier(sessionKey, messageSeq);
       }
+      // v0.3 persistent sessions: also forget the SDK session id, otherwise the
+      // next turn would `resume` it and bring the just-cleared conversation back.
+      store.clearSdkSessionId(sessionKey);
       return { handled: true, reply: '✓ Conversation history cleared. Starting fresh.' };
     }
     case 'config': {

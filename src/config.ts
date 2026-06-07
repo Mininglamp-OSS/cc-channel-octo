@@ -54,6 +54,14 @@ export interface Config {
      */
     toolProgress?: boolean;
     /**
+     * v0.3: when true, use the SDK's v2 Session API to persist agent workspace
+     * state across messages — each session's SDK session id is stored and
+     * `resume`d on the next turn, so open files / command history / context
+     * survive between messages. Default false (the proven stateless v1 `query()`
+     * path). Env: `CC_OCTO_SDK_PERSISTENT_SESSION=true`.
+     */
+    persistentSession?: boolean;
+    /**
      * Q1: Override the upstream Claude API endpoint (e.g. self-hosted gateway).
      * Forwarded to the SDK subprocess via the standard `ANTHROPIC_BASE_URL`
      * environment variable. Env priority: `ANTHROPIC_BASE_URL` > this field.
@@ -313,6 +321,10 @@ function applyEnv(cfg: Config): Config {
   // v0.3: tool-progress messages. Accept the usual truthy spellings.
   if (env.CC_OCTO_SDK_TOOL_PROGRESS !== undefined) {
     next.sdk.toolProgress = /^(1|true|yes|on)$/i.test(env.CC_OCTO_SDK_TOOL_PROGRESS.trim());
+  }
+  // v0.3: persistent (v2) sessions.
+  if (env.CC_OCTO_SDK_PERSISTENT_SESSION !== undefined) {
+    next.sdk.persistentSession = /^(1|true|yes|on)$/i.test(env.CC_OCTO_SDK_PERSISTENT_SESSION.trim());
   }
   // Q1: ANTHROPIC_BASE_URL uses the Anthropic SDK standard variable name
   // (no CC_OCTO_ prefix) so operators can reuse existing gateway configs.

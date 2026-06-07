@@ -10,6 +10,14 @@ While the major version is `0`, minor releases may carry breaking changes.
 
 ### Added
 
+- **Persistent sessions** (v0.3, opt-in) — with `sdk.persistentSession`
+  (`CC_OCTO_SDK_PERSISTENT_SESSION=true`), agent workspace state persists across
+  messages via the SDK v2 Session API. Each session's SDK session id is stored
+  (new `sdk_sessions` table) and `resume`d on the next turn; on resume the
+  history prefix is suppressed (the SDK session already holds it). `/reset`
+  clears the stored session id so a cleared conversation is not resumed.
+  `queryAgent` gained an `opts.resume` + `opts.onSessionId` channel (both
+  guarded). Default off — the proven stateless v1 `query()` path is unchanged.
 - **Multi-bot support** (v0.3) — run several independent bots in one process via
   a top-level `bots[]` config array. Each entry needs its own `botToken` + `id`,
   inherits all top-level fields, and may override `apiUrl`/`dataDir`/`cwdBase`/

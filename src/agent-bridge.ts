@@ -265,6 +265,12 @@ export function buildPrompt(historyPrefix: string, groupContext: string, message
  *   invokes it (v0.3 tool progress). The bridge stays a pure reporter — it does
  *   not dedup or rate-limit; the caller decides how to surface progress. A
  *   throwing callback must never break the stream, so calls are guarded.
+ * @param opts - v0.3 persistent-session options:
+ *   - `resume`: a prior SDK session id to continue (v2 Session API). When set,
+ *     conversation history lives in the SDK session, so the caller should pass
+ *     an empty `historyPrefix` to avoid double-injecting it.
+ *   - `onSessionId`: called with the SDK session id observed for this turn, so
+ *     the caller can persist it and resume next time.
  * @yields string chunks of assistant text output
  */
 export async function* queryAgent(
@@ -274,6 +280,7 @@ export async function* queryAgent(
   config: Config,
   sessionCtx?: SessionCtx,
   onToolUse?: (toolName: string) => void,
+  opts?: { resume?: string; onSessionId?: (id: string) => void },
 ): AsyncIterable<string> {
   const permissionMode = toPermissionMode(config.sdk.permissionMode);
   const settingSources = toSettingSources(config.sdk.settingSources);
@@ -309,6 +316,8 @@ export async function* queryAgent(
       cwd,
       systemPrompt,
       ...(env ? { env } : {}),
+      // v0.3: resume a prior SDK session to persist workspace state across turns.
+      ...(opts?.resume ? { resume: opts.resume } : {}),
       // Q2: `"*"` means "no whitelist" — drop the option so the SDK falls back
       // to its built-in tool set. An explicit string[] is forwarded as-is.
       ...(config.sdk.allowedTools === '*'
@@ -323,7 +332,22 @@ export async function* queryAgent(
   });
 
   try {
+    let reportedSessionId = false;
     for await (const message of stream) {
+      // v0.3: every SDK message carries session_id. Report it once so the caller
+      // can persist it and resume this session on the next turn. Guarded — a
+      // throwing callback must not break the stream.
+      if (!reportedSessionId && opts?.onSessionId) {
+        const sid = (message as { session_id?: string }).session_id;
+        if (typeof sid === 'string' && sid) {
+          reportedSessionId = true;
+          try {
+            opts.onSessionId(sid);
+          } catch (err) {
+            console.error(`[cc-channel-octo] onSessionId callback threw: ${String(err)}`);
+          }
+        }
+      }
       if (message.type === 'assistant') {
         // D1/P1-4 (齐 P1-4): guard against malformed SDK output — if the
         // assistant message lacks `.message` or `.message.content`, treat as

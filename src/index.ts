@@ -483,7 +483,25 @@ export async function handleMessage(
         };
       }
 
-      const rawChunks = queryAgent(userContentForLLM, historyPrefix, contextStr, config, sessionCtx, onToolUse);
+      // v0.3 persistent sessions (opt-in): resume the SDK session for this
+      // sessionKey so workspace state (open files, command history, context)
+      // survives across messages. On resume the SDK session already holds the
+      // conversation, so we pass an EMPTY historyPrefix to queryAgent to avoid
+      // double-injecting history. We still persist to our own store (for the
+      // non-persistent fallback, /reset, and group context), so this only
+      // changes what the agent is *prompted* with, not what we record.
+      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void } | undefined;
+      let historyForQuery = historyPrefix;
+      if (config.sdk.persistentSession) {
+        const resume = store.getSdkSessionId(sessionKey);
+        if (resume) historyForQuery = '';
+        sessionOpts = {
+          resume,
+          onSessionId: (id: string) => store.setSdkSessionId(sessionKey, id),
+        };
+      }
+
+      const rawChunks = queryAgent(userContentForLLM, historyForQuery, contextStr, config, sessionCtx, onToolUse, sessionOpts);
 
       // Tee the generator: collect full text while streaming to Octo
       const collected: string[] = [];

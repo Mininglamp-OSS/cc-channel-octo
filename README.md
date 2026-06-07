@@ -97,6 +97,7 @@ Three-level priority: **environment variables** > **config.json** > **defaults**
 | `sdk.systemPrompt` | `CC_OCTO_SDK_SYSTEM_PROMPT` | *(built-in)* | Custom system prompt |
 | `sdk.settingSources` | `CC_OCTO_SDK_SETTING_SOURCES` | `user` | Comma-separated setting sources (e.g. `user,project`) |
 | `sdk.toolProgress` | `CC_OCTO_SDK_TOOL_PROGRESS` | `false` | When true, post `🔧 Running <tool>…` notices as the agent invokes tools (deduped, capped per turn) |
+| `sdk.persistentSession` | `CC_OCTO_SDK_PERSISTENT_SESSION` | `false` | When true, persist agent workspace state across messages via the SDK v2 Session API (resume by stored session id). `/reset` clears it. |
 | `sdk.anthropicBaseUrl` | `ANTHROPIC_BASE_URL` | *(unset)* | Override the upstream Claude API endpoint. See [Self-hosted gateway](#self-hosted-gateway) below. |
 | `rateLimit.maxPerMinute` | `CC_OCTO_RATE_LIMIT_MAX_PER_MINUTE` | `5` | Max requests per minute per session |
 | `context.maxContextChars` | `CC_OCTO_CONTEXT_MAX_CHARS` | `6000` | Max characters of group context injected into prompts |
@@ -312,7 +313,7 @@ src/
 ## Known Limitations (v0.2)
 
 - **Per-session `cwdBase` isolation** — Each session (DM peer, or individual group member) gets its own SHA-256 hex sandbox under `cwdBase`, partitioned by the same key as conversation history; idle sandboxes (>7d) are auto-cleaned every 6h. Note: `cwdBase` separates sessions from each other but does not confine a session to its directory (absolute-path reads via Bash/Read remain possible) — see the Security Model section.
-- **Stateless sessions** — Uses the v1 `query()` API. Workspace state (open files, command history) does not persist across messages. The v2 Session API is planned for v0.3.
+- **Stateless sessions by default** — Uses the v1 `query()` API; workspace state (open files, command history) does not persist across messages. Enable `sdk.persistentSession` to use the SDK v2 Session API, which resumes the prior agent session each turn so that state carries over.
 
 ## Roadmap
 
@@ -320,7 +321,7 @@ src/
 |---------|-------|
 | **v0.1** | Text messaging, streaming, session persistence, rate limiting, security model |
 | **v0.2** *(current)* | Media reception & sending (image/file/RichText), @mention, group context, per-session `cwdBase` isolation, self-hosted gateway, SSRF/prompt-injection hardening |
-| **v0.3** | v2 Session API |
+| **v0.3** | Slash commands, tool progress, multi-bot, v2 Session API |
 | **v1.0** | GROUP.md/THREAD.md configuration, webhook mode |
 
 ## Contributing
