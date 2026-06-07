@@ -30,6 +30,8 @@ const CC_VARS = [
   'CC_OCTO_MENTION_FREE_GROUPS', 'CC_OCTO_MAX_RESPONSE_CHARS',
   'ANTHROPIC_BASE_URL', 'CC_OCTO_SDK_TOOL_PROGRESS', 'CC_OCTO_SDK_PERSISTENT_SESSION',
   'CC_OCTO_GROUP_CONFIG_DIR',
+  'CC_OCTO_TRANSPORT', 'CC_OCTO_WEBHOOK_HOST', 'CC_OCTO_WEBHOOK_PORT',
+  'CC_OCTO_WEBHOOK_PATH', 'CC_OCTO_WEBHOOK_SECRET',
 ];
 
 function setup() {
@@ -895,5 +897,171 @@ describe('v1.0: groupConfigDir must be outside cwdBase', () => {
       cwdBase: '/srv/octo', groupConfigDir: '/srv/octo-groups',
     });
     expect(loadConfig(path).groupConfigDir).toBe('/srv/octo-groups');
+  });
+});
+
+// ─── v1.0: webhook transport ───────────────────────────────────────────
+
+describe('v1.0: webhook transport', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('defaults to no transport (websocket path)', () => {
+    const cfg = loadConfig(writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' }));
+    expect(cfg.transport).toBeUndefined();
+  });
+
+  it('reads transport + webhook block from config file', () => {
+    const cfg = loadConfig(writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a',
+      transport: 'webhook',
+      webhook: { host: '0.0.0.0', port: 9000, path: '/in', secret: 's3cr3t' },
+    }));
+    expect(cfg.transport).toBe('webhook');
+    expect(cfg.webhook).toEqual({ host: '0.0.0.0', port: 9000, path: '/in', secret: 's3cr3t' });
+  });
+
+  it('throws when transport=webhook but no secret is set', () => {
+    expect(() => loadConfig(writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a',
+      transport: 'webhook', webhook: { port: 9000 },
+    }))).toThrow(/requires webhook.secret/);
+  });
+
+  it('does not require a secret for websocket transport', () => {
+    expect(() => loadConfig(writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a', transport: 'websocket',
+    }))).not.toThrow();
+  });
+
+  it('env overrides: CC_OCTO_TRANSPORT + CC_OCTO_WEBHOOK_*', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    process.env.CC_OCTO_TRANSPORT = 'webhook';
+    process.env.CC_OCTO_WEBHOOK_PORT = '7000';
+    process.env.CC_OCTO_WEBHOOK_SECRET = 'envsecret';
+    const cfg = loadConfig(path);
+    expect(cfg.transport).toBe('webhook');
+    expect(cfg.webhook?.port).toBe(7000);
+    expect(cfg.webhook?.secret).toBe('envsecret');
+  });
+
+  it('env secret satisfies the webhook validation', () => {
+    const path = writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a', transport: 'webhook',
+    });
+    process.env.CC_OCTO_WEBHOOK_SECRET = 'envsecret';
+    expect(() => loadConfig(path)).not.toThrow();
+  });
+
+  it('ignores an invalid CC_OCTO_TRANSPORT value', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    process.env.CC_OCTO_TRANSPORT = 'carrier-pigeon';
+    expect(loadConfig(path).transport).toBeUndefined();
+  });
+});
+
+// ─── v1.0: multi-bot + webhook ─────────────────────────────────────────
+
+describe('v1.0: multi-bot webhook binds', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('allows multiple webhook bots with distinct ports', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a', transport: 'webhook',
+      webhook: { secret: 'top' },
+      bots: [
+        { id: 'a', botToken: 'bf_1', webhook: { port: 8001 } },
+        { id: 'b', botToken: 'bf_2', webhook: { port: 8002 } },
+      ],
+    }));
+    const bots = resolveBotConfigs(cfg);
+    expect(bots[0].webhook?.port).toBe(8001);
+    expect(bots[1].webhook?.port).toBe(8002);
+    // secret inherited from top-level webhook block
+    expect(bots[0].webhook?.secret).toBe('top');
+  });
+
+  it('rejects two webhook bots that bind the same host:port', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a', transport: 'webhook',
+      webhook: { secret: 'top', port: 8000 },
+      bots: [
+        { id: 'a', botToken: 'bf_1' },
+        { id: 'b', botToken: 'bf_2' }, // inherits port 8000 → collision
+      ],
+    }));
+    expect(() => resolveBotConfigs(cfg)).toThrow(/both bind webhook/i);
+  });
+
+  it('rejects distinct paths on the same port (one server per bot binds the whole port)', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a', transport: 'webhook',
+      webhook: { secret: 'top', port: 8000 },
+      bots: [
+        { id: 'a', botToken: 'bf_1', webhook: { path: '/a' } },
+        { id: 'b', botToken: 'bf_2', webhook: { path: '/b' } },
+      ],
+    }));
+    expect(() => resolveBotConfigs(cfg)).toThrow(/distinct host:port/i);
+  });
+
+  it('allows the same port on different hosts', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a', transport: 'webhook',
+      webhook: { secret: 'top', port: 8000 },
+      bots: [
+        { id: 'a', botToken: 'bf_1', webhook: { host: '127.0.0.1' } },
+        { id: 'b', botToken: 'bf_2', webhook: { host: '127.0.0.2' } },
+      ],
+    }));
+    expect(() => resolveBotConfigs(cfg)).not.toThrow();
+  });
+
+  it('rejects a webhook bot with no secret (inherited or own)', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a',
+      bots: [{ id: 'a', botToken: 'bf_1', transport: 'webhook', webhook: { port: 8000 } }],
+    }));
+    expect(() => resolveBotConfigs(cfg)).toThrow(/no webhook.secret/i);
+  });
+
+  it('per-bot transport override: one websocket, one webhook', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a',
+      bots: [
+        { id: 'ws', botToken: 'bf_1' },
+        { id: 'wh', botToken: 'bf_2', transport: 'webhook', webhook: { port: 8000, secret: 's' } },
+      ],
+    }));
+    const bots = resolveBotConfigs(cfg);
+    expect(bots[0].transport).toBeUndefined();
+    expect(bots[1].transport).toBe('webhook');
+  });
+});
+
+describe('v1.0: webhook path/port validation', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('rejects a webhook.path without a leading slash', () => {
+    expect(() => loadConfig(writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a', transport: 'webhook',
+      webhook: { secret: 's', path: 'foo' },
+    }))).toThrow(/Invalid webhook.path/);
+  });
+
+  it('rejects an out-of-range webhook.port', () => {
+    expect(() => loadConfig(writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a', transport: 'webhook',
+      webhook: { secret: 's', port: 70000 },
+    }))).toThrow(/Invalid webhook.port/);
+  });
+
+  it('accepts a valid path + port', () => {
+    expect(() => loadConfig(writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a', transport: 'webhook',
+      webhook: { secret: 's', path: '/in', port: 9000 },
+    }))).not.toThrow();
   });
 });

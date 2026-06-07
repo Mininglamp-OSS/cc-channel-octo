@@ -25,6 +25,7 @@ Users talk to a bot in Octo (DM or group @mention). The bot sends messages to Cl
 - **Rate limiting** — Per-session token bucket (default 5 req/min) with debounced rejection notices.
 - **Security by configuration** — `allowedTools` whitelist + per-session `cwdBase` isolation. No runtime permission prompts (headless mode).
 - **Multi-bot** — Run several independent bots in one process via a `bots[]` config array; each gets its own token, data directory, and sandbox root (no shared history).
+- **Webhook mode** — Optional HTTP inbound transport (`transport: "webhook"`) as an alternative to the WuKongIM long connection; a shared-secret-authenticated endpoint feeds the same pipeline.
 - **Zero infrastructure** — Single process, single SQLite file, `npm start` and go.
 
 ## Quick Start
@@ -105,6 +106,9 @@ Three-level priority: **environment variables** > **config.json** > **defaults**
 | `context.historyLimit` | `CC_OCTO_CONTEXT_HISTORY_LIMIT` | `40` | Max messages in session history window |
 | `botBlocklist` | `CC_OCTO_BOT_BLOCKLIST` | `[]` | Comma-separated bot UIDs to ignore in DMs (prevents bot loops) |
 | `mentionFreeGroups` | `CC_OCTO_MENTION_FREE_GROUPS` | `[]` | Comma-separated group channel IDs where the bot responds to every text message without requiring an `@bot` mention (G12). |
+| `transport` | `CC_OCTO_TRANSPORT` | `websocket` | Inbound transport: `websocket` (WuKongIM long connection) or `webhook` (HTTP endpoint). See [Webhook mode](#webhook-mode). |
+| `webhook.secret` | `CC_OCTO_WEBHOOK_SECRET` | *(unset)* | Shared secret required in webhook mode (header `x-webhook-secret` or `?secret=`). |
+| `webhook.host` / `.port` / `.path` | `CC_OCTO_WEBHOOK_HOST` / `_PORT` / `_PATH` | `127.0.0.1` / `8787` / `/octo/webhook` | Webhook server bind + route. |
 
 ### Self-hosted gateway
 
@@ -198,6 +202,33 @@ Each bot runs a fully independent stack (gateway, router, store). By default its
 conversation history or working directories**. Set `dataDir`/`cwdBase` on an
 entry to override that. When `bots` is absent, the process runs a single bot
 from the top-level fields exactly as before.
+
+### Webhook mode
+
+By default the gateway holds a WuKongIM WebSocket. Set `transport: "webhook"` to
+instead receive inbound messages over HTTP — useful behind a reverse proxy or
+where outbound long connections aren't possible. The bot still registers over
+REST (for its id and for sending replies); only the inbound path changes.
+
+```bash
+CC_OCTO_TRANSPORT=webhook \
+CC_OCTO_WEBHOOK_SECRET=$(openssl rand -hex 32) \
+CC_OCTO_WEBHOOK_PORT=8787 \
+npm start
+# → POST http://127.0.0.1:8787/octo/webhook
+```
+
+Every request must present the shared secret (header `x-webhook-secret` or
+`?secret=`), compared in constant time — `webhook.secret` is **required** in this
+mode (startup fails without it), since an open endpoint would let anyone inject
+messages. Bodies are capped at 256 KiB. The server binds `127.0.0.1` by default;
+put TLS termination / the public hop in front of it (a reverse proxy), and post
+the Octo message JSON (top-level, or under `message`/`data`) to the path.
+
+In multi-bot mode, each webhook bot needs a **distinct** `host:port` (a separate
+path is not enough — one HTTP server per bot binds the whole port) — add
+`transport`/`webhook` overrides per `bots[]` entry; startup fails fast if two
+bots would bind the same `host:port`.
 
 ## Security Model
 
@@ -354,9 +385,9 @@ src/
 | Version | Scope |
 |---------|-------|
 | **v0.1** | Text messaging, streaming, session persistence, rate limiting, security model |
-| **v0.2** *(current)* | Media reception & sending (image/file/RichText), @mention, group context, per-session `cwdBase` isolation, self-hosted gateway, SSRF/prompt-injection hardening |
-| **v0.3** | Slash commands, tool progress, multi-bot, v2 Session API |
-| **v1.0** | webhook mode |
+| **v0.2** *(released)* | Media reception & sending (image/file/RichText), @mention, group context, per-session `cwdBase` isolation, self-hosted gateway, SSRF/prompt-injection hardening |
+| **v0.3** *(merged, unreleased)* | Slash commands, tool progress, multi-bot, v2 Session API |
+| **v1.0** *(merged, unreleased)* | GROUP.md per-group instructions, webhook mode |
 
 ## Contributing
 

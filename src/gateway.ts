@@ -21,6 +21,9 @@ export class OctoGateway {
   private robotId = '';
   // Stored registration result from register(); consumed by connect().
   private registration: Awaited<ReturnType<typeof registerBot>> | null = null;
+  // True once connect() opened the WebSocket. Webhook mode leaves this false, so
+  // token refresh re-registers WITHOUT reopening a socket (no WS in that mode).
+  private wsEnabled = false;
   // G18: owner_uid from registerBot; used by SessionRouter for future permission model.
   private _ownerUid = '';
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -102,6 +105,21 @@ export class OctoGateway {
     const reg = this.registration;
     this.socket = this.createSocket(reg.ws_url, reg.robot_id, reg.im_token);
     this.socket.connect();
+    this.wsEnabled = true;
+    this.startServices();
+  }
+
+  /**
+   * Start the REST-backed runtime services that must run regardless of inbound
+   * transport: the heartbeat / token-refresh loop and (unless handleSignals is
+   * false) the SIGINT/SIGTERM shutdown handlers. Called by connect() for the WS
+   * path, and directly by webhook mode — which opens no socket but still needs
+   * heartbeat + graceful shutdown. Idempotent-safe to call once per gateway.
+   */
+  startServices(): void {
+    if (!this.registration) {
+      throw new Error('OctoGateway.startServices() called before register()');
+    }
     this.startHeartbeat();
     // Multi-bot: the orchestrator owns a single combined SIGINT/SIGTERM handler,
     // so individual gateways skip registering their own (default true keeps the
@@ -265,10 +283,16 @@ export class OctoGateway {
 
       this.robotId = reg.robot_id;
       this._ownerUid = reg.owner_uid;
-      console.log('Token refreshed, reconnecting...');
+      this.registration = reg;
+      console.log('Token refreshed' + (this.wsEnabled ? ', reconnecting...' : ' (webhook mode, no socket)'));
 
-      this.socket = this.createSocket(reg.ws_url, reg.robot_id, reg.im_token);
-      this.socket.connect();
+      // Only reopen the WebSocket when this gateway actually uses one. In webhook
+      // mode there is no socket to reconnect — refreshing the credentials is
+      // enough for outbound REST calls.
+      if (this.wsEnabled) {
+        this.socket = this.createSocket(reg.ws_url, reg.robot_id, reg.im_token);
+        this.socket.connect();
+      }
       this.startHeartbeat(); // Q33: Restart API heartbeat after successful refresh
     } catch (err) {
       console.error('Token refresh failed:', String(err));

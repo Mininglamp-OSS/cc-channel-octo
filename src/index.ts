@@ -23,6 +23,7 @@ import type { BotMessage } from './octo/types.js';
 import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } from './inbound.js';
 import { handleCommand } from './commands.js';
 import { loadGroupConfig } from './group-config.js';
+import { WebhookServer } from './webhook.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes } from './file-inline-wrap.js';
 import { Buffer } from 'node:buffer';
 import { join } from 'node:path';
@@ -67,9 +68,22 @@ async function main(): Promise<void> {
     }
   }
 
-  // Handlers are wired and siblings registered — now open every socket. From
-  // this point inbound messages are dispatched, never ACK'd-and-dropped.
-  for (const s of stacks) s.connect();
+  // Handlers are wired and siblings registered — now open every transport. From
+  // this point inbound messages are dispatched, never ACK'd-and-dropped. Awaited
+  // so a webhook bind failure surfaces as a startup error. On a partial failure
+  // (e.g. one bot's port is taken), shut down the stacks that did start so we
+  // don't leave bound servers / open stores dangling before the fatal exit.
+  const connected: BotStack[] = [];
+  try {
+    for (const s of stacks) {
+      await s.connect();
+      connected.push(s);
+    }
+  } catch (err) {
+    console.error('[cc-channel-octo] Startup failed during transport connect; cleaning up...');
+    await Promise.allSettled(connected.map((s) => s.shutdown()));
+    throw err;
+  }
 
   // Wire a single process-wide shutdown that drains every bot, so N gateways
   // don't each call process.exit. The per-gateway signal handlers are disabled
@@ -90,7 +104,7 @@ async function main(): Promise<void> {
 interface BotStack {
   botId: string;
   router: SessionRouter;
-  connect: () => void;
+  connect: () => Promise<void>;
   shutdown: () => Promise<void>;
 }
 
@@ -153,8 +167,13 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   // opened later via connect(), after main() has cross-registered sibling bot
   // ids — so there is no window where a message is ACK'd and dropped, nor one
   // where a sibling bot's message slips through unrecognized.
-  gateway.setMessageHandler((msg: BotMessage) => {
+  const onInbound = (msg: BotMessage): void => {
     if (gateway.draining) return;
+    // Drop self-authored messages. The WS path filters these in
+    // OctoGateway.handleMessage(); webhook mode calls onInbound directly, so
+    // apply the same guard here (otherwise a bot's own group message could be
+    // cached into group context as un-processed chatter).
+    if (msg.from_uid === gateway.botId) return;
     const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId)
       .catch((err) => {
         console.error(`[cc-channel-octo] ${label}Unhandled message handler error:`, err instanceof Error ? err.message : err);
@@ -163,16 +182,50 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
         activeHandlers.delete(p);
       });
     activeHandlers.add(p);
-  });
+  };
+  gateway.setMessageHandler(onInbound);
 
-  // Phase 2 (called by main() after cross-registration): open the socket.
-  const connect = (): void => {
-    gateway.connect();
-    console.log(`[cc-channel-octo] ${label}Bot connected: id=${gateway.botId}`);
+  // v1.0 webhook transport: instead of the WS, run an HTTP server that feeds the
+  // same handler. The bot still registered over REST above (botId + outbound).
+  const useWebhook = config.transport === 'webhook';
+  let webhookServer: WebhookServer | undefined;
+  if (useWebhook) {
+    if (!config.webhook?.secret) {
+      // loadConfig enforces this, but guard for hand-built configs/tests.
+      throw new Error('webhook transport requires webhook.secret');
+    }
+    webhookServer = new WebhookServer({
+      host: config.webhook.host,
+      port: config.webhook.port,
+      path: config.webhook.path,
+      secret: config.webhook.secret,
+    });
+    webhookServer.setMessageHandler(onInbound);
+  }
+
+  // Phase 2 (called by main() after cross-registration): open the transport.
+  // Async + awaited so a webhook bind failure fails startup instead of leaving
+  // the process "ready" with no inbound endpoint.
+  const connect = async (): Promise<void> => {
+    if (useWebhook && webhookServer) {
+      // Bind the HTTP server FIRST so a bind failure (e.g. port taken) throws
+      // before we start the heartbeat / signal handlers — otherwise a failed
+      // start could leave those services + the lock running for this stack.
+      await webhookServer.listen(); // rejects on bind error → propagates to main()
+      // Then start REST runtime services (heartbeat + token refresh + signal-
+      // based graceful shutdown) WITHOUT opening the WS — webhook mode still
+      // depends on REST for outbound sends and needs the same lifecycle.
+      gateway.startServices();
+      console.log(`[cc-channel-octo] ${label}Bot ready (webhook): id=${gateway.botId}`);
+    } else {
+      gateway.connect();
+      console.log(`[cc-channel-octo] ${label}Bot connected: id=${gateway.botId}`);
+    }
   };
 
   const shutdown = async (): Promise<void> => {
     clearInterval(cwdCleanupTimer);
+    if (webhookServer) await webhookServer.close();
     await gateway.stop(activeHandlers);
     store.close();
   };
