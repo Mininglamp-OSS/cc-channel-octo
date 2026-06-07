@@ -62,6 +62,15 @@ CREATE TABLE IF NOT EXISTS reset_barriers (
   reset_seq INTEGER NOT NULL
 );
 
+-- v0.3 persistent sessions: maps our sessionKey to the SDK's session UUID so a
+-- later turn can resume the same agent session (v2 Session API). Kept separate
+-- from the sessions table (different lifecycle); cleared by /reset with history.
+CREATE TABLE IF NOT EXISTS sdk_sessions (
+  session_id TEXT PRIMARY KEY,
+  sdk_session_id TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id, id);
 `;
 
@@ -89,6 +98,9 @@ export class SessionStore {
   private deleteSessionStmt!: PreparedStatement;
   private upsertResetBarrier!: PreparedStatement;
   private selectResetBarrier!: PreparedStatement;
+  private upsertSdkSession!: PreparedStatement;
+  private selectSdkSession!: PreparedStatement;
+  private deleteSdkSession!: PreparedStatement;
 
   /** Tracks the last message_seq at which the bot replied, per group session key. */
   private lastBotReplySeq = new Map<string, number>();
@@ -141,6 +153,17 @@ export class SessionStore {
     );
     this.selectResetBarrier = this.adapter.prepare(
       'SELECT reset_seq FROM reset_barriers WHERE session_id = ?',
+    );
+    this.upsertSdkSession = this.adapter.prepare(
+      'INSERT INTO sdk_sessions (session_id, sdk_session_id, updated_at) VALUES (?, ?, ?) ' +
+        'ON CONFLICT(session_id) DO UPDATE SET sdk_session_id = excluded.sdk_session_id, ' +
+        'updated_at = excluded.updated_at',
+    );
+    this.selectSdkSession = this.adapter.prepare(
+      'SELECT sdk_session_id FROM sdk_sessions WHERE session_id = ?',
+    );
+    this.deleteSdkSession = this.adapter.prepare(
+      'DELETE FROM sdk_sessions WHERE session_id = ?',
     );
   }
 
@@ -216,6 +239,27 @@ export class SessionStore {
       | { reset_seq: number }
       | undefined;
     return row?.reset_seq;
+  }
+
+  /**
+   * v0.3 persistent sessions: record the SDK session UUID for a sessionKey so a
+   * later turn can resume it. Upserts (latest wins).
+   */
+  setSdkSessionId(sessionId: string, sdkSessionId: string): void {
+    this.upsertSdkSession.run(sessionId, sdkSessionId, Date.now());
+  }
+
+  /** Return the stored SDK session UUID for a sessionKey, or undefined. */
+  getSdkSessionId(sessionId: string): string | undefined {
+    const row = this.selectSdkSession.get(sessionId) as
+      | { sdk_session_id: string }
+      | undefined;
+    return row?.sdk_session_id;
+  }
+
+  /** Forget the SDK session mapping (e.g. on /reset or a resume failure). */
+  clearSdkSessionId(sessionId: string): void {
+    this.deleteSdkSession.run(sessionId);
   }
 
   close(): void {

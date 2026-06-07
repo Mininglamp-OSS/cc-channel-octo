@@ -13,6 +13,7 @@
     "allowedTools": "*",
     "permissionMode": "bypassPermissions",
     "_comment_tool_progress": "v0.3: set toolProgress=true to post '🔧 Running <tool>…' notices as the agent invokes tools (deduped, capped per turn). Env override: CC_OCTO_SDK_TOOL_PROGRESS=true. Off by default.",
+    "_comment_persistent_session": "v0.3: set persistentSession=true to keep agent workspace state across messages via the SDK v2 Session API (resumes the prior session each turn; /reset clears it). Env override: CC_OCTO_SDK_PERSISTENT_SESSION=true. Off by default.",
     "settingSources": ["user"]
   },
 

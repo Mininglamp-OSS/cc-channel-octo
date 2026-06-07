@@ -28,7 +28,7 @@ const CC_VARS = [
   'CC_OCTO_RATE_LIMIT_MAX_PER_MINUTE', 'CC_OCTO_CONTEXT_MAX_CHARS',
   'CC_OCTO_CONTEXT_HISTORY_LIMIT', 'CC_OCTO_BOT_BLOCKLIST',
   'CC_OCTO_MENTION_FREE_GROUPS', 'CC_OCTO_MAX_RESPONSE_CHARS',
-  'ANTHROPIC_BASE_URL', 'CC_OCTO_SDK_TOOL_PROGRESS',
+  'ANTHROPIC_BASE_URL', 'CC_OCTO_SDK_TOOL_PROGRESS', 'CC_OCTO_SDK_PERSISTENT_SESSION',
 ];
 
 function setup() {
@@ -783,5 +783,38 @@ describe('v0.3: resolveBotConfigs', () => {
       bots: [{ id: 'support-bot.1_v2', botToken: 'bf_1' }],
     }));
     expect(resolveBotConfigs(cfg)[0].botId).toBe('support-bot.1_v2');
+  });
+});
+
+// ─── v0.3: sdk.persistentSession ───────────────────────────────────────
+
+describe('v0.3: persistent session toggle', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('defaults to undefined (off)', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    expect(loadConfig(path).sdk.persistentSession).toBeUndefined();
+  });
+
+  it('reads sdk.persistentSession=true from the config file', () => {
+    const path = writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a', sdk: { persistentSession: true },
+    });
+    expect(loadConfig(path).sdk.persistentSession).toBe(true);
+  });
+
+  it.each(['true', '1', 'yes', 'on'])('CC_OCTO_SDK_PERSISTENT_SESSION=%s enables it', (val) => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    process.env.CC_OCTO_SDK_PERSISTENT_SESSION = val;
+    expect(loadConfig(path).sdk.persistentSession).toBe(true);
+  });
+
+  it.each(['false', '0', 'off', ''])('CC_OCTO_SDK_PERSISTENT_SESSION=%s disables it', (val) => {
+    const path = writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a', sdk: { persistentSession: true },
+    });
+    process.env.CC_OCTO_SDK_PERSISTENT_SESSION = val;
+    expect(loadConfig(path).sdk.persistentSession).toBe(false);
   });
 });

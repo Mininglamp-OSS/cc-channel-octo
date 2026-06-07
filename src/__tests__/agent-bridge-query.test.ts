@@ -323,4 +323,50 @@ describe('queryAgent', () => {
     }
     expect(chunks).toEqual(['ok']);
   });
+
+  // --- v0.3 persistent sessions: resume + onSessionId ---
+
+  it('forwards opts.resume as the SDK resume option', async () => {
+    mockQuery.mockReturnValue(createMockStream([
+      { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
+    ]));
+    for await (const _ of queryAgent('t', '', '', makeConfig(), undefined, undefined, { resume: 'prior-sid' })) {
+      void _;
+    }
+    const options = mockQuery.mock.calls[0][0].options;
+    expect(options.resume).toBe('prior-sid');
+  });
+
+  it('omits resume when not provided', async () => {
+    mockQuery.mockReturnValue(createMockStream([
+      { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
+    ]));
+    for await (const _ of queryAgent('t', '', '', makeConfig())) { void _; }
+    expect(mockQuery.mock.calls[0][0].options).not.toHaveProperty('resume');
+  });
+
+  it('reports the SDK session_id once via onSessionId', async () => {
+    mockQuery.mockReturnValue(createMockStream([
+      { type: 'assistant', session_id: 'sid-xyz', message: { content: [{ type: 'text', text: 'a' }] } },
+      { type: 'assistant', session_id: 'sid-xyz', message: { content: [{ type: 'text', text: 'b' }] } },
+      { type: 'result', subtype: 'success', session_id: 'sid-xyz' },
+    ]));
+    const ids: string[] = [];
+    for await (const _ of queryAgent('t', '', '', makeConfig(), undefined, undefined, { onSessionId: (id) => ids.push(id) })) {
+      void _;
+    }
+    expect(ids).toEqual(['sid-xyz']); // reported exactly once
+  });
+
+  it('a throwing onSessionId callback never breaks the stream', async () => {
+    mockQuery.mockReturnValue(createMockStream([
+      { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'still streamed' }] } },
+    ]));
+    const chunks: string[] = [];
+    const onSessionId = (): void => { throw new Error('boom'); };
+    for await (const chunk of queryAgent('t', '', '', makeConfig(), undefined, undefined, { onSessionId })) {
+      chunks.push(chunk);
+    }
+    expect(chunks).toEqual(['still streamed']);
+  });
 });
