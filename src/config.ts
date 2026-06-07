@@ -3,7 +3,8 @@
  * Three-level priority: env > config.json > defaults.
  */
 
-import { readFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, existsSync, statSync, realpathSync } from 'node:fs';
+import { resolve as resolvePath, sep } from 'node:path';
 import { isAllowedApiUrl } from './url-policy.js';
 
 /**
@@ -32,6 +33,13 @@ export interface Config {
    */
   cwd: string;
   dataDir: string;
+  /**
+   * v1.0: directory of per-group instruction files (`<groupId>.md`). When set,
+   * a matching file's contents are injected into the system prompt as trusted
+   * custom instructions for that group. Operator-controlled — must NOT be the
+   * per-session cwd sandbox (which the agent can write). Unset = feature off.
+   */
+  groupConfigDir?: string;
   sdk: {
     model?: string;
     /**
@@ -138,6 +146,7 @@ type PartialConfig = {
   /** Q3 deprecated alias — maps to cwdBase with a warning. */
   cwd?: string;
   dataDir?: string;
+  groupConfigDir?: string;
   sdk?: Partial<Config['sdk']>;
   rateLimit?: Partial<Config['rateLimit']>;
   context?: Partial<Config['context']>;
@@ -228,6 +237,7 @@ function mergeConfig(base: Config, override: PartialConfig): Config {
     // Keep deprecated `cwd` in sync so any legacy reader still sees a value.
     cwd: cwdBase ?? base.cwd,
     dataDir: override.dataDir ?? base.dataDir,
+    groupConfigDir: override.groupConfigDir ?? base.groupConfigDir,
     sdk: {
       ...base.sdk,
       ...(override.sdk ?? {}),
@@ -299,6 +309,7 @@ function applyEnv(cfg: Config): Config {
     next.cwd = envCwd;
   }
   if (env.CC_OCTO_DATA_DIR) next.dataDir = env.CC_OCTO_DATA_DIR;
+  if (env.CC_OCTO_GROUP_CONFIG_DIR) next.groupConfigDir = env.CC_OCTO_GROUP_CONFIG_DIR;
 
   if (env.CC_OCTO_SDK_MODEL) next.sdk.model = env.CC_OCTO_SDK_MODEL;
   if (env.CC_OCTO_SDK_ALLOWED_TOOLS) {
@@ -417,7 +428,50 @@ export function loadConfig(configPath?: string): Config {
     );
   }
 
+  // v1.0 GROUP.md trust boundary — checked here for the single-bot/top-level
+  // case; resolveBotConfigs() re-checks each bot AFTER applying per-bot cwdBase
+  // overrides (a per-bot cwdBase could otherwise swallow groupConfigDir).
+  assertGroupConfigDirOutsideCwd(final);
+
   return final;
+}
+
+/**
+ * Enforce that `groupConfigDir` (whose files are injected UNSANITIZED into the
+ * system prompt) is not the same as, nor nested under, the agent-writable
+ * `cwdBase`. Otherwise a user-driven agent could write its own future
+ * system-prompt instructions.
+ *
+ * Uses realpathSync.native for paths that exist (so symlinks can't dodge the
+ * boundary) and falls back to lexical resolve() for not-yet-created dirs.
+ */
+function assertGroupConfigDirOutsideCwd(cfg: Config): void {
+  if (!cfg.groupConfigDir) return;
+  const cwdBase = cfg.cwdBase ?? cfg.cwd;
+  const cwdBaseResolved = canonicalize(cwdBase);
+  const groupDirResolved = canonicalize(cfg.groupConfigDir);
+  if (groupDirResolved === cwdBaseResolved || isPathInside(groupDirResolved, cwdBaseResolved)) {
+    throw new Error(
+      `Unsafe groupConfigDir: ${cfg.groupConfigDir} is the same as or nested under ` +
+      `cwdBase (${cwdBase}). It must be operator-controlled and outside the ` +
+      `agent-writable sandbox, since its files are injected into the system prompt.`,
+    );
+  }
+}
+
+/** Resolve to a real path when it exists (defeats symlink dodges), else lexical. */
+function canonicalize(p: string): string {
+  try {
+    return realpathSync.native(p);
+  } catch {
+    return resolvePath(p);
+  }
+}
+
+/** True when `child` is strictly inside `parent` (both already resolved). */
+function isPathInside(child: string, parent: string): boolean {
+  const parentWithSep = parent.endsWith(sep) ? parent : parent + sep;
+  return child.startsWith(parentWithSep);
 }
 
 /**
@@ -489,6 +543,10 @@ export function resolveBotConfigs(config: Config): Config[] {
         `Multi-bot: unsafe apiUrl for bot "${id}": ${resolved.apiUrl} (SSRF protection)`,
       );
     }
+    // Re-check the GROUP.md trust boundary against THIS bot's resolved cwdBase
+    // (a per-bot cwdBase override could place groupConfigDir inside the bot's
+    // own writable sandbox, which the top-level check in loadConfig can't see).
+    assertGroupConfigDirOutsideCwd(resolved);
     return resolved;
   });
 }

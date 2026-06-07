@@ -10,6 +10,18 @@ While the major version is `0`, minor releases may carry breaking changes.
 
 ### Added
 
+- **Per-group instructions** (v1.0, GROUP.md) — set `groupConfigDir`
+  (`CC_OCTO_GROUP_CONFIG_DIR`) to a directory of `<groupId>.md` files; a matching
+  file's contents are injected into that group's system prompt as a trusted
+  `[Group instructions]` block, so a group can have its own persona/rules without
+  code changes. Operator-controlled; id is filename-pinned to a safe slug (no
+  traversal), content capped at 16 KiB, groups only. Boot-time check (re-run
+  per-bot) rejects a `groupConfigDir` equal to or nested under the agent-writable
+  `cwdBase`, using realpath canonicalization. Because the agent can still write
+  absolute paths under default Bash/bypassPermissions, the block is a trusted
+  prompt-injection sink whose safety requires OS-level file permissions + a
+  hardened deployment — documented prominently, with a defense-in-depth refusal
+  to inject a group/world-writable file. New `src/group-config.ts`.
 - **Persistent sessions** (v0.3, opt-in) — with `sdk.persistentSession`
   (`CC_OCTO_SDK_PERSISTENT_SESSION=true`), agent workspace state persists across
   messages via the SDK v2 Session API. Each session's SDK session id is stored

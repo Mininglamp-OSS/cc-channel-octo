@@ -98,6 +98,7 @@ Three-level priority: **environment variables** > **config.json** > **defaults**
 | `sdk.settingSources` | `CC_OCTO_SDK_SETTING_SOURCES` | `user` | Comma-separated setting sources (e.g. `user,project`) |
 | `sdk.toolProgress` | `CC_OCTO_SDK_TOOL_PROGRESS` | `false` | When true, post `🔧 Running <tool>…` notices as the agent invokes tools (deduped, capped per turn) |
 | `sdk.persistentSession` | `CC_OCTO_SDK_PERSISTENT_SESSION` | `false` | When true, persist agent workspace state across messages via the SDK v2 Session API (resume by stored session id). `/reset` clears it. |
+| `groupConfigDir` | `CC_OCTO_GROUP_CONFIG_DIR` | *(unset)* | Directory of per-group instruction files (`<groupId>.md`). A match is injected into the system prompt as trusted custom instructions for that group. See [Per-group instructions](#per-group-instructions). |
 | `sdk.anthropicBaseUrl` | `ANTHROPIC_BASE_URL` | *(unset)* | Override the upstream Claude API endpoint. See [Self-hosted gateway](#self-hosted-gateway) below. |
 | `rateLimit.maxPerMinute` | `CC_OCTO_RATE_LIMIT_MAX_PER_MINUTE` | `5` | Max requests per minute per session |
 | `context.maxContextChars` | `CC_OCTO_CONTEXT_MAX_CHARS` | `6000` | Max characters of group context injected into prompts |
@@ -135,6 +136,39 @@ ANTHROPIC_BASE_URL=https://claude-gw.internal.example.com npm start
 ```
 
 Leave the field unset to talk to Anthropic's public endpoint directly.
+
+### Per-group instructions
+
+Give a specific group its own persona or rules without code changes: set
+`groupConfigDir` to a directory you control, and drop a `<groupId>.md` file in
+it (the group's channel id, e.g. `s12_345.md`). Its contents are injected into
+that group's system prompt as a trusted, **unsanitized** `[Group instructions]`
+block. Only groups use this; DMs key on the peer uid. The key is the channel id,
+so all topics under one `CommunityTopic` channel id share the same file.
+
+```bash
+CC_OCTO_GROUP_CONFIG_DIR=/home/deploy/cc-octo-groups npm start
+# /home/deploy/cc-octo-groups/s12_345.md:
+#   Always answer in formal English and cite sources.
+```
+
+> ⚠️ **Security — this is a trusted, unsanitized prompt-injection sink.** Its
+> safety depends entirely on the files being writable **only** by the operator.
+> Putting `groupConfigDir` outside `cwdBase` is required (the gateway refuses
+> otherwise) but **not sufficient**: under the shipped defaults (`allowedTools:
+> "*"` + `bypassPermissions`) the agent has `Bash`/`Write` and can write
+> **absolute** paths outside `cwdBase` — `cwdBase` is a starting dir, not a
+> chroot (see [Security Model](#security-model)). A malicious user could then
+> have the agent write `<groupConfigDir>/<otherGroup>.md` and inject persistent,
+> trusted instructions into another group. So you **must**:
+> - make `groupConfigDir` and its files **non-writable by the gateway process
+>   user** (e.g. root-owned, mode `0755`/`0644`), and/or
+> - harden the deployment (drop `Bash` from `allowedTools`, run unprivileged,
+>   sandbox the filesystem).
+>
+> As defense-in-depth the gateway refuses to inject a group/world-writable file,
+> but that is a backstop, not the guarantee. Files larger than 16 KiB are
+> truncated; an unsafe group id (path separators, `..`) is ignored.
 
 ### Multi-bot
 
@@ -322,7 +356,7 @@ src/
 | **v0.1** | Text messaging, streaming, session persistence, rate limiting, security model |
 | **v0.2** *(current)* | Media reception & sending (image/file/RichText), @mention, group context, per-session `cwdBase` isolation, self-hosted gateway, SSRF/prompt-injection hardening |
 | **v0.3** | Slash commands, tool progress, multi-bot, v2 Session API |
-| **v1.0** | GROUP.md/THREAD.md configuration, webhook mode |
+| **v1.0** | webhook mode |
 
 ## Contributing
 

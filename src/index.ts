@@ -22,6 +22,7 @@ import { ChannelType, MessageType } from './octo/types.js';
 import type { BotMessage } from './octo/types.js';
 import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } from './inbound.js';
 import { handleCommand } from './commands.js';
+import { loadGroupConfig } from './group-config.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes } from './file-inline-wrap.js';
 import { Buffer } from 'node:buffer';
 import { join } from 'node:path';
@@ -490,7 +491,7 @@ export async function handleMessage(
       // double-injecting history. We still persist to our own store (for the
       // non-persistent fallback, /reset, and group context), so this only
       // changes what the agent is *prompted* with, not what we record.
-      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void } | undefined;
+      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string } | undefined;
       let historyForQuery = historyPrefix;
       if (config.sdk.persistentSession) {
         const resume = store.getSdkSessionId(sessionKey);
@@ -499,6 +500,16 @@ export async function handleMessage(
           resume,
           onSessionId: (id: string) => store.setSdkSessionId(sessionKey, id),
         };
+      }
+
+      // v1.0 GROUP.md: inject operator-provided per-group instructions (from
+      // config.groupConfigDir/<channelId>.md) into the system prompt. Only for
+      // groups — DMs key on the peer uid, not a shared channel.
+      if (isGroup) {
+        const groupInstructions = loadGroupConfig(config.groupConfigDir, channelId);
+        if (groupInstructions) {
+          sessionOpts = { ...(sessionOpts ?? {}), groupInstructions };
+        }
       }
 
       const rawChunks = queryAgent(userContentForLLM, historyForQuery, contextStr, config, sessionCtx, onToolUse, sessionOpts);
