@@ -48,19 +48,22 @@ export function parseCommand(
   body: string,
 ): { name: string; args: string } | null {
   const firstLine = body.split('\n', 1)[0]?.trim() ?? '';
-  // Must start with a single slash followed by a letter (avoid matching paths
-  // like "/etc/passwd" being read as a command — those start with a slash but
-  // we still treat a leading-slash word as a command; the command set is
-  // closed, so an unknown command is reported rather than silently run).
-  const match = firstLine.match(/^\/([a-zA-Z][a-zA-Z0-9_-]*)\s*(.*)$/);
+  // The command name must be followed by a TOKEN BOUNDARY — end-of-line or
+  // whitespace — before any args. Without this, path/route-like text such as
+  // `/reset/foo`, `/config.json`, or `/help.md` would be parsed as the bare
+  // command and could trigger a destructive action (`/reset`). Requiring `\s+`
+  // (or EOL) after the name means only a real command token matches; anything
+  // glued to the name (`/foo.bar`, `/a/b`) is NOT a command and falls through
+  // to the normal agent pipeline.
+  const match = firstLine.match(/^\/([a-zA-Z][a-zA-Z0-9_-]*)(?:\s+(.*))?$/);
   if (!match) return null;
-  return { name: match[1].toLowerCase(), args: match[2].trim() };
+  return { name: match[1].toLowerCase(), args: (match[2] ?? '').trim() };
 }
 
 /** Human-readable list of supported commands. */
 const HELP_TEXT = [
   'Available commands:',
-  '• `/reset` — clear this conversation’s history (starts fresh)',
+  '• `/reset` — clear your own conversation history (does not affect the shared group context)',
   '• `/config` — show the current session settings',
   '• `/help` — show this message',
 ].join('\n');

@@ -217,6 +217,8 @@ describe('E2E smoke tests', () => {
     const reply = (sendMessage as ReturnType<typeof vi.fn>).mock.calls[0][0].content as string;
     expect(reply).toMatch(/cleared/i);
     expect(store.buildHistoryPrefix(USER_UID, 40)).toBe('');
+    // G8: a handled command still gets a read receipt.
+    expect(sendReadReceipt).toHaveBeenCalled();
   });
 
   it('/config replies without invoking the agent', async () => {

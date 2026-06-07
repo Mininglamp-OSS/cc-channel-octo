@@ -161,6 +161,18 @@ export async function handleMessage(
               content: command.reply,
             });
           }
+          // G8: send a read receipt for command messages too, mirroring the
+          // normal message path (otherwise handled commands would be the only
+          // processed messages that never get marked read).
+          if (msg.message_id && msg.channel_id && msg.channel_type !== undefined) {
+            sendReadReceipt({
+              apiUrl: config.apiUrl,
+              botToken: config.botToken,
+              channelId: msg.channel_id,
+              channelType: msg.channel_type,
+              messageIds: [msg.message_id],
+            }).catch((err) => console.error(`[cc-channel-octo] readReceipt failed: ${String(err)}`));
+          }
           return; // skip context, history, and the agent query entirely
         }
       }

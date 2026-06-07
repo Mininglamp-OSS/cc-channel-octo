@@ -60,6 +60,20 @@ describe('parseCommand', () => {
   it('captures hyphenated/underscored command names', () => {
     expect(parseCommand('/foo-bar_baz x')).toEqual({ name: 'foo-bar_baz', args: 'x' });
   });
+
+  it('requires a token boundary after the command name (no glued suffix)', () => {
+    // Path/route-like text must NOT parse as a command — guards against
+    // accidentally triggering destructive /reset via "/reset/foo".
+    expect(parseCommand('/reset/foo')).toBeNull();
+    expect(parseCommand('/config.json')).toBeNull();
+    expect(parseCommand('/help.md')).toBeNull();
+    expect(parseCommand('/etc/passwd please read')).toBeNull();
+  });
+
+  it('still parses a command with whitespace-separated args', () => {
+    expect(parseCommand('/reset')).toEqual({ name: 'reset', args: '' });
+    expect(parseCommand('/config now')).toEqual({ name: 'config', args: 'now' });
+  });
 });
 
 describe('handleCommand', () => {
@@ -160,12 +174,18 @@ describe('handleCommand', () => {
     expect(r.reply).toContain('/frobnicate');
   });
 
-  it('a path-like message that does not lead with a known slash word is still parsed as a command token', () => {
-    // Documents current behavior: "/etc" leads with a slash, so it is treated
-    // as an (unknown) command rather than forwarded. Acceptable — real prompts
-    // rarely start with a bare "/etc"; users can prefix with text if needed.
-    const r = handleCommand('/etc/passwd please read', KEY, store, config);
-    expect(r.handled).toBe(true);
-    expect(r.reply).toMatch(/unknown command/i);
+  it('path-like text glued to a command name is NOT treated as a command', () => {
+    // "/reset/foo" must fall through to the agent, never trigger /reset.
+    const r = handleCommand('/reset/foo', KEY, store, config);
+    expect(r.handled).toBe(false);
+  });
+
+  it('does not clear history for path-like "/reset/..." text', () => {
+    store.getOrCreate(KEY, 'ch', 1);
+    store.appendUser(KEY, 'keep me', 1);
+    const r = handleCommand('/reset/foo', KEY, store, config, 7);
+    expect(r.handled).toBe(false);
+    expect(store.buildHistoryPrefix(KEY, 40)).toContain('keep me');
+    expect(store.getResetBarrier(KEY)).toBeUndefined();
   });
 });

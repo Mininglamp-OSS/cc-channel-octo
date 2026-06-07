@@ -20,7 +20,7 @@ Users talk to a bot in Octo (DM or group @mention). The bot sends messages to Cl
 - **Streaming output** — Real-time response delivery via Octo's stream API with 800 ms throttled flushes, typing indicators, and automatic fallback to plain messages.
 - **Group chat awareness** — Responds only to @mentions. Injects recent group conversation as context so Claude understands the discussion.
 - **Session persistence** — SQLite-backed conversation history (40-message sliding window) with automatic 7-day expiry.
-- **In-chat commands** — `/reset` clears the current conversation, `/config` shows the active settings, `/help` lists commands. Scoped per-user (even in groups); subject to the same per-session rate limit as normal messages.
+- **In-chat commands** — `/reset` clears your own session's stored history (not the shared recent-group-context cache), `/config` shows the active settings, `/help` lists commands. Scoped per-user (even in groups); subject to the same per-session rate limit as normal messages.
 - **Rate limiting** — Per-session token bucket (default 5 req/min) with debounced rejection notices.
 - **Security by configuration** — `allowedTools` whitelist + per-session `cwdBase` isolation. No runtime permission prompts (headless mode).
 - **Zero infrastructure** — Single process, single SQLite file, `npm start` and go.
