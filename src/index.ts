@@ -48,6 +48,19 @@ async function main(): Promise<void> {
   // so per-user history and sandboxes never cross between bots.
   const stacks = await Promise.all(botConfigs.map((c) => startBot(c, multi)));
 
+  // Multi-bot loop guard: make every router aware of ALL bot ids in this
+  // process, so a mention-free group can't let one bot reply to another's
+  // messages (knownBotUids → looksLikeBot → dropped). Done after all gateways
+  // started, since botIds are only known post-registration.
+  if (multi) {
+    const allBotIds = stacks.map((s) => s.botId);
+    for (const s of stacks) {
+      for (const id of allBotIds) {
+        if (id !== s.botId) s.router.registerKnownBot(id);
+      }
+    }
+  }
+
   // Wire a single process-wide shutdown that drains every bot, so N gateways
   // don't each call process.exit. The per-gateway signal handlers are disabled
   // in multi-bot mode (handleSignals=false); we own the signals here.
@@ -66,6 +79,7 @@ async function main(): Promise<void> {
 
 interface BotStack {
   botId: string;
+  router: SessionRouter;
   shutdown: () => Promise<void>;
 }
 
@@ -142,7 +156,7 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   // Single-bot: the gateway's own SIGINT/SIGTERM handler invokes this.
   gateway.setShutdownCallback(shutdown);
 
-  return { botId: gateway.botId, shutdown };
+  return { botId: gateway.botId, router, shutdown };
 }
 
 
@@ -366,15 +380,19 @@ export async function handleMessage(
       // G4: Backfill history from API when local cache is empty for groups.
       // Only triggered on first interaction with a group (cold start) to avoid
       // duplicate API calls; checked via a sentinel marker stored in-memory.
+      // Multi-bot: the sentinel set is process-global but each bot has its own
+      // store, so key it by botId+sessionKey — otherwise bot A marking a session
+      // backfilled would make bot B skip backfill against its own empty DB.
+      const backfillKey = `${botId} ${sessionKey}`;
       let historyPrefix = store.buildSegmentedHistoryPrefix(sessionKey, config.context.historyLimit);
       if (
         isGroup &&
         !historyPrefix &&
-        !backfilledSessions.has(sessionKey) &&
+        !backfilledSessions.has(backfillKey) &&
         msg.channel_id &&
         msg.channel_type !== undefined
       ) {
-        backfilledSessions.add(sessionKey);
+        backfilledSessions.add(backfillKey);
         try {
           const apiMessages = await getChannelMessages({
             apiUrl: config.apiUrl,

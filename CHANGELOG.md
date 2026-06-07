@@ -15,11 +15,15 @@ While the major version is `0`, minor releases may carry breaking changes.
   inherits all top-level fields, and may override `apiUrl`/`dataDir`/`cwdBase`/
   `model`/`systemPrompt`/blocklists. Each bot gets a fully independent stack
   (gateway + router + store); `dataDir` and `cwdBase` are namespaced by id by
-  default so bots never share history or sandboxes. `resolveBotConfigs()` expands
-  the config and fails fast on missing/duplicate tokens or duplicate ids. In
-  multi-bot mode the orchestrator owns a single SIGINT/SIGTERM shutdown that
-  drains all bots (gateways skip their own signal handlers via a new
-  `handleSignals` option). Single-bot configs are unchanged.
+  default so bots never share history or sandboxes. Bot ids are validated as
+  conservative slugs (no path separators) to keep that namespacing safe.
+  `resolveBotConfigs()` expands the config and fails fast on missing/duplicate
+  tokens or duplicate/invalid ids. All bot ids are registered into every router
+  so a mention-free group can't trigger bot-to-bot reply loops, and the
+  cold-start backfill sentinel is keyed per bot. In multi-bot mode the
+  orchestrator owns a single SIGINT/SIGTERM shutdown that drains all bots
+  (gateways skip their own signal handlers via a new `handleSignals` option).
+  Single-bot configs are unchanged.
 - **Tool progress display** (v0.3, opt-in) — with `sdk.toolProgress`
   (`CC_OCTO_SDK_TOOL_PROGRESS=true`), the bot posts brief `🔧 Running <tool>…`
   notices as the agent invokes tools. `queryAgent` gained a non-breaking

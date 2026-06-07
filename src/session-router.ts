@@ -251,6 +251,14 @@ export class SessionRouter {
       if (!isMentionFree) {
         return null;
       }
+      // Multi-bot loop guard: in a mention-free group there is no @-mention gate
+      // to stop one bot from replying to another bot's plain-text message. Drop
+      // messages from known/bot-looking uids (unless explicitly whitelisted) so
+      // two bots in the same mention-free room cannot enter an unbounded reply
+      // loop. An @-mention still goes through (handled by the branch above).
+      if (this.looksLikeBot(msg.from_uid) && !this.isAllowedBot(msg.from_uid)) {
+        return null;
+      }
     }
 
     // Skip system events (group join/leave, etc.) — no user-facing reply needed.

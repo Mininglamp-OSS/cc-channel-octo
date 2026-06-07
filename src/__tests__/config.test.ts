@@ -765,4 +765,23 @@ describe('v0.3: resolveBotConfigs', () => {
     }));
     expect(() => resolveBotConfigs(cfg)).toThrow(/unsafe apiUrl/i);
   });
+
+  it.each(['../ops', 'a/b', '.', '..', 'a\\b', 'with space'])(
+    'rejects path-traversal/invalid bot id %j',
+    (badId) => {
+      const cfg = loadConfig(writeConfig({
+        apiUrl: 'https://a',
+        bots: [{ id: badId, botToken: 'bf_1' }],
+      }));
+      expect(() => resolveBotConfigs(cfg)).toThrow(/invalid bot id/i);
+    },
+  );
+
+  it('accepts conservative slug ids', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a',
+      bots: [{ id: 'support-bot.1_v2', botToken: 'bf_1' }],
+    }));
+    expect(resolveBotConfigs(cfg)[0].botId).toBe('support-bot.1_v2');
+  });
 });

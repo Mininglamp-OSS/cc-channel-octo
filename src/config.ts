@@ -427,6 +427,15 @@ export function resolveBotConfigs(config: Config): Config[] {
       throw new Error(`Multi-bot: bots[${i}] is missing required botToken`);
     }
     const id = bot.id ?? `bot${i}`;
+    // The id becomes a path segment for the default dataDir/cwdBase namespace,
+    // so restrict it to a conservative slug — otherwise ids like "../ops" or
+    // "a/b" could escape or alias the intended per-bot directory, defeating the
+    // isolation the feature promises.
+    if (!/^[a-zA-Z0-9._-]+$/.test(id) || id === '.' || id === '..') {
+      throw new Error(
+        `Multi-bot: invalid bot id "${id}" — use only letters, digits, dot, underscore, hyphen (no path separators)`,
+      );
+    }
     if (seenIds.has(id)) {
       throw new Error(`Multi-bot: duplicate bot id "${id}" — ids must be unique`);
     }
