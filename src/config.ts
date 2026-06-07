@@ -102,7 +102,13 @@ export interface Config {
  * inherits the top-level value.
  */
 export interface BotOverride {
-  /** Stable id used to namespace this bot's data dir (e.g. `support`, `ops`). */
+  /**
+   * Stable id used to namespace this bot's data dir / sandbox (e.g. `support`,
+   * `ops`). RECOMMENDED — when omitted it defaults to the positional `bot<N>`
+   * (bot0, bot1, …), which works but produces less stable, index-dependent
+   * directory names (reordering the array changes them). Must be a conservative
+   * slug: letters, digits, dot, underscore, hyphen — no path separators.
+   */
   id?: string;
   /** Required — this bot's Octo bot token. */
   botToken: string;

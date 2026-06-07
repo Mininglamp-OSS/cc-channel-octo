@@ -51,7 +51,9 @@ async function main(): Promise<void> {
   // Multi-bot loop guard: make every router aware of ALL bot ids in this
   // process, so a mention-free group can't let one bot reply to another's
   // messages (knownBotUids → looksLikeBot → dropped). Done after all gateways
-  // started, since botIds are only known post-registration.
+  // started (botIds are only known post-registration) but BEFORE any router
+  // begins handling messages, so there is no window where a sibling bot's
+  // message could slip through unrecognized.
   if (multi) {
     const allBotIds = stacks.map((s) => s.botId);
     for (const s of stacks) {
@@ -60,6 +62,9 @@ async function main(): Promise<void> {
       }
     }
   }
+
+  // Now that cross-registration is done, let every bot start handling messages.
+  for (const s of stacks) s.beginHandling();
 
   // Wire a single process-wide shutdown that drains every bot, so N gateways
   // don't each call process.exit. The per-gateway signal handlers are disabled
@@ -80,6 +85,7 @@ async function main(): Promise<void> {
 interface BotStack {
   botId: string;
   router: SessionRouter;
+  beginHandling: () => void;
   shutdown: () => Promise<void>;
 }
 
@@ -136,17 +142,23 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   // --- Active handler tracking (Q6: in-flight drain on shutdown) ---
   const activeHandlers = new Set<Promise<void>>();
 
-  gateway.setMessageHandler((msg: BotMessage) => {
-    if (gateway.draining) return;
-    const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId)
-      .catch((err) => {
-        console.error(`[cc-channel-octo] ${label}Unhandled message handler error:`, err instanceof Error ? err.message : err);
-      })
-      .finally(() => {
-        activeHandlers.delete(p);
-      });
-    activeHandlers.add(p);
-  });
+  // Wiring the message handler is deferred to beginHandling() so the orchestrator
+  // can register all sibling bot ids into this router FIRST — otherwise there is
+  // a startup window where a mention-free group could deliver a sibling bot's
+  // message before this router knows it's a bot.
+  const beginHandling = (): void => {
+    gateway.setMessageHandler((msg: BotMessage) => {
+      if (gateway.draining) return;
+      const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId)
+        .catch((err) => {
+          console.error(`[cc-channel-octo] ${label}Unhandled message handler error:`, err instanceof Error ? err.message : err);
+        })
+        .finally(() => {
+          activeHandlers.delete(p);
+        });
+      activeHandlers.add(p);
+    });
+  };
 
   const shutdown = async (): Promise<void> => {
     clearInterval(cwdCleanupTimer);
@@ -156,7 +168,7 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   // Single-bot: the gateway's own SIGINT/SIGTERM handler invokes this.
   gateway.setShutdownCallback(shutdown);
 
-  return { botId: gateway.botId, router, shutdown };
+  return { botId: gateway.botId, router, beginHandling, shutdown };
 }
 
 
@@ -383,7 +395,7 @@ export async function handleMessage(
       // Multi-bot: the sentinel set is process-global but each bot has its own
       // store, so key it by botId+sessionKey — otherwise bot A marking a session
       // backfilled would make bot B skip backfill against its own empty DB.
-      const backfillKey = `${botId} ${sessionKey}`;
+      const backfillKey = `${botId}\u0000${sessionKey}`;
       let historyPrefix = store.buildSegmentedHistoryPrefix(sessionKey, config.context.historyLimit);
       if (
         isGroup &&
