@@ -21,6 +21,7 @@ import type { HistoricalMessage } from './octo/api.js';
 import { ChannelType, MessageType } from './octo/types.js';
 import type { BotMessage } from './octo/types.js';
 import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } from './inbound.js';
+import { handleCommand } from './commands.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes } from './file-inline-wrap.js';
 import { Buffer } from 'node:buffer';
 import { join } from 'node:path';
@@ -141,6 +142,28 @@ export async function handleMessage(
     try {
       // --- Session ---
       store.getOrCreate(sessionKey, channelId, channelType);
+
+      // --- v0.3: in-chat slash commands (/reset, /config, /help) ---
+      // Handled before group-context caching, history append, and the agent
+      // query — so a command never reaches the LLM, is not stored as a turn,
+      // and does not leak into other members' group context. Only text
+      // messages carry cleanContent; non-text payloads skip this entirely.
+      // Scoped to this sessionKey (per-user, even in groups).
+      if (result.cleanContent !== undefined) {
+        const command = handleCommand(result.cleanContent, sessionKey, store, config);
+        if (command.handled) {
+          if (command.reply) {
+            await sendMessage({
+              apiUrl: config.apiUrl,
+              botToken: config.botToken,
+              channelId,
+              channelType,
+              content: command.reply,
+            });
+          }
+          return; // skip context, history, and the agent query entirely
+        }
+      }
 
       // --- Group context: refresh members + build context string ---
       let contextStr = '';

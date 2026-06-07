@@ -20,6 +20,7 @@ Users talk to a bot in Octo (DM or group @mention). The bot sends messages to Cl
 - **Streaming output** — Real-time response delivery via Octo's stream API with 800 ms throttled flushes, typing indicators, and automatic fallback to plain messages.
 - **Group chat awareness** — Responds only to @mentions. Injects recent group conversation as context so Claude understands the discussion.
 - **Session persistence** — SQLite-backed conversation history (40-message sliding window) with automatic 7-day expiry.
+- **In-chat commands** — `/reset` clears the current conversation, `/config` shows the active settings, `/help` lists commands. Scoped per-user (even in groups).
 - **Rate limiting** — Per-session token bucket (default 5 req/min) with debounced rejection notices.
 - **Security by configuration** — `allowedTools` whitelist + per-session `cwdBase` isolation. No runtime permission prompts (headless mode).
 - **Zero infrastructure** — Single process, single SQLite file, `npm start` and go.
@@ -278,7 +279,6 @@ src/
 
 ## Known Limitations (v0.2)
 
-- **No slash commands** — `/reset`, `/config` and similar in-chat controls are not yet implemented (planned for v0.3).
 - **Per-session `cwdBase` isolation** — Each session (DM peer, or individual group member) gets its own SHA-256 hex sandbox under `cwdBase`, partitioned by the same key as conversation history; idle sandboxes (>7d) are auto-cleaned every 6h. Note: `cwdBase` separates sessions from each other but does not confine a session to its directory (absolute-path reads via Bash/Read remain possible) — see the Security Model section.
 - **Stateless sessions** — Uses the v1 `query()` API. Workspace state (open files, command history) does not persist across messages. The v2 Session API is planned for v0.3.
 - **Single bot** — One bot per process. Multi-bot support is planned for v0.3.
@@ -289,7 +289,7 @@ src/
 |---------|-------|
 | **v0.1** | Text messaging, streaming, session persistence, rate limiting, security model |
 | **v0.2** *(current)* | Media reception & sending (image/file/RichText), @mention, group context, per-session `cwdBase` isolation, self-hosted gateway, SSRF/prompt-injection hardening |
-| **v0.3** | v2 Session API, multi-bot support, `/reset` and `/config` commands, tool progress display |
+| **v0.3** | v2 Session API, multi-bot support, tool progress display |
 | **v1.0** | GROUP.md/THREAD.md configuration, webhook mode |
 
 ## Contributing

@@ -199,6 +199,32 @@ describe('E2E smoke tests', () => {
     expect(history).toContain('[assistant]: Hello from Claude');
   });
 
+  // --- 1b. v0.3 slash commands through the real pipeline ---
+
+  it('/reset clears history, replies, and does NOT call the agent', async () => {
+    // Seed a prior turn.
+    await simulateMessage(makeDmMsg('first'), config, store, router, groupContext, streamRelay);
+    expect(store.buildHistoryPrefix(USER_UID, 40)).not.toBe('');
+    (queryAgent as ReturnType<typeof vi.fn>).mockClear();
+    (sendMessage as ReturnType<typeof vi.fn>).mockClear();
+
+    await simulateMessage(makeDmMsg('/reset'), config, store, router, groupContext, streamRelay);
+
+    // Command path: agent untouched, a confirmation sent, history cleared.
+    expect(queryAgent).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    const reply = (sendMessage as ReturnType<typeof vi.fn>).mock.calls[0][0].content as string;
+    expect(reply).toMatch(/cleared/i);
+    expect(store.buildHistoryPrefix(USER_UID, 40)).toBe('');
+  });
+
+  it('/config replies without invoking the agent', async () => {
+    await simulateMessage(makeDmMsg('/config'), config, store, router, groupContext, streamRelay);
+    expect(queryAgent).not.toHaveBeenCalled();
+    const reply = (sendMessage as ReturnType<typeof vi.fn>).mock.calls[0][0].content as string;
+    expect(reply).toContain('permissionMode');
+  });
+
   // --- 2. Group @mention triggers processing ---
 
   it('Group @mention: triggers agent and stores history', async () => {
