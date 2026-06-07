@@ -340,9 +340,31 @@ describe('Heartbeat consecutive failures', () => {
 
     await gw.stop();
   });
-});
 
-// ─── 5. Two-phase startup (v0.3 multi-bot lifecycle) ────────────────────
+  it('webhook mode token refresh re-registers WITHOUT opening a socket', async () => {
+    vi.mocked(sendHeartbeat).mockRejectedValue(new Error('network error'));
+
+    // Webhook mode: register() + startServices() (heartbeat + signals), no WS.
+    const gw = new OctoGateway(makeConfig(), { handleSignals: false });
+    await gw.register();
+    gw.startServices();
+    expect(vi.mocked(WKSocket)).not.toHaveBeenCalled();
+    const initialRegCalls = vi.mocked(registerBot).mock.calls.length;
+
+    // 3 heartbeat failures → token refresh.
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(100);
+
+    // Token WAS refreshed (re-registered)...
+    expect(vi.mocked(registerBot).mock.calls.length).toBeGreaterThan(initialRegCalls);
+    // ...but NO socket was ever opened — webhook mode must not create a WS.
+    expect(vi.mocked(WKSocket)).not.toHaveBeenCalled();
+
+    await gw.stop();
+  });
+});
 
 describe('Two-phase startup: register() then connect()', () => {
   beforeEach(() => {

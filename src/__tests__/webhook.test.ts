@@ -4,6 +4,7 @@
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { request as httpRequest } from 'node:http';
 import { parseWebhookBody, WebhookServer, MAX_WEBHOOK_BODY_BYTES } from '../webhook.js';
 import type { BotMessage } from '../octo/types.js';
 import { MessageType } from '../octo/types.js';
@@ -138,5 +139,35 @@ describe('WebhookServer (real HTTP round-trip)', () => {
     }).catch(() => ({ status: 413 } as Response)); // connection may be destroyed
     expect(res.status).toBe(413);
     expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('decodes a multibyte body split across TCP chunks (no mojibake)', async () => {
+    const received: BotMessage[] = [];
+    await start((m) => received.push(m));
+    const port = nextPort - 1;
+
+    // Build a body whose CJK content forces a multibyte codepoint to straddle
+    // the split point, then write it as two raw TCP chunks.
+    const content = '你好世界'.repeat(50); // 3-byte chars
+    const bodyBuf = Buffer.from(JSON.stringify({ ...validMsg(), payload: { type: 1, content } }), 'utf-8');
+    const mid = Math.floor(bodyBuf.length / 2) - 1; // likely inside a 3-byte char
+
+    const status: number = await new Promise((resolve, reject) => {
+      const req = httpRequest(
+        { host: '127.0.0.1', port, path: PATH, method: 'POST',
+          headers: { 'x-webhook-secret': SECRET, 'content-length': bodyBuf.length } },
+        (res) => { res.resume(); resolve(res.statusCode ?? 0); },
+      );
+      req.on('error', reject);
+      req.write(bodyBuf.subarray(0, mid));
+      // second chunk after a tick so they arrive as separate 'data' events
+      setTimeout(() => req.end(bodyBuf.subarray(mid)), 5);
+    });
+
+    expect(status).toBe(200);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(received).toHaveLength(1);
+    // The reassembled content must equal the original — not corrupted at the seam.
+    expect((received[0].payload as { content: string }).content).toBe(content);
   });
 });

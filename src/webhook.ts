@@ -145,19 +145,25 @@ export class WebhookServer {
       return;
     }
 
-    let body = '';
+    // Buffer raw chunks and decode once at the end — decoding per chunk would
+    // corrupt a multibyte (e.g. CJK) codepoint split across a chunk boundary.
+    const chunks: Buffer[] = [];
+    let size = 0;
     let tooLarge = false;
     req.on('data', (chunk: Buffer) => {
       if (tooLarge) return;
-      body += chunk.toString('utf-8');
-      if (Buffer.byteLength(body, 'utf-8') > MAX_WEBHOOK_BODY_BYTES) {
+      size += chunk.length;
+      if (size > MAX_WEBHOOK_BODY_BYTES) {
         tooLarge = true;
         res.writeHead(413).end();
         req.destroy();
+        return;
       }
+      chunks.push(chunk);
     });
     req.on('end', () => {
       if (tooLarge) return;
+      const body = Buffer.concat(chunks).toString('utf-8');
       const msg = parseWebhookBody(body);
       if (!msg) {
         res.writeHead(400).end();
