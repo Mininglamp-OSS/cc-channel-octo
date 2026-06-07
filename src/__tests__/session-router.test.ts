@@ -629,3 +629,58 @@ describe('G20: per-user cross-channel rate limit', () => {
     expect(replyCalls.length).toBeLessThanOrEqual(2);
   });
 });
+
+// ─── v0.3 multi-bot: mention-free group bot-loop guard ─────────────────
+
+describe('multi-bot loop guard in mention-free groups', () => {
+  const GROUP = 'mf-group';
+
+  function mfConfig(): Config {
+    return makeConfig({ mentionFreeGroups: [GROUP] });
+  }
+  function mfMsg(fromUid: string): BotMessage {
+    return makeMsg({
+      from_uid: fromUid,
+      channel_id: GROUP,
+      channel_type: ChannelType.Group,
+      payload: { type: MessageType.Text, content: 'auto reply' },
+    });
+  }
+
+  it('processes a human message in a mention-free group (baseline)', async () => {
+    const r = new SessionRouter(mfConfig(), ROBOT_ID);
+    const result = await r.route(mfMsg('human-1'));
+    expect(result?.shouldProcess).toBe(true);
+  });
+
+  it('drops a _bot-suffixed sender in a mention-free group (no mention)', async () => {
+    const r = new SessionRouter(mfConfig(), ROBOT_ID);
+    const result = await r.route(mfMsg('helper_bot'));
+    expect(result).toBeNull();
+  });
+
+  it('drops a registered sibling bot in a mention-free group', async () => {
+    const r = new SessionRouter(mfConfig(), ROBOT_ID);
+    r.registerKnownBot('bot-002'); // sibling bot id (no _bot suffix)
+    const result = await r.route(mfMsg('bot-002'));
+    expect(result).toBeNull();
+  });
+
+  it('still answers a sibling bot that explicitly @-mentions us', async () => {
+    const r = new SessionRouter(mfConfig(), ROBOT_ID);
+    r.registerKnownBot('bot-002');
+    const msg = mfMsg('bot-002');
+    msg.payload.mention = { uids: [ROBOT_ID] };
+    const result = await r.route(msg);
+    expect(result?.shouldProcess).toBe(true);
+  });
+
+  it('honors allowedBotUids whitelist in mention-free groups', async () => {
+    const r = new SessionRouter(
+      makeConfig({ mentionFreeGroups: [GROUP], allowedBotUids: ['trusted_bot'] }),
+      ROBOT_ID,
+    );
+    const result = await r.route(mfMsg('trusted_bot'));
+    expect(result?.shouldProcess).toBe(true);
+  });
+});

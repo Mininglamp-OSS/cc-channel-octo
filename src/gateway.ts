@@ -19,6 +19,8 @@ export type MessageHandler = (msg: BotMessage) => void;
 export class OctoGateway {
   private socket: WKSocket | null = null;
   private robotId = '';
+  // Stored registration result from register(); consumed by connect().
+  private registration: Awaited<ReturnType<typeof registerBot>> | null = null;
   // G18: owner_uid from registerBot; used by SessionRouter for future permission model.
   private _ownerUid = '';
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -37,7 +39,10 @@ export class OctoGateway {
   private heartbeatFailCount = 0;
   private readonly MAX_HEARTBEAT_FAILURES = 3;
 
-  constructor(private readonly config: Config) {
+  constructor(
+    private readonly config: Config,
+    private readonly options: { handleSignals?: boolean } = {},
+  ) {
     this.lockFilePath = join(config.dataDir, 'gateway.lock');
   }
 
@@ -55,12 +60,55 @@ export class OctoGateway {
     this.onMessage = handler;
   }
 
-  /** Start the gateway: acquire lock → register bot → connect WS → start heartbeat */
+  /**
+   * Start the gateway: register → connect WS → heartbeat. Convenience wrapper
+   * that does registration and connection in one call (single-bot path + tests).
+   * Multi-bot startup calls register() and connect() separately so no socket
+   * begins ACKing messages before its message handler is installed.
+   */
   async start(): Promise<void> {
+    await this.register();
+    this.connect();
+  }
+
+  /**
+   * Phase 1 of startup: acquire the lock and register the bot over REST. This
+   * populates botId/ownerUid but does NOT open the WebSocket, so no messages can
+   * arrive yet. Safe to call before the message handler is wired.
+   */
+  async register(): Promise<void> {
     this.acquireLock();
-    await this.registerAndConnect();
+    const reg = await registerBot({
+      apiUrl: this.config.apiUrl,
+      botToken: this.config.botToken,
+      agentPlatform: 'cc-channel-octo',
+      agentVersion: PKG_VERSION,
+    });
+    this.robotId = reg.robot_id;
+    this._ownerUid = reg.owner_uid;
+    this.registration = reg;
+    console.log(`Bot registered: robot_id=${reg.robot_id}`);
+  }
+
+  /**
+   * Phase 2 of startup: open the WebSocket and start the heartbeat. Call only
+   * AFTER setMessageHandler() so inbound messages are dispatched, not ACK'd and
+   * dropped. Registers signal handlers unless handleSignals is false.
+   */
+  connect(): void {
+    if (!this.registration) {
+      throw new Error('OctoGateway.connect() called before register()');
+    }
+    const reg = this.registration;
+    this.socket = this.createSocket(reg.ws_url, reg.robot_id, reg.im_token);
+    this.socket.connect();
     this.startHeartbeat();
-    this.setupShutdownHandlers();
+    // Multi-bot: the orchestrator owns a single combined SIGINT/SIGTERM handler,
+    // so individual gateways skip registering their own (default true keeps the
+    // single-bot behavior unchanged).
+    if (this.options.handleSignals !== false) {
+      this.setupShutdownHandlers();
+    }
   }
 
   /** Whether the gateway is draining (rejecting new messages). */
@@ -173,22 +221,7 @@ export class OctoGateway {
   }
 
   // --- Bot registration + WS connection ---
-
-  private async registerAndConnect(): Promise<void> {
-    const reg = await registerBot({
-      apiUrl: this.config.apiUrl,
-      botToken: this.config.botToken,
-      agentPlatform: 'cc-channel-octo',
-      agentVersion: PKG_VERSION,
-    });
-
-    this.robotId = reg.robot_id;
-    this._ownerUid = reg.owner_uid;
-    console.log(`Bot registered: robot_id=${reg.robot_id}`);
-
-    this.socket = this.createSocket(reg.ws_url, reg.robot_id, reg.im_token);
-    this.socket.connect();
-  }
+  // (register() + connect() above split the two phases; see start().)
 
   private handleMessage(msg: BotMessage): void {
     if (this._draining) return; // Q6: reject new messages during shutdown

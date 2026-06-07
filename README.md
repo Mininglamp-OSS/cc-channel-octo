@@ -24,6 +24,7 @@ Users talk to a bot in Octo (DM or group @mention). The bot sends messages to Cl
 - **In-chat commands** — `/reset` clears your own session's stored history (not the shared recent-group-context cache), `/config` shows the active settings, `/help` lists commands. Scoped per-user (even in groups); subject to the same per-session rate limit as normal messages.
 - **Rate limiting** — Per-session token bucket (default 5 req/min) with debounced rejection notices.
 - **Security by configuration** — `allowedTools` whitelist + per-session `cwdBase` isolation. No runtime permission prompts (headless mode).
+- **Multi-bot** — Run several independent bots in one process via a `bots[]` config array; each gets its own token, data directory, and sandbox root (no shared history).
 - **Zero infrastructure** — Single process, single SQLite file, `npm start` and go.
 
 ## Quick Start
@@ -133,6 +134,35 @@ ANTHROPIC_BASE_URL=https://claude-gw.internal.example.com npm start
 ```
 
 Leave the field unset to talk to Anthropic's public endpoint directly.
+
+### Multi-bot
+
+To run several bots from one process, add a `bots` array instead of (or in
+addition to) the single top-level `botToken`. Each entry needs its own
+`botToken` and should set a stable `id` (slug: letters, digits, `.`, `_`, `-`).
+If `id` is omitted it falls back to the positional `bot0`, `bot1`, … — which
+works but produces index-dependent directory names, so prefer an explicit id.
+Each entry inherits every top-level field and may override `apiUrl`, `dataDir`,
+`cwdBase`, `model`, `systemPrompt`, `botBlocklist`, and the mention lists:
+
+```jsonc
+{
+  "apiUrl": "https://your-octo-instance.com",
+  "dataDir": "./data",
+  "cwdBase": "/home/deploy/cc-octo-sandboxes",
+  "bots": [
+    { "id": "support", "botToken": "bf_AAA" },
+    { "id": "ops", "botToken": "bf_BBB", "model": "claude-opus-4-8" }
+  ]
+}
+```
+
+Each bot runs a fully independent stack (gateway, router, store). By default its
+`dataDir` and `cwdBase` are namespaced by `id` (`./data/support`,
+`/home/deploy/cc-octo-sandboxes/support`, …), so **bots never share
+conversation history or working directories**. Set `dataDir`/`cwdBase` on an
+entry to override that. When `bots` is absent, the process runs a single bot
+from the top-level fields exactly as before.
 
 ## Security Model
 
@@ -283,7 +313,6 @@ src/
 
 - **Per-session `cwdBase` isolation** — Each session (DM peer, or individual group member) gets its own SHA-256 hex sandbox under `cwdBase`, partitioned by the same key as conversation history; idle sandboxes (>7d) are auto-cleaned every 6h. Note: `cwdBase` separates sessions from each other but does not confine a session to its directory (absolute-path reads via Bash/Read remain possible) — see the Security Model section.
 - **Stateless sessions** — Uses the v1 `query()` API. Workspace state (open files, command history) does not persist across messages. The v2 Session API is planned for v0.3.
-- **Single bot** — One bot per process. Multi-bot support is planned for v0.3.
 
 ## Roadmap
 
@@ -291,7 +320,7 @@ src/
 |---------|-------|
 | **v0.1** | Text messaging, streaming, session persistence, rate limiting, security model |
 | **v0.2** *(current)* | Media reception & sending (image/file/RichText), @mention, group context, per-session `cwdBase` isolation, self-hosted gateway, SSRF/prompt-injection hardening |
-| **v0.3** | v2 Session API, multi-bot support |
+| **v0.3** | v2 Session API |
 | **v1.0** | GROUP.md/THREAD.md configuration, webhook mode |
 
 ## Contributing

@@ -77,6 +77,49 @@ export interface Config {
   allowedBotUids?: string[];
   /** Group IDs where the bot responds without being @mentioned (G12). */
   mentionFreeGroups?: string[];
+  /**
+   * v0.3 multi-bot: optional per-bot overrides. When present and non-empty, the
+   * process runs ONE independent bot per entry, each with its own gateway,
+   * router, store, and (by default) data directory — so bots never share history
+   * or working dirs. Each entry inherits every top-level field and overrides the
+   * listed ones; `botToken` is required per entry. When absent, the process runs
+   * a single bot from the top-level fields exactly as before.
+   *
+   * Resolved into concrete per-bot Config objects by `resolveBotConfigs()`.
+   */
+  bots?: BotOverride[];
+  /**
+   * v0.3 multi-bot: stable identifier for THIS bot, used to namespace its data
+   * directory and logs when running multiple bots. Defaults to `default` for the
+   * single-bot case. Populated by `resolveBotConfigs()`.
+   */
+  botId?: string;
+}
+
+/**
+ * v0.3 multi-bot: one bot's overrides layered on the base config. Every field is
+ * optional except `botToken` (each bot needs its own identity). An omitted field
+ * inherits the top-level value.
+ */
+export interface BotOverride {
+  /**
+   * Stable id used to namespace this bot's data dir / sandbox (e.g. `support`,
+   * `ops`). RECOMMENDED — when omitted it defaults to the positional `bot<N>`
+   * (bot0, bot1, …), which works but produces less stable, index-dependent
+   * directory names (reordering the array changes them). Must be a conservative
+   * slug: letters, digits, dot, underscore, hyphen — no path separators.
+   */
+  id?: string;
+  /** Required — this bot's Octo bot token. */
+  botToken: string;
+  apiUrl?: string;
+  dataDir?: string;
+  cwdBase?: string;
+  model?: string;
+  systemPrompt?: string;
+  botBlocklist?: string[];
+  allowedBotUids?: string[];
+  mentionFreeGroups?: string[];
 }
 
 type PartialConfig = {
@@ -94,6 +137,7 @@ type PartialConfig = {
   botBlocklist?: string[];
   allowedBotUids?: string[];
   mentionFreeGroups?: string[];
+  bots?: BotOverride[];
 };
 
 function defaults(): Config {
@@ -192,6 +236,7 @@ function mergeConfig(base: Config, override: PartialConfig): Config {
     botBlocklist: override.botBlocklist ?? base.botBlocklist,
     allowedBotUids: override.allowedBotUids ?? base.allowedBotUids,
     mentionFreeGroups: override.mentionFreeGroups ?? base.mentionFreeGroups,
+    bots: override.bots ?? base.bots,
   };
 }
 
@@ -333,7 +378,11 @@ export function loadConfig(configPath?: string): Config {
   const merged = mergeConfig(defaults(), fileCfg);
   const final = applyEnv(merged);
 
-  if (!final.botToken) {
+  const hasBots = Array.isArray(final.bots) && final.bots.length > 0;
+
+  // In multi-bot mode the per-bot tokens live in `bots[]`, so the top-level
+  // botToken is optional; resolveBotConfigs() validates each entry's token.
+  if (!final.botToken && !hasBots) {
     throw new Error('Missing required config: botToken (set CC_OCTO_BOT_TOKEN or config.json)');
   }
   if (!final.apiUrl) {
@@ -357,4 +406,82 @@ export function loadConfig(configPath?: string): Config {
   }
 
   return final;
+}
+
+/**
+ * v0.3 multi-bot: expand a loaded Config into one concrete Config per bot.
+ *
+ * - Single-bot (no `bots`): returns `[config]` with `botId` defaulted to
+ *   `default`, unchanged otherwise — fully backward compatible.
+ * - Multi-bot: returns one Config per `bots[]` entry. Each inherits the base
+ *   config and applies its overrides. To guarantee bots never share history,
+ *   cwd, or lock files, each bot's `dataDir` and `cwdBase` are namespaced by its
+ *   id UNLESS the entry sets them explicitly.
+ *
+ * Throws on missing/duplicate bot tokens or duplicate ids (fail fast at boot).
+ */
+export function resolveBotConfigs(config: Config): Config[] {
+  const bots = config.bots;
+  if (!bots || bots.length === 0) {
+    return [{ ...config, botId: config.botId ?? 'default' }];
+  }
+
+  const seenIds = new Set<string>();
+  const seenTokens = new Set<string>();
+  return bots.map((bot, i) => {
+    if (!bot.botToken) {
+      throw new Error(`Multi-bot: bots[${i}] is missing required botToken`);
+    }
+    const id = bot.id ?? `bot${i}`;
+    // The id becomes a path segment for the default dataDir/cwdBase namespace,
+    // so restrict it to a conservative slug — otherwise ids like "../ops" or
+    // "a/b" could escape or alias the intended per-bot directory, defeating the
+    // isolation the feature promises.
+    if (!/^[a-zA-Z0-9._-]+$/.test(id) || id === '.' || id === '..') {
+      throw new Error(
+        `Multi-bot: invalid bot id "${id}" — use only letters, digits, dot, underscore, hyphen (no path separators)`,
+      );
+    }
+    if (seenIds.has(id)) {
+      throw new Error(`Multi-bot: duplicate bot id "${id}" — ids must be unique`);
+    }
+    seenIds.add(id);
+    if (seenTokens.has(bot.botToken)) {
+      throw new Error(`Multi-bot: duplicate botToken across bots — each bot needs a distinct token`);
+    }
+    seenTokens.add(bot.botToken);
+
+    // Namespace data dir + cwd base by id so bots are isolated by default.
+    const baseDataDir = config.dataDir;
+    const baseCwd = config.cwdBase ?? config.cwd;
+    const resolved: Config = {
+      ...config,
+      bots: undefined, // a per-bot config is single-bot
+      botId: id,
+      botToken: bot.botToken,
+      apiUrl: bot.apiUrl ?? config.apiUrl,
+      dataDir: bot.dataDir ?? joinPath(baseDataDir, id),
+      cwdBase: bot.cwdBase ?? joinPath(baseCwd, id),
+      cwd: bot.cwdBase ?? joinPath(baseCwd, id),
+      botBlocklist: bot.botBlocklist ?? config.botBlocklist,
+      allowedBotUids: bot.allowedBotUids ?? config.allowedBotUids,
+      mentionFreeGroups: bot.mentionFreeGroups ?? config.mentionFreeGroups,
+      sdk: {
+        ...config.sdk,
+        ...(bot.model !== undefined ? { model: bot.model } : {}),
+        ...(bot.systemPrompt !== undefined ? { systemPrompt: bot.systemPrompt } : {}),
+      },
+    };
+    if (!isAllowedApiUrl(resolved.apiUrl)) {
+      throw new Error(
+        `Multi-bot: unsafe apiUrl for bot "${id}": ${resolved.apiUrl} (SSRF protection)`,
+      );
+    }
+    return resolved;
+  });
+}
+
+/** Join two path segments without importing node:path into the type surface. */
+function joinPath(a: string, b: string): string {
+  return a.replace(/\/+$/, '') + '/' + b;
 }
