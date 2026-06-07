@@ -21,6 +21,7 @@ import type { HistoricalMessage } from './octo/api.js';
 import { ChannelType, MessageType } from './octo/types.js';
 import type { BotMessage } from './octo/types.js';
 import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } from './inbound.js';
+import { handleCommand } from './commands.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes } from './file-inline-wrap.js';
 import { Buffer } from 'node:buffer';
 import { join } from 'node:path';
@@ -141,6 +142,40 @@ export async function handleMessage(
     try {
       // --- Session ---
       store.getOrCreate(sessionKey, channelId, channelType);
+
+      // --- v0.3: in-chat slash commands (/reset, /config, /help) ---
+      // Handled before group-context caching, history append, and the agent
+      // query — so a command never reaches the LLM, is not stored as a turn,
+      // and does not leak into other members' group context. Only text
+      // messages carry cleanContent; non-text payloads skip this entirely.
+      // Scoped to this sessionKey (per-user, even in groups).
+      if (result.cleanContent !== undefined) {
+        const command = handleCommand(result.cleanContent, sessionKey, store, config, msg.message_seq);
+        if (command.handled) {
+          if (command.reply) {
+            await sendMessage({
+              apiUrl: config.apiUrl,
+              botToken: config.botToken,
+              channelId,
+              channelType,
+              content: command.reply,
+            });
+          }
+          // G8: send a read receipt for command messages too, mirroring the
+          // normal message path (otherwise handled commands would be the only
+          // processed messages that never get marked read).
+          if (msg.message_id && msg.channel_id && msg.channel_type !== undefined) {
+            sendReadReceipt({
+              apiUrl: config.apiUrl,
+              botToken: config.botToken,
+              channelId: msg.channel_id,
+              channelType: msg.channel_type,
+              messageIds: [msg.message_id],
+            }).catch((err) => console.error(`[cc-channel-octo] readReceipt failed: ${String(err)}`));
+          }
+          return; // skip context, history, and the agent query entirely
+        }
+      }
 
       // --- Group context: refresh members + build context string ---
       let contextStr = '';
@@ -322,7 +357,11 @@ export async function handleMessage(
             // turns (PR#33 follow-up: previously every backfilled message
             // was stored as user, which made the LLM see its own past words
             // as if the user had said them).
-            seedHistoryFromApi(store, sessionKey, apiMessages, botId);
+            //
+            // v0.3 /reset barrier: skip any historical message at or before the
+            // reset point so a cleared conversation is not resurrected here.
+            const resetBarrier = store.getResetBarrier(sessionKey);
+            seedHistoryFromApi(store, sessionKey, apiMessages, botId, resetBarrier);
             historyPrefix = store.buildSegmentedHistoryPrefix(sessionKey, config.context.historyLimit);
           }
         } catch (err) {
@@ -470,12 +509,19 @@ function seedHistoryFromApi(
   sessionKey: string,
   apiMessages: HistoricalMessage[],
   botId: string,
+  resetBarrier?: number,
 ): void {
   // Older messages first — sync API returns newest-first depending on pull_mode.
   const ordered = apiMessages
     .slice()
     .sort((a, b) => (a.message_seq ?? 0) - (b.message_seq ?? 0));
   for (const m of ordered) {
+    // v0.3 /reset barrier: never resurrect messages at or before the reset
+    // point. Messages with no seq are treated as un-orderable and skipped when a
+    // barrier exists (we cannot prove they post-date the reset).
+    if (resetBarrier !== undefined && (m.message_seq ?? 0) <= resetBarrier) {
+      continue;
+    }
     const placeholder = resolveHistoricalMessagePlaceholder(m.type, m.name);
     const content = m.content && m.content.trim() !== ''
       ? m.content

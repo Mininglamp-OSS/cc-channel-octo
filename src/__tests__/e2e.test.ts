@@ -57,6 +57,7 @@ import { handleMessage } from '../index.js';
 import {
   sendMessage,
   sendReadReceipt,
+  getChannelMessages,
 } from '../octo/api.js';
 import { ChannelType, MessageType } from '../octo/types.js';
 import type { BotMessage } from '../octo/types.js';
@@ -197,6 +198,67 @@ describe('E2E smoke tests', () => {
     const history = store.buildHistoryPrefix(USER_UID, 40);
     expect(history).toContain('[user]: Hi there');
     expect(history).toContain('[assistant]: Hello from Claude');
+  });
+
+  // --- 1b. v0.3 slash commands through the real pipeline ---
+
+  it('/reset clears history, replies, and does NOT call the agent', async () => {
+    // Seed a prior turn.
+    await simulateMessage(makeDmMsg('first'), config, store, router, groupContext, streamRelay);
+    expect(store.buildHistoryPrefix(USER_UID, 40)).not.toBe('');
+    (queryAgent as ReturnType<typeof vi.fn>).mockClear();
+    (sendMessage as ReturnType<typeof vi.fn>).mockClear();
+
+    await simulateMessage(makeDmMsg('/reset'), config, store, router, groupContext, streamRelay);
+
+    // Command path: agent untouched, a confirmation sent, history cleared.
+    expect(queryAgent).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    const reply = (sendMessage as ReturnType<typeof vi.fn>).mock.calls[0][0].content as string;
+    expect(reply).toMatch(/cleared/i);
+    expect(store.buildHistoryPrefix(USER_UID, 40)).toBe('');
+    // G8: a handled command still gets a read receipt.
+    expect(sendReadReceipt).toHaveBeenCalled();
+  });
+
+  it('/config replies without invoking the agent', async () => {
+    await simulateMessage(makeDmMsg('/config'), config, store, router, groupContext, streamRelay);
+    expect(queryAgent).not.toHaveBeenCalled();
+    const reply = (sendMessage as ReturnType<typeof vi.fn>).mock.calls[0][0].content as string;
+    expect(reply).toContain('permissionMode');
+  });
+
+  it('/reset barrier prevents group backfill from resurrecting pre-reset history', async () => {
+    // Regression for the PR #62 review finding: /reset deletes the local
+    // session, but G4 cold-start backfill could refetch + re-seed the same
+    // history on the next group turn (esp. after a restart). The persisted
+    // reset barrier must filter out messages at/before the reset seq.
+    const CH = 'group-reset-test'; // unique channel → guarantees cold-start backfill
+    const uid = USER_UID;
+    const sessionKey = `${CH}:${uid}`;
+    const g = (content: string, seq: number) =>
+      makeGroupMsg(content, true, { channel_id: CH, message_seq: seq, from_uid: uid });
+
+    // Pre-reset channel history that the sync API would return on cold start.
+    (getChannelMessages as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      { from_uid: uid, from_name: 'TestUser', content: 'SECRET pre-reset line', type: 1, message_seq: 5 },
+    ]);
+
+    // User issues /reset at seq 10 (after that historical message).
+    await simulateMessage(g('/reset', 10), config, store, router, groupContext, streamRelay);
+    expect(store.getResetBarrier(sessionKey)).toBe(10);
+
+    // Next group turn at seq 11: local history is empty → G4 backfill fires and
+    // fetches the pre-reset line (seq 5). The barrier must drop it.
+    mockQueryYield('fresh answer');
+    await simulateMessage(g('hello again', 11), config, store, router, groupContext, streamRelay);
+
+    // The agent's systemPrompt/history must NOT contain the pre-reset content.
+    const call = (queryAgent as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
+    const historyPrefix = call[1] as string;
+    expect(historyPrefix).not.toContain('SECRET pre-reset line');
+    // And the persisted store must not have re-seeded it either.
+    expect(store.buildHistoryPrefix(sessionKey, 40)).not.toContain('SECRET pre-reset line');
   });
 
   // --- 2. Group @mention triggers processing ---
