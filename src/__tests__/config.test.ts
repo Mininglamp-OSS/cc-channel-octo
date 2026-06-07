@@ -1039,3 +1039,29 @@ describe('v1.0: multi-bot webhook binds', () => {
     expect(bots[1].transport).toBe('webhook');
   });
 });
+
+describe('v1.0: webhook path/port validation', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('rejects a webhook.path without a leading slash', () => {
+    expect(() => loadConfig(writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a', transport: 'webhook',
+      webhook: { secret: 's', path: 'foo' },
+    }))).toThrow(/Invalid webhook.path/);
+  });
+
+  it('rejects an out-of-range webhook.port', () => {
+    expect(() => loadConfig(writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a', transport: 'webhook',
+      webhook: { secret: 's', port: 70000 },
+    }))).toThrow(/Invalid webhook.port/);
+  });
+
+  it('accepts a valid path + port', () => {
+    expect(() => loadConfig(writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a', transport: 'webhook',
+      webhook: { secret: 's', path: '/in', port: 9000 },
+    }))).not.toThrow();
+  });
+});

@@ -7,13 +7,15 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { request as httpRequest } from 'node:http';
 import { parseWebhookBody, WebhookServer, MAX_WEBHOOK_BODY_BYTES } from '../webhook.js';
 import type { BotMessage } from '../octo/types.js';
-import { MessageType } from '../octo/types.js';
+import { MessageType, ChannelType } from '../octo/types.js';
 
 function validMsg(): Record<string, unknown> {
   return {
     message_id: 'm1',
     message_seq: 1,
     from_uid: 'user-1',
+    channel_id: 'ch-1',
+    channel_type: ChannelType.DM,
     timestamp: 123,
     payload: { type: MessageType.Text, content: 'hi' },
   };
@@ -53,6 +55,26 @@ describe('parseWebhookBody', () => {
     expect(parseWebhookBody(JSON.stringify({ ...base, timestamp: undefined }))).toBeNull();
     expect(parseWebhookBody(JSON.stringify({ ...base, payload: { content: 'x' } }))).toBeNull();
     expect(parseWebhookBody(JSON.stringify({ ...base, payload: null }))).toBeNull();
+  });
+
+  it('requires channel_id + channel_type (reply routing)', () => {
+    const base = validMsg();
+    expect(parseWebhookBody(JSON.stringify({ ...base, channel_id: undefined }))).toBeNull();
+    expect(parseWebhookBody(JSON.stringify({ ...base, channel_id: '' }))).toBeNull();
+    expect(parseWebhookBody(JSON.stringify({ ...base, channel_type: undefined }))).toBeNull();
+  });
+
+  it('preserves a large int64 numeric message_id without precision loss', () => {
+    // 19-digit id > Number.MAX_SAFE_INTEGER — plain JSON.parse would corrupt it.
+    const raw = '{"message_id":1234567890123456789,"message_seq":1,"from_uid":"u",' +
+      '"channel_id":"c","channel_type":1,"timestamp":1,"payload":{"type":1,"content":"x"}}';
+    const msg = parseWebhookBody(raw);
+    expect(msg?.message_id).toBe('1234567890123456789'); // exact, as string
+  });
+
+  it('coerces a small numeric message_id to string', () => {
+    const raw = JSON.stringify({ ...validMsg(), message_id: 42 });
+    expect(parseWebhookBody(raw)?.message_id).toBe('42');
   });
 });
 

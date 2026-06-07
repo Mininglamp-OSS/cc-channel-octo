@@ -500,6 +500,18 @@ export function loadConfig(configPath?: string): Config {
       'an unauthenticated webhook endpoint would let anyone inject messages.',
     );
   }
+  // Validate webhook path/port early so a typo fails at boot, not silently at
+  // runtime (a path without a leading slash never matches; a bad port can't bind).
+  if (final.transport === 'webhook') {
+    const wpath = final.webhook?.path;
+    if (wpath !== undefined && !wpath.startsWith('/')) {
+      throw new Error(`Invalid webhook.path "${wpath}" — must start with "/"`);
+    }
+    const wport = final.webhook?.port;
+    if (wport !== undefined && (!Number.isInteger(wport) || wport < 1 || wport > 65535)) {
+      throw new Error(`Invalid webhook.port ${wport} — must be an integer in 1..65535`);
+    }
+  }
 
   return final;
 }

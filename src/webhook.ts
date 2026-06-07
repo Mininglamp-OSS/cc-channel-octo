@@ -19,6 +19,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { parseOctoJson } from './octo/api.js';
 import type { BotMessage } from './octo/types.js';
 
 /** Max inbound body we will buffer before rejecting (256 KiB). */
@@ -55,7 +56,10 @@ function secretMatches(provided: string | undefined, expected: string): boolean 
 export function parseWebhookBody(raw: string): BotMessage | null {
   let obj: unknown;
   try {
-    obj = JSON.parse(raw);
+    // Use the same int64-safe parse as the REST client: a numeric message_id
+    // beyond Number.MAX_SAFE_INTEGER (Octo ids are int64) would lose precision
+    // under plain JSON.parse. parseOctoJson stringifies 16+ digit ids first.
+    obj = parseOctoJson<unknown>(raw);
   } catch {
     return null;
   }
@@ -63,15 +67,23 @@ export function parseWebhookBody(raw: string): BotMessage | null {
   // Octo may wrap the message under `message`/`data`, or send it at top level.
   const rec = obj as Record<string, unknown>;
   const candidate = (rec.message ?? rec.data ?? rec) as Record<string, unknown>;
+  // Normalize message_id to string: parseOctoJson already stringified large
+  // ids; coerce any remaining small numeric id so the BotMessage type holds.
+  if (typeof candidate.message_id === 'number') {
+    candidate.message_id = String(candidate.message_id);
+  }
   // Validate the fields the downstream pipeline relies on. message_seq and
   // timestamp are required numbers (history segmentation + ordering use them);
-  // payload must be an object with a numeric `type`.
+  // payload must be an object with a numeric `type`; channel_id/channel_type are
+  // required so replies and read receipts have somewhere to go.
   const payload = candidate.payload as Record<string, unknown> | undefined | null;
   if (
     typeof candidate.message_id !== 'string' ||
     typeof candidate.from_uid !== 'string' ||
     typeof candidate.message_seq !== 'number' ||
     typeof candidate.timestamp !== 'number' ||
+    typeof candidate.channel_id !== 'string' || candidate.channel_id.length === 0 ||
+    typeof candidate.channel_type !== 'number' ||
     !payload || typeof payload !== 'object' ||
     typeof payload.type !== 'number'
   ) {
