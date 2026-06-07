@@ -23,6 +23,7 @@ import type { BotMessage } from './octo/types.js';
 import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } from './inbound.js';
 import { handleCommand } from './commands.js';
 import { loadGroupConfig } from './group-config.js';
+import { WebhookServer } from './webhook.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes } from './file-inline-wrap.js';
 import { Buffer } from 'node:buffer';
 import { join } from 'node:path';
@@ -153,7 +154,7 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   // opened later via connect(), after main() has cross-registered sibling bot
   // ids — so there is no window where a message is ACK'd and dropped, nor one
   // where a sibling bot's message slips through unrecognized.
-  gateway.setMessageHandler((msg: BotMessage) => {
+  const onInbound = (msg: BotMessage): void => {
     if (gateway.draining) return;
     const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId)
       .catch((err) => {
@@ -163,16 +164,41 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
         activeHandlers.delete(p);
       });
     activeHandlers.add(p);
-  });
+  };
+  gateway.setMessageHandler(onInbound);
 
-  // Phase 2 (called by main() after cross-registration): open the socket.
+  // v1.0 webhook transport: instead of the WS, run an HTTP server that feeds the
+  // same handler. The bot still registered over REST above (botId + outbound).
+  const useWebhook = config.transport === 'webhook';
+  let webhookServer: WebhookServer | undefined;
+  if (useWebhook) {
+    if (!config.webhook?.secret) {
+      // loadConfig enforces this, but guard for hand-built configs/tests.
+      throw new Error('webhook transport requires webhook.secret');
+    }
+    webhookServer = new WebhookServer({
+      host: config.webhook.host,
+      port: config.webhook.port,
+      path: config.webhook.path,
+      secret: config.webhook.secret,
+    });
+    webhookServer.setMessageHandler(onInbound);
+  }
+
+  // Phase 2 (called by main() after cross-registration): open the transport.
   const connect = (): void => {
-    gateway.connect();
-    console.log(`[cc-channel-octo] ${label}Bot connected: id=${gateway.botId}`);
+    if (useWebhook && webhookServer) {
+      void webhookServer.listen();
+      console.log(`[cc-channel-octo] ${label}Bot ready (webhook): id=${gateway.botId}`);
+    } else {
+      gateway.connect();
+      console.log(`[cc-channel-octo] ${label}Bot connected: id=${gateway.botId}`);
+    }
   };
 
   const shutdown = async (): Promise<void> => {
     clearInterval(cwdCleanupTimer);
+    if (webhookServer) await webhookServer.close();
     await gateway.stop(activeHandlers);
     store.close();
   };

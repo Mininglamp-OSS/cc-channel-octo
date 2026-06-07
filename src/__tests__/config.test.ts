@@ -30,6 +30,8 @@ const CC_VARS = [
   'CC_OCTO_MENTION_FREE_GROUPS', 'CC_OCTO_MAX_RESPONSE_CHARS',
   'ANTHROPIC_BASE_URL', 'CC_OCTO_SDK_TOOL_PROGRESS', 'CC_OCTO_SDK_PERSISTENT_SESSION',
   'CC_OCTO_GROUP_CONFIG_DIR',
+  'CC_OCTO_TRANSPORT', 'CC_OCTO_WEBHOOK_HOST', 'CC_OCTO_WEBHOOK_PORT',
+  'CC_OCTO_WEBHOOK_PATH', 'CC_OCTO_WEBHOOK_SECRET',
 ];
 
 function setup() {
@@ -895,5 +897,65 @@ describe('v1.0: groupConfigDir must be outside cwdBase', () => {
       cwdBase: '/srv/octo', groupConfigDir: '/srv/octo-groups',
     });
     expect(loadConfig(path).groupConfigDir).toBe('/srv/octo-groups');
+  });
+});
+
+// ─── v1.0: webhook transport ───────────────────────────────────────────
+
+describe('v1.0: webhook transport', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('defaults to no transport (websocket path)', () => {
+    const cfg = loadConfig(writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' }));
+    expect(cfg.transport).toBeUndefined();
+  });
+
+  it('reads transport + webhook block from config file', () => {
+    const cfg = loadConfig(writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a',
+      transport: 'webhook',
+      webhook: { host: '0.0.0.0', port: 9000, path: '/in', secret: 's3cr3t' },
+    }));
+    expect(cfg.transport).toBe('webhook');
+    expect(cfg.webhook).toEqual({ host: '0.0.0.0', port: 9000, path: '/in', secret: 's3cr3t' });
+  });
+
+  it('throws when transport=webhook but no secret is set', () => {
+    expect(() => loadConfig(writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a',
+      transport: 'webhook', webhook: { port: 9000 },
+    }))).toThrow(/requires webhook.secret/);
+  });
+
+  it('does not require a secret for websocket transport', () => {
+    expect(() => loadConfig(writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a', transport: 'websocket',
+    }))).not.toThrow();
+  });
+
+  it('env overrides: CC_OCTO_TRANSPORT + CC_OCTO_WEBHOOK_*', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    process.env.CC_OCTO_TRANSPORT = 'webhook';
+    process.env.CC_OCTO_WEBHOOK_PORT = '7000';
+    process.env.CC_OCTO_WEBHOOK_SECRET = 'envsecret';
+    const cfg = loadConfig(path);
+    expect(cfg.transport).toBe('webhook');
+    expect(cfg.webhook?.port).toBe(7000);
+    expect(cfg.webhook?.secret).toBe('envsecret');
+  });
+
+  it('env secret satisfies the webhook validation', () => {
+    const path = writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a', transport: 'webhook',
+    });
+    process.env.CC_OCTO_WEBHOOK_SECRET = 'envsecret';
+    expect(() => loadConfig(path)).not.toThrow();
+  });
+
+  it('ignores an invalid CC_OCTO_TRANSPORT value', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    process.env.CC_OCTO_TRANSPORT = 'carrier-pigeon';
+    expect(loadConfig(path).transport).toBeUndefined();
   });
 });

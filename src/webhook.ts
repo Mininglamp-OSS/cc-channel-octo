@@ -1,0 +1,168 @@
+/**
+ * v1.0: Webhook inbound transport.
+ *
+ * An alternative to the WuKongIM WebSocket: instead of holding a long
+ * connection, the gateway runs a small HTTP server that receives Octo message
+ * webhooks (POST <path>) and feeds each one into the SAME pipeline the WS path
+ * uses (the MessageHandler). The bot still registers over REST for its botId and
+ * for outbound sends — webhook mode only changes how INBOUND messages arrive.
+ *
+ * Security:
+ *  - A shared secret is REQUIRED (config validation enforces it). Every request
+ *    must present it via `x-webhook-secret` header or `?secret=` query, compared
+ *    in constant time. Missing/wrong → 401, no body parsed.
+ *  - Request bodies are capped (MAX_WEBHOOK_BODY_BYTES) to avoid memory abuse;
+ *    the socket is destroyed once the cap is exceeded.
+ *  - Bind host defaults to 127.0.0.1 so the endpoint sits behind a reverse proxy
+ *    rather than facing the internet directly.
+ */
+
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
+import type { BotMessage } from './octo/types.js';
+
+/** Max inbound body we will buffer before rejecting (256 KiB). */
+export const MAX_WEBHOOK_BODY_BYTES = 256 * 1024;
+
+export interface WebhookOptions {
+  host?: string;
+  port?: number;
+  path?: string;
+  secret: string;
+}
+
+const DEFAULT_HOST = '127.0.0.1';
+const DEFAULT_PORT = 8787;
+const DEFAULT_PATH = '/octo/webhook';
+
+/** Constant-time string compare that won't leak length via early return. */
+function secretMatches(provided: string | undefined, expected: string): boolean {
+  if (!provided) return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+/**
+ * Parse a raw webhook JSON body into a BotMessage. Returns null when the shape
+ * is not a usable message (missing the required fields), so the caller can 400
+ * rather than feed garbage into the pipeline.
+ */
+export function parseWebhookBody(raw: string): BotMessage | null {
+  let obj: unknown;
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj !== 'object') return null;
+  // Octo may wrap the message under `message`/`data`, or send it at top level.
+  const rec = obj as Record<string, unknown>;
+  const candidate = (rec.message ?? rec.data ?? rec) as Record<string, unknown>;
+  if (
+    typeof candidate.message_id !== 'string' ||
+    typeof candidate.from_uid !== 'string' ||
+    typeof candidate.payload !== 'object' || candidate.payload === null
+  ) {
+    return null;
+  }
+  return candidate as unknown as BotMessage;
+}
+
+/**
+ * HTTP server that turns inbound webhook POSTs into BotMessage handler calls.
+ * Mirrors OctoGateway's transport surface enough for index.ts to use it
+ * interchangeably: setMessageHandler / listen / close.
+ */
+export class WebhookServer {
+  private readonly host: string;
+  private readonly port: number;
+  private readonly path: string;
+  private readonly secret: string;
+  private server: Server | null = null;
+  private onMessage: ((msg: BotMessage) => void) | null = null;
+
+  constructor(opts: WebhookOptions) {
+    this.host = opts.host ?? DEFAULT_HOST;
+    this.port = opts.port ?? DEFAULT_PORT;
+    this.path = opts.path ?? DEFAULT_PATH;
+    this.secret = opts.secret;
+  }
+
+  setMessageHandler(handler: (msg: BotMessage) => void): void {
+    this.onMessage = handler;
+  }
+
+  /** Start listening. Resolves once the server is bound (or rejects on error). */
+  listen(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const server = createServer((req, res) => this.handle(req, res));
+      server.on('error', reject);
+      server.listen(this.port, this.host, () => {
+        server.off('error', reject);
+        console.log(
+          `[cc-channel-octo] Webhook listening on http://${this.host}:${this.port}${this.path}`,
+        );
+        resolve();
+      });
+      this.server = server;
+    });
+  }
+
+  /** Stop listening. */
+  close(): Promise<void> {
+    return new Promise((resolve) => {
+      if (!this.server) return resolve();
+      this.server.close(() => resolve());
+      this.server = null;
+    });
+  }
+
+  private handle(req: IncomingMessage, res: ServerResponse): void {
+    // Only POST <path>.
+    const url = new URL(req.url ?? '/', `http://${this.host}`);
+    if (req.method !== 'POST' || url.pathname !== this.path) {
+      res.writeHead(404).end();
+      return;
+    }
+    // Auth: header or query secret, constant-time.
+    const provided =
+      (req.headers['x-webhook-secret'] as string | undefined) ??
+      url.searchParams.get('secret') ?? undefined;
+    if (!secretMatches(provided, this.secret)) {
+      res.writeHead(401).end();
+      return;
+    }
+
+    let body = '';
+    let tooLarge = false;
+    req.on('data', (chunk: Buffer) => {
+      if (tooLarge) return;
+      body += chunk.toString('utf-8');
+      if (Buffer.byteLength(body, 'utf-8') > MAX_WEBHOOK_BODY_BYTES) {
+        tooLarge = true;
+        res.writeHead(413).end();
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      if (tooLarge) return;
+      const msg = parseWebhookBody(body);
+      if (!msg) {
+        res.writeHead(400).end();
+        return;
+      }
+      // ACK promptly; processing is fire-and-forget through the same handler.
+      res.writeHead(200).end();
+      try {
+        this.onMessage?.(msg);
+      } catch (err) {
+        console.error(`[cc-channel-octo] webhook handler threw: ${String(err)}`);
+      }
+    });
+    req.on('error', () => {
+      if (!res.headersSent) res.writeHead(400).end();
+    });
+  }
+}

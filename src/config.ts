@@ -40,6 +40,29 @@ export interface Config {
    * per-session cwd sandbox (which the agent can write). Unset = feature off.
    */
   groupConfigDir?: string;
+  /**
+   * v1.0: inbound transport. `websocket` (default) keeps the WuKongIM long
+   * connection. `webhook` instead runs a small HTTP server that receives Octo
+   * message webhooks and feeds the same pipeline (see `webhook`). The bot still
+   * registers over REST either way (for botId/ownerUid and outbound sends).
+   */
+  transport?: 'websocket' | 'webhook';
+  /** v1.0: webhook-mode HTTP server settings (used when transport='webhook'). */
+  webhook?: {
+    /** Bind host. Default `127.0.0.1` — keep it local behind a reverse proxy. */
+    host?: string;
+    /** Bind port. Default `8787`. */
+    port?: number;
+    /** Path that accepts message POSTs. Default `/octo/webhook`. */
+    path?: string;
+    /**
+     * Shared secret. A request must present it (header `x-webhook-secret` or
+     * `?secret=`) or it is rejected 401. REQUIRED when transport='webhook' —
+     * loadConfig throws if missing, since an unauthenticated endpoint would let
+     * anyone inject messages.
+     */
+    secret?: string;
+  };
   sdk: {
     model?: string;
     /**
@@ -147,6 +170,8 @@ type PartialConfig = {
   cwd?: string;
   dataDir?: string;
   groupConfigDir?: string;
+  transport?: 'websocket' | 'webhook';
+  webhook?: Partial<Config['webhook']>;
   sdk?: Partial<Config['sdk']>;
   rateLimit?: Partial<Config['rateLimit']>;
   context?: Partial<Config['context']>;
@@ -238,6 +263,10 @@ function mergeConfig(base: Config, override: PartialConfig): Config {
     cwd: cwdBase ?? base.cwd,
     dataDir: override.dataDir ?? base.dataDir,
     groupConfigDir: override.groupConfigDir ?? base.groupConfigDir,
+    transport: override.transport ?? base.transport,
+    webhook: (override.webhook || base.webhook)
+      ? { ...base.webhook, ...(override.webhook ?? {}) }
+      : undefined,
     sdk: {
       ...base.sdk,
       ...(override.sdk ?? {}),
@@ -310,6 +339,23 @@ function applyEnv(cfg: Config): Config {
   }
   if (env.CC_OCTO_DATA_DIR) next.dataDir = env.CC_OCTO_DATA_DIR;
   if (env.CC_OCTO_GROUP_CONFIG_DIR) next.groupConfigDir = env.CC_OCTO_GROUP_CONFIG_DIR;
+  // v1.0 webhook transport env overrides.
+  if (env.CC_OCTO_TRANSPORT) {
+    const t = env.CC_OCTO_TRANSPORT.trim().toLowerCase();
+    if (t === 'websocket' || t === 'webhook') next.transport = t;
+  }
+  if (
+    env.CC_OCTO_WEBHOOK_HOST || env.CC_OCTO_WEBHOOK_PORT ||
+    env.CC_OCTO_WEBHOOK_PATH || env.CC_OCTO_WEBHOOK_SECRET
+  ) {
+    next.webhook = { ...next.webhook };
+    if (env.CC_OCTO_WEBHOOK_HOST) next.webhook.host = env.CC_OCTO_WEBHOOK_HOST;
+    if (env.CC_OCTO_WEBHOOK_PORT) {
+      next.webhook.port = parseIntStrict(env.CC_OCTO_WEBHOOK_PORT, 'CC_OCTO_WEBHOOK_PORT', 1);
+    }
+    if (env.CC_OCTO_WEBHOOK_PATH) next.webhook.path = env.CC_OCTO_WEBHOOK_PATH;
+    if (env.CC_OCTO_WEBHOOK_SECRET) next.webhook.secret = env.CC_OCTO_WEBHOOK_SECRET;
+  }
 
   if (env.CC_OCTO_SDK_MODEL) next.sdk.model = env.CC_OCTO_SDK_MODEL;
   if (env.CC_OCTO_SDK_ALLOWED_TOOLS) {
@@ -432,6 +478,15 @@ export function loadConfig(configPath?: string): Config {
   // case; resolveBotConfigs() re-checks each bot AFTER applying per-bot cwdBase
   // overrides (a per-bot cwdBase could otherwise swallow groupConfigDir).
   assertGroupConfigDirOutsideCwd(final);
+
+  // v1.0 webhook transport: an unauthenticated inbound endpoint would let anyone
+  // inject messages into the agent, so a secret is mandatory in webhook mode.
+  if (final.transport === 'webhook' && !final.webhook?.secret) {
+    throw new Error(
+      'Webhook transport requires webhook.secret (or CC_OCTO_WEBHOOK_SECRET) — ' +
+      'an unauthenticated webhook endpoint would let anyone inject messages.',
+    );
+  }
 
   return final;
 }
