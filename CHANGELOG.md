@@ -8,6 +8,14 @@ While the major version is `0`, minor releases may carry breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Router drops non-conversation channel types** (#68) — found in live
+  deployment: on connect the bot received a system message on `channel_type: 8`
+  (`systemcmdonline`) and replied to it. `SessionRouter` now allowlists only DM /
+  Group / CommunityTopic as repliable; any other (system/command) channel type is
+  dropped before the agent is invoked.
+
 ### Added
 
 - **Webhook inbound transport** (v1.0) — set `transport: "webhook"`

@@ -684,3 +684,41 @@ describe('multi-bot loop guard in mention-free groups', () => {
     expect(result?.shouldProcess).toBe(true);
   });
 });
+
+// ─── #68: unsupported/system channel types are dropped ──────────────────
+
+describe('unsupported channel types (system messages)', () => {
+  let router: SessionRouter;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    router = new SessionRouter(makeConfig(), ROBOT_ID);
+  });
+
+  it('drops a system channel_type (8 "systemcmdonline") with no reply', async () => {
+    // Reproduces the live-deployment bug: a system message on channel_type 8
+    // must not be processed as a conversation.
+    const msg = makeMsg({
+      channel_id: 'systemcmdonline',
+      channel_type: 8 as unknown as ChannelType,
+      from_uid: 'system',
+      payload: { type: MessageType.Text, content: '' },
+    });
+    const result = await router.route(msg);
+    expect(result).toBeNull();
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('drops an unknown channel_type (e.g. 99)', async () => {
+    const msg = makeMsg({ channel_type: 99 as unknown as ChannelType });
+    expect(await router.route(msg)).toBeNull();
+  });
+
+  it('still processes a normal DM', async () => {
+    const msg = makeMsg({
+      channel_id: 'dm-1', channel_type: ChannelType.DM, from_uid: 'human',
+      payload: { type: MessageType.Text, content: 'hi' },
+    });
+    const result = await router.route(msg);
+    expect(result?.shouldProcess).toBe(true);
+  });
+});
