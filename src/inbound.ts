@@ -27,7 +27,7 @@ import { assertPublicUrl, fetchWithRedirectGuard } from './url-policy.js';
  * Returns true only when both URLs parse successfully and have matching host
  * (case-insensitive). Falsy or malformed inputs return false (fail-closed).
  */
-function isSameHost(url: string, apiUrl: string): boolean {
+export function isSameHost(url: string, apiUrl: string): boolean {
   try {
     return new URL(url).host.toLowerCase() === new URL(apiUrl).host.toLowerCase();
   } catch {
@@ -118,7 +118,7 @@ export interface ResolvedContent {
  *     payload.url from later being fetched with the bot's Authorization
  *     header (which would leak botToken to the attacker's server).
  */
-export function buildMediaUrl(relUrl?: string, apiUrl?: string): string | undefined {
+export function buildMediaUrl(relUrl?: string, apiUrl?: string, cdnHost?: string): string | undefined {
   if (!relUrl) return undefined;
 
   // Reject backslashes outright — they're not valid in URL paths and are a
@@ -128,14 +128,25 @@ export function buildMediaUrl(relUrl?: string, apiUrl?: string): string | undefi
   // Reject scheme-relative URLs (`//attacker.com/path`).
   if (relUrl.startsWith('//')) return undefined;
 
-  // Absolute http(s) URL — only allow when host matches apiUrl host.
+  // Absolute http(s) URL — allow when the host matches the apiUrl host OR the
+  // configured/STS-derived CDN host. Octo serves media from a SEPARATE CDN
+  // (e.g. cdn.deepminer.com.cn) distinct from the API host, so a strict
+  // same-host check silently dropped every real image URL (#86). The download
+  // path still SSRF-checks (assertPublicUrl) and scopes the bot token per hop,
+  // so an allowed host is necessary but not sufficient to leak the token.
   if (relUrl.startsWith('http://') || relUrl.startsWith('https://')) {
     if (!apiUrl) return undefined;
     try {
       const target = new URL(relUrl);
+      const targetHost = target.host.toLowerCase();
       const base = new URL(apiUrl);
-      if (target.host.toLowerCase() !== base.host.toLowerCase()) return undefined;
-      if (target.protocol !== base.protocol) return undefined;
+      const allowedHosts = new Set<string>([base.host.toLowerCase()]);
+      if (cdnHost) allowedHosts.add(cdnHost.toLowerCase());
+      if (!allowedHosts.has(targetHost)) return undefined;
+      // Only allow http(s); the same-host protocol-downgrade check still applies
+      // to the apiUrl host (a CDN may legitimately use https regardless).
+      if (targetHost === base.host.toLowerCase() && target.protocol !== base.protocol) return undefined;
+      if (target.protocol !== 'http:' && target.protocol !== 'https:') return undefined;
       return relUrl;
     } catch {
       return undefined;
@@ -276,6 +287,7 @@ function buildRichTextPlain(blocks: Array<Record<string, unknown>>): string {
 export function resolveRichTextContent(
   payload: { content?: unknown; plain?: unknown },
   apiUrl?: string,
+  cdnHost?: string,
 ): { text: string; mediaUrls: string[] } {
   const blocks = normalizeRichTextBlocks(payload?.content);
   const mediaUrls: string[] = [];
@@ -283,7 +295,7 @@ export function resolveRichTextContent(
     // Defensive: only collect string URLs so a malformed `{url: {}}` cannot
     // crash buildMediaUrl downstream.
     if (blk.type === RICH_TEXT_BLOCK_IMAGE && typeof blk.url === 'string' && blk.url) {
-      const full = buildMediaUrl(blk.url, apiUrl);
+      const full = buildMediaUrl(blk.url, apiUrl, cdnHost);
       if (full) mediaUrls.push(full);
       if (mediaUrls.length >= RICH_TEXT_MAX_MEDIA_URLS) break;
     }
@@ -296,9 +308,9 @@ export function resolveRichTextContent(
 
 // ─── Inner message rendering (MultipleForward children) ──────────────────
 
-function resolveInnerMessageText(payload: ForwardMessage['payload'], apiUrl?: string): string {
+function resolveInnerMessageText(payload: ForwardMessage['payload'], apiUrl?: string, cdnHost?: string): string {
   if (!payload) return '';
-  const fullUrl = buildMediaUrl(payload.url, apiUrl);
+  const fullUrl = buildMediaUrl(payload.url, apiUrl, cdnHost);
   switch (payload.type) {
     case MessageType.Text:
       return payload.content ?? '';
@@ -321,7 +333,7 @@ function resolveInnerMessageText(payload: ForwardMessage['payload'], apiUrl?: st
     case MessageType.MultipleForward:
       return '[合并转发]';
     case MessageType.RichText: {
-      const rt = resolveRichTextContent(payload as { content?: unknown; plain?: unknown }, apiUrl);
+      const rt = resolveRichTextContent(payload as { content?: unknown; plain?: unknown }, apiUrl, cdnHost);
       return rt.text || '[图文消息]';
     }
     default:
@@ -344,6 +356,7 @@ function resolveInnerMessageText(payload: ForwardMessage['payload'], apiUrl?: st
 export function resolveMultipleForwardText(
   payload: { users?: ForwardUser[]; msgs?: ForwardMessage[] },
   apiUrl?: string,
+  cdnHost?: string,
   _depth = 0,
 ): string {
   if (_depth >= MULTIPLE_FORWARD_MAX_DEPTH) {
@@ -362,11 +375,11 @@ export function resolveMultipleForwardText(
   for (const m of msgs) {
     const senderName = userMap.get(m.from_uid) ?? m.from_uid;
     if (m.payload?.type === MessageType.MultipleForward) {
-      const nested = resolveMultipleForwardText(m.payload, apiUrl, _depth + 1);
+      const nested = resolveMultipleForwardText(m.payload, apiUrl, cdnHost, _depth + 1);
       lines.push(`${senderName}: [合并转发]`);
       lines.push(nested);
     } else {
-      lines.push(`${senderName}: ${resolveInnerMessageText(m.payload, apiUrl)}`);
+      lines.push(`${senderName}: ${resolveInnerMessageText(m.payload, apiUrl, cdnHost)}`);
     }
   }
   if (truncatedCount > 0) {
@@ -387,7 +400,7 @@ export function resolveMultipleForwardText(
  * This is the synchronous part — file inlining (which requires HTTP) is a
  * separate async step done by `tryInlineFile()`.
  */
-export function resolveContent(payload: MessagePayload | undefined, apiUrl?: string): ResolvedContent {
+export function resolveContent(payload: MessagePayload | undefined, apiUrl?: string, cdnHost?: string): ResolvedContent {
   if (!payload) return { text: '' };
 
   switch (payload.type) {
@@ -395,7 +408,7 @@ export function resolveContent(payload: MessagePayload | undefined, apiUrl?: str
       return { text: payload.content ?? '' };
 
     case MessageType.Image: {
-      const imgUrl = buildMediaUrl(payload.url, apiUrl);
+      const imgUrl = buildMediaUrl(payload.url, apiUrl, cdnHost);
       return {
         text: imgUrl ? `[图片]\n${imgUrl}` : '[图片]',
         mediaUrl: imgUrl,
@@ -403,7 +416,7 @@ export function resolveContent(payload: MessagePayload | undefined, apiUrl?: str
     }
 
     case MessageType.GIF: {
-      const url = buildMediaUrl(payload.url, apiUrl);
+      const url = buildMediaUrl(payload.url, apiUrl, cdnHost);
       return {
         text: url ? `[GIF]\n${url}` : '[GIF]',
         mediaUrl: url,
@@ -411,7 +424,7 @@ export function resolveContent(payload: MessagePayload | undefined, apiUrl?: str
     }
 
     case MessageType.Voice: {
-      const url = buildMediaUrl(payload.url, apiUrl);
+      const url = buildMediaUrl(payload.url, apiUrl, cdnHost);
       return {
         // G22: language model receives the URL as a marker; transcription is
         // out of scope for v0.2 and tracked separately.
@@ -421,7 +434,7 @@ export function resolveContent(payload: MessagePayload | undefined, apiUrl?: str
     }
 
     case MessageType.Video: {
-      const url = buildMediaUrl(payload.url, apiUrl);
+      const url = buildMediaUrl(payload.url, apiUrl, cdnHost);
       return {
         text: url ? `[视频]\n${url}` : '[视频]',
         mediaUrl: url,
@@ -429,7 +442,7 @@ export function resolveContent(payload: MessagePayload | undefined, apiUrl?: str
     }
 
     case MessageType.File: {
-      const url = buildMediaUrl(payload.url, apiUrl);
+      const url = buildMediaUrl(payload.url, apiUrl, cdnHost);
       const fileName = typeof payload.name === 'string' ? payload.name : '未知文件';
       return {
         text: url ? `[文件: ${fileName}]\n${url}` : `[文件: ${fileName}]`,
@@ -464,12 +477,13 @@ export function resolveContent(payload: MessagePayload | undefined, apiUrl?: str
         text: resolveMultipleForwardText(
           payload as unknown as { users?: ForwardUser[]; msgs?: ForwardMessage[] },
           apiUrl,
+          cdnHost,
         ),
       };
     }
 
     case MessageType.RichText: {
-      const rt = resolveRichTextContent(payload as unknown as { content?: unknown; plain?: unknown }, apiUrl);
+      const rt = resolveRichTextContent(payload as unknown as { content?: unknown; plain?: unknown }, apiUrl, cdnHost);
       return {
         text: rt.text,
         ...(rt.mediaUrls.length > 0 ? { mediaUrl: rt.mediaUrls[0], mediaUrls: rt.mediaUrls } : {}),
