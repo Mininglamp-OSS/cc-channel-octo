@@ -202,6 +202,17 @@ export class SessionRouter {
     return channelType === ChannelType.Group || channelType === ChannelType.CommunityTopic;
   }
 
+  /**
+   * Allowlist of channel types we actually converse on: DM, Group, and
+   * CommunityTopic. Octo also emits system/command channels (e.g. channel_type
+   * 8 "systemcmdonline" on connect) which are NOT user conversations — those
+   * must be dropped, otherwise they fall through the DM/group gates and get
+   * answered with an unsolicited LLM reply. Found in live deployment (#68).
+   */
+  private isSupportedChannel(channelType: ChannelType | undefined): boolean {
+    return channelType === ChannelType.DM || this.isGroupLike(channelType);
+  }
+
   private isMentioned(msg: BotMessage): boolean {
     const mention = msg.payload.mention;
     if (!mention) return false;
@@ -214,6 +225,12 @@ export class SessionRouter {
   private async processMessage(msg: BotMessage, key: string): Promise<RouteResult | null> {
     // Skip messages from self.
     if (msg.from_uid === this.robotId) return null;
+
+    // Drop anything that isn't a real conversation channel (DM / group /
+    // community topic). Octo emits system/command channels (e.g. channel_type 8
+    // "systemcmdonline" on connect) that otherwise slip past the DM/group gates
+    // and get an unsolicited reply (#68).
+    if (!this.isSupportedChannel(msg.channel_type)) return null;
 
     // Skip stream update messages (G21) — only process final (non-stream) messages.
     // When streamOn is true, this is a partial update of an ongoing stream; the final
