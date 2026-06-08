@@ -172,23 +172,16 @@ describe('Q36: heartbeat restart after token refresh', () => {
 describe('Q32: maxResponseChars config', () => {
   it('defaults to 524288 (512KB)', async () => {
     const { loadConfig } = await import('../config.js');
-    process.env.CC_OCTO_BOT_TOKEN = 'test';
-    process.env.CC_OCTO_API_URL = 'https://test';
-    const cfg = loadConfig('/nonexistent/config.json');
-    expect(cfg.maxResponseChars).toBe(524_288);
-    delete process.env.CC_OCTO_BOT_TOKEN;
-    delete process.env.CC_OCTO_API_URL;
-  });
+    const { writeFileSync, mkdtempSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
 
-  it('can be overridden via CC_OCTO_MAX_RESPONSE_CHARS env', async () => {
-    const { loadConfig } = await import('../config.js');
-    process.env.CC_OCTO_BOT_TOKEN = 'test';
-    process.env.CC_OCTO_API_URL = 'https://test';
-    process.env.CC_OCTO_MAX_RESPONSE_CHARS = '1000';
-    const cfg = loadConfig('/nonexistent/config.json');
-    expect(cfg.maxResponseChars).toBe(1000);
-    delete process.env.CC_OCTO_BOT_TOKEN;
-    delete process.env.CC_OCTO_API_URL;
-    delete process.env.CC_OCTO_MAX_RESPONSE_CHARS;
+    const dir = mkdtempSync(join(tmpdir(), 'p2-q32-'));
+    const cfgPath = join(dir, 'config.json');
+    // No maxResponseChars in the file → falls back to the default.
+    writeFileSync(cfgPath, JSON.stringify({ botToken: 'test', apiUrl: 'https://test' }));
+
+    const cfg = loadConfig(cfgPath);
+    expect(cfg.maxResponseChars).toBe(524_288);
   });
 });

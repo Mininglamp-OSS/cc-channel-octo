@@ -7,17 +7,17 @@
     { "id": "default" }
   ],
 
-  "_comment_group_config_dir": "v1.0: optional directory of per-group instruction files (<groupId>.md), injected as trusted custom instructions. Operator-controlled — keep it OUTSIDE every bot's workspace (the agent can write there) AND non-writable by the gateway user. Env override: CC_OCTO_GROUP_CONFIG_DIR. Omit to disable.",
+  "_comment_group_config_dir": "v1.0: optional directory of per-group instruction files (<groupId>.md), injected as trusted custom instructions. Operator-controlled — keep it OUTSIDE every bot's workspace (the agent can write there) AND non-writable by the gateway user. Omit to disable.",
 
   "sdk": {
-    "_comment_anthropic_base_url": "Q1: Optional self-hosted Claude API gateway base URL. Forwarded to the SDK subprocess (scoped). Must be https:// (or http://localhost for dev) — SSRF-validated at boot. Or set ANTHROPIC_BASE_URL env (highest priority).",
-    "_comment_allowed_tools": "Q2: either '*' (allow every tool the SDK exposes) or an explicit string[] whitelist. Env override CC_OCTO_SDK_ALLOWED_TOOLS accepts the same two shapes.",
+    "_comment_anthropic_base_url": "Q1: Optional self-hosted Claude API gateway base URL. Forwarded to the SDK subprocess (scoped). Must be https:// (or http://localhost for dev) — SSRF-validated at boot. Omit to use Anthropic's public endpoint.",
+    "_comment_allowed_tools": "Q2: either '*' (allow every tool the SDK exposes) or an explicit string[] whitelist.",
     "allowedTools": "*",
     "permissionMode": "bypassPermissions",
-    "_comment_tool_progress": "v0.3: set toolProgress=true to post '🔧 Running <tool>…' notices. Env: CC_OCTO_SDK_TOOL_PROGRESS=true. Off by default.",
-    "_comment_persistent_session": "v0.3: set persistentSession=true to keep agent workspace state across messages via the SDK v2 Session API. Env: CC_OCTO_SDK_PERSISTENT_SESSION=true. Off by default.",
-    "_comment_setting_sources": "v1.1: which host filesystem settings the SDK loads (user=~/.claude, project=.claude, local=.claude/*.local). Default [] (SDK isolation) so the bot NEVER reads/writes the operator's real ~/.claude — the agent could otherwise write 'remembered' facts into your global CLAUDE.md instead of its scoped auto-memory dir. Set [\"user\"] only as an explicit opt-in.",
-    "settingSources": []
+    "_comment_tool_progress": "v0.3: set toolProgress=true to post '🔧 Running <tool>…' notices. Off by default.",
+    "_comment_persistent_session": "v0.3: set persistentSession=true to keep agent workspace state across messages via the SDK v2 Session API. Off by default.",
+    "_comment_setting_sources": "#100: which host filesystem settings the SDK loads (user=~/.claude, project=.claude, local=.claude/*.local). Default [\"project\"] so the SDK discovers skills symlinked into each session sandbox's .claude/skills/. Memory stays isolated regardless (the auto-memory dir is pinned via inline settings, ranked above projectSettings). Add \"user\" only to deliberately load the operator's real ~/.claude.",
+    "settingSources": ["project"]
   },
 
   "rateLimit": {
@@ -29,6 +29,6 @@
     "historyLimit": 40
   },
 
-  "_comment_mention_free": "G12: group_ids listed here process every text message without requiring an @bot mention. Env override: CC_OCTO_MENTION_FREE_GROUPS (csv).",
+  "_comment_mention_free": "G12: group_ids listed here process every text message without requiring an @bot mention.",
   "mentionFreeGroups": []
 }

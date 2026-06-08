@@ -16,6 +16,17 @@ While the major version is `0`, minor releases may carry breaking changes.
   Group / CommunityTopic as repliable; any other (system/command) channel type is
   dropped before the agent is invoked.
 
+### Changed
+
+- **Config is JSON-only — all environment-variable overrides removed** (#103).
+  The entire `CC_OCTO_*` env surface and the `ANTHROPIC_BASE_URL` env read are
+  gone; `applyEnv()` (and its `parseCsv`/`parseIntStrict` helpers) were deleted.
+  Configuration now comes solely from the two-layer config.json (global +
+  per-bot). `sdk.anthropicBaseUrl` remains a config.json field (still forwarded
+  to the SDK subprocess as `ANTHROPIC_BASE_URL`). **Migration:** move any
+  `CC_OCTO_*` / `ANTHROPIC_BASE_URL` values into `~/.cc-channel-octo/config.json`
+  (or the per-bot file). Old env vars are now silently ignored.
+
 ### Added
 
 - **Agent skills — generic external tooling** (#100) — external CLIs (octo-cli,
