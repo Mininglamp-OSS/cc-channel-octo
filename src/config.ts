@@ -131,6 +131,13 @@ export interface Config {
      */
     toolProgress?: boolean;
     /**
+     * #87: when true, expose the read-only Octo management tool server to the
+     * agent (list_groups, group_info, group_members, search_members) so the
+     * model can answer questions about the bot's groups/members. Default false
+     * (opt-in — it widens the agent's reach). Env: `CC_OCTO_SDK_OCTO_TOOLS=true`.
+     */
+    octoTools?: boolean;
+    /**
      * v0.3: when true, use the SDK's v2 Session API to persist agent workspace
      * state across messages — each session's SDK session id is stored and
      * `resume`d on the next turn, so open files / command history / context
@@ -434,6 +441,10 @@ function applyEnv(cfg: Config): Config {
   // v0.3: tool-progress messages. Accept the usual truthy spellings.
   if (env.CC_OCTO_SDK_TOOL_PROGRESS !== undefined) {
     next.sdk.toolProgress = /^(1|true|yes|on)$/i.test(env.CC_OCTO_SDK_TOOL_PROGRESS.trim());
+  }
+  // #87: read-only Octo management tool server (opt-in).
+  if (env.CC_OCTO_SDK_OCTO_TOOLS !== undefined) {
+    next.sdk.octoTools = /^(1|true|yes|on)$/i.test(env.CC_OCTO_SDK_OCTO_TOOLS.trim());
   }
   // v0.3: persistent (v2) sessions.
   if (env.CC_OCTO_SDK_PERSISTENT_SESSION !== undefined) {

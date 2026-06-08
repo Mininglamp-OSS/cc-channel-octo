@@ -16,6 +16,7 @@ import { resolveSessionCwd } from './cwd-resolver.js';
 import type { SessionCtx } from './cwd-resolver.js';
 import { safeBody, safeSectioned, trustedText, escapeSectionMarkers } from './prompt-safety.js';
 import type { SafeText } from './prompt-safety.js';
+import { createOctoToolServer, OCTO_TOOL_SERVER_NAME } from './octo-tools.js';
 
 const VALID_PERMISSION_MODES: Set<string> = new Set([
   'default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto',
@@ -326,6 +327,13 @@ export async function* queryAgent(
               autoMemoryDirectory: opts.memoryDir,
             } satisfies Settings,
           }
+        : {}),
+      // #87: opt-in read-only Octo management tools (list_groups, group_info,
+      // group_members, search_members) exposed as an in-process MCP server.
+      // Surface as mcp__octo__<tool>. With the default allowedTools `"*"` they
+      // are auto-allowed; an explicit whitelist must list them to enable.
+      ...(config.sdk.octoTools
+        ? { mcpServers: { [OCTO_TOOL_SERVER_NAME]: createOctoToolServer(config) } }
         : {}),
       // Q2: `"*"` means "no whitelist" — drop the option so the SDK falls back
       // to its built-in tool set. An explicit string[] is forwarded as-is.
