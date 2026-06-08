@@ -179,6 +179,14 @@ export interface Config {
    * single-bot case. Populated by `resolveBotConfigs()`.
    */
   botId?: string;
+  /**
+   * #86: media CDN host (no scheme), prefetched at startup from the upload-
+   * credentials STS response (`cdnBaseUrl`). Octo serves media from a separate
+   * CDN host than `apiUrl`; inbound media URLs on this host are allowed by
+   * buildMediaUrl. Runtime-populated (not from the config file); undefined until
+   * the prefetch succeeds, in which case only same-apiUrl-host media is allowed.
+   */
+  mediaCdnHost?: string;
 }
 
 /**

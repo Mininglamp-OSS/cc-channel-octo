@@ -15,13 +15,14 @@ import { GroupContext } from './group-context.js';
 import { queryAgent } from './agent-bridge.js';
 import { sanitizeDisplayName, escapeSectionMarkers, sanitizePromptBody } from './prompt-safety.js';
 import type { SessionCtx } from './cwd-resolver.js';
-import { cleanupExpiredCwds, resolveMemoryDir } from './cwd-resolver.js';
+import { cleanupExpiredCwds, resolveMemoryDir, resolveSessionCwd } from './cwd-resolver.js';
 import { StreamRelay } from './stream-relay.js';
-import { sendMessage, sendReadReceipt, getChannelMessages } from './octo/api.js';
+import { sendMessage, sendReadReceipt, getChannelMessages, getUploadCredentials } from './octo/api.js';
 import type { HistoricalMessage } from './octo/api.js';
 import { ChannelType, MessageType } from './octo/types.js';
 import type { BotMessage } from './octo/types.js';
 import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } from './inbound.js';
+import { downloadInboundImage, MAX_IMAGES_PER_MESSAGE } from './media-inbound.js';
 import { handleCommand } from './commands.js';
 import { loadGroupConfig } from './group-config.js';
 import { WebhookServer } from './webhook.js';
@@ -180,6 +181,28 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   await gateway.register();
   console.log(`[cc-channel-octo] ${label}Bot registered: id=${gateway.botId}`);
 
+  // #86: prefetch the media CDN host (best-effort). Octo serves media from a
+  // separate CDN than apiUrl; without this, inbound image URLs on the CDN host
+  // are rejected by buildMediaUrl and the agent can't see them. The STS
+  // upload-credentials response carries cdnBaseUrl; we only need its host. A
+  // failure leaves mediaCdnHost undefined (same-host-only media), never fatal.
+  try {
+    const creds = await getUploadCredentials({
+      apiUrl: config.apiUrl,
+      botToken: config.botToken,
+      // The credentials endpoint validates the filename's type; use an image
+      // name so the probe isn't rejected (file_type_unsupported). We only read
+      // cdnBaseUrl from the response — nothing is uploaded.
+      filename: 'probe.png',
+    });
+    if (creds.cdnBaseUrl) {
+      config.mediaCdnHost = new URL(creds.cdnBaseUrl).host;
+      console.log(`[cc-channel-octo] ${label}Media CDN host: ${config.mediaCdnHost}`);
+    }
+  } catch (err) {
+    console.warn(`[cc-channel-octo] ${label}Could not prefetch media CDN host (inbound media limited to apiUrl host): ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   // --- Session router ---
   const router = new SessionRouter(config, gateway.botId, gateway.ownerUid);
 
@@ -289,6 +312,15 @@ export async function handleMessage(
       // --- Session ---
       store.getOrCreate(sessionKey, channelId, channelType);
 
+      // Session routing context (cwd/memory partition). Built here (before media
+      // resolution) so inbound images can be downloaded INTO this session's cwd
+      // sandbox for the agent to Read. Group keys are channel_id alone (shared
+      // workspace); DM keys are per-peer. See cwd-resolver.ts header.
+      const sessionCtx: SessionCtx = {
+        kind: isGroup ? 'group' : 'dm',
+        sessionKey,
+      };
+
       // --- v0.3: in-chat slash commands (/reset, /config, /help) ---
       // Handled before group-context caching, history append, and the agent
       // query — so a command never reaches the LLM, is not stored as a turn,
@@ -349,7 +381,7 @@ export async function handleMessage(
       // --- G1: Resolve the inbound payload into LLM-friendly text ---
       // Text messages use the router's cleanContent (with @bot stripping);
       // non-text payloads go through resolveContent for type-aware rendering.
-      const resolved = resolveContent(msg.payload, config.apiUrl);
+      const resolved = resolveContent(msg.payload, config.apiUrl, config.mediaCdnHost);
       let bodyText = result.cleanContent ?? resolved.text;
 
       // Compact history record. For File payloads we store only the metadata
@@ -357,6 +389,49 @@ export async function handleMessage(
       // can't blow up the system prompt on subsequent turns. See PR#33
       // follow-up issue ·2 (齐哥 review).
       let historyRecord = bodyText;
+
+      // #86: Native image input. Octo delivers images as URLs; download them
+      // INTO this session's cwd sandbox so the agent can SEE them via the Read
+      // tool (the SDK's Read renders image files), instead of only getting a URL
+      // string. Covers single-image (Image/GIF) and RichText embedded images.
+      // History keeps the compact marker (not the local path) so it doesn't
+      // accumulate stale paths. Falls back to the URL marker on any failure.
+      {
+        const imageUrls: string[] = [];
+        if (
+          (msg.payload.type === MessageType.Image || msg.payload.type === MessageType.GIF) &&
+          resolved.mediaUrl
+        ) {
+          imageUrls.push(resolved.mediaUrl);
+        } else if (msg.payload.type === MessageType.RichText && resolved.mediaUrls?.length) {
+          imageUrls.push(...resolved.mediaUrls);
+        }
+        if (imageUrls.length > 0) {
+          const cwdBase = config.cwdBase ?? config.cwd;
+          const cwdDir = resolveSessionCwd(cwdBase, sessionCtx);
+          const localPaths: string[] = [];
+          for (const url of imageUrls.slice(0, MAX_IMAGES_PER_MESSAGE)) {
+            try {
+              const r = await downloadInboundImage({ url, cwdDir, botToken: config.botToken, apiUrl: config.apiUrl });
+              if ('relPath' in r) {
+                localPaths.push(r.relPath);
+              } else {
+                console.warn(`[cc-channel-octo] inbound image skipped: ${r.error}`);
+              }
+            } catch (err) {
+              console.error(`[cc-channel-octo] inbound image download failed: ${String(err)}`);
+            }
+          }
+          if (localPaths.length > 0) {
+            // Append a Read hint for THIS turn only (bodyText), keeping the URL
+            // marker too as a fallback reference. historyRecord stays unchanged.
+            const hint = localPaths.length === 1
+              ? `\n[已下载图片到本地: ${localPaths[0]} — 请用 Read 工具查看]`
+              : `\n[已下载 ${localPaths.length} 张图片到本地: ${localPaths.join(', ')} — 请用 Read 工具逐个查看]`;
+            bodyText = bodyText + hint;
+          }
+        }
+      }
 
       // G2: Inline text-file content for File payloads when feasible.
       if (
@@ -514,17 +589,8 @@ export async function handleMessage(
 
       // --- Query agent with structural role separation (Q3 fix) ---
       // userContentForLLM → user role (prompt), history + context → system role (systemPrompt)
-      // cwd isolation: the SessionCtx carries the router-produced sessionKey
-      // verbatim, so the cwd partition is byte-for-byte identical to the history
-      // partition. Group keys are the channel_id alone (session-router.ts), so a
-      // whole group SHARES one sandbox (and one history + one memory) — a group
-      // is a shared workspace, with no member-to-member isolation. DM keys are
-      // per-peer, so DM sandboxes stay private. (This is the intentional reversal
-      // of the per-(channel×user) group isolation; see cwd-resolver.ts header.)
-      const sessionCtx: SessionCtx = {
-        kind: isGroup ? 'group' : 'dm',
-        sessionKey,
-      };
+      // sessionCtx (cwd/memory partition) was built earlier so inbound images
+      // could be downloaded into this session's sandbox.
 
       // v0.3 tool progress (opt-in): send a brief "🔧 Running <tool>…" notice as
       // the agent invokes tools. Dedup consecutive identical tools and cap the

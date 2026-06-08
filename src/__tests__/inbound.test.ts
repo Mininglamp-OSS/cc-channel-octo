@@ -35,6 +35,29 @@ describe('buildMediaUrl', () => {
     expect(buildMediaUrl('http://169.254.169.254/meta', API_URL)).toBeUndefined();
   });
 
+  // #86: Octo serves media from a separate CDN host than apiUrl. An absolute
+  // URL on the configured/STS CDN host is allowed; any other host still rejected.
+  it('allows absolute URLs on the CDN host when provided', () => {
+    const CDN = 'cdn.example.com';
+    // CDN host — allowed
+    expect(buildMediaUrl('https://cdn.example.com/im/chat/x.png', API_URL, CDN))
+      .toBe('https://cdn.example.com/im/chat/x.png');
+    // apiUrl host still allowed alongside the CDN host
+    expect(buildMediaUrl('https://api.example.com/file/y.jpg', API_URL, CDN))
+      .toBe('https://api.example.com/file/y.jpg');
+    // A DIFFERENT host is still rejected even with a CDN configured
+    expect(buildMediaUrl('https://attacker.com/a.jpg', API_URL, CDN)).toBeUndefined();
+    // Without the CDN host arg, the CDN URL is rejected (back-compat default)
+    expect(buildMediaUrl('https://cdn.example.com/im/chat/x.png', API_URL)).toBeUndefined();
+  });
+
+  it('does not pass through a non-http(s) absolute URL as-is, even on the CDN host', () => {
+    // ftp:// doesn't match the http(s) absolute branch, so it's never returned
+    // verbatim; it's treated as a (sanitized) relative path under apiUrl/file.
+    const out = buildMediaUrl('ftp://cdn.example.com/x.png', API_URL, 'cdn.example.com');
+    expect(out).not.toBe('ftp://cdn.example.com/x.png');
+  });
+
   it('rejects protocol downgrade (https apiUrl + http target)', () => {
     expect(buildMediaUrl('http://api.example.com/file/x.jpg', API_URL)).toBeUndefined();
   });
@@ -292,6 +315,23 @@ describe('resolveContent: RichText (type=14)', () => {
     expect(r.mediaUrls).toHaveLength(2);
     expect(r.mediaUrls?.[0]).toContain('img1.png');
     expect(r.mediaUrl).toBe(r.mediaUrls?.[0]);
+  });
+
+  it('collects absolute CDN-host image URLs when cdnHost is provided (#86)', () => {
+    // Real Octo shape: RichText with an absolute URL on a separate CDN host.
+    const payload = {
+      type: MessageType.RichText,
+      content: [
+        { type: RICH_TEXT_BLOCK_IMAGE, url: 'https://cdn.example.com/im/chat/a.png' },
+        { type: RICH_TEXT_BLOCK_TEXT, text: '这是什么图' },
+      ],
+      plain: '[图片]这是什么图',
+    } as unknown as MessagePayload;
+    // Without cdnHost the CDN URL is dropped (the bug this fixes).
+    expect(resolveContent(payload, API_URL).mediaUrls).toBeUndefined();
+    // With cdnHost it is collected.
+    const r = resolveContent(payload, API_URL, 'cdn.example.com');
+    expect(r.mediaUrls).toEqual(['https://cdn.example.com/im/chat/a.png']);
   });
 
   it('uses top-level plain when present (server-authoritative)', () => {
