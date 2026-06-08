@@ -25,7 +25,6 @@ import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } f
 import { downloadInboundImage, MAX_IMAGES_PER_MESSAGE } from './media-inbound.js';
 import { handleCommand } from './commands.js';
 import { loadGroupConfig } from './group-config.js';
-import { WebhookServer } from './webhook.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes } from './file-inline-wrap.js';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
@@ -87,11 +86,11 @@ async function main(): Promise<void> {
     }
   }
 
-  // Handlers are wired and siblings registered — now open every transport. From
+  // Handlers are wired and siblings registered — now open every socket. From
   // this point inbound messages are dispatched, never ACK'd-and-dropped. Awaited
-  // so a webhook bind failure surfaces as a startup error. On a partial failure
-  // (e.g. one bot's port is taken), shut down the stacks that did start so we
-  // don't leave bound servers / open stores dangling before the fatal exit.
+  // so a connection failure surfaces as a startup error. On a partial failure
+  // (e.g. one bot's lock is held), shut down the stacks that did start so we
+  // don't leave open sockets / stores dangling before the fatal exit.
   const connected: BotStack[] = [];
   try {
     for (const s of stacks) {
@@ -99,7 +98,7 @@ async function main(): Promise<void> {
       connected.push(s);
     }
   } catch (err) {
-    console.error('[cc-channel-octo] Startup failed during transport connect; cleaning up...');
+    console.error('[cc-channel-octo] Startup failed during socket connect; cleaning up...');
     await Promise.allSettled(connected.map((s) => s.shutdown()));
     throw err;
   }
@@ -215,10 +214,9 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   // where a sibling bot's message slips through unrecognized.
   const onInbound = (msg: BotMessage): void => {
     if (gateway.draining) return;
-    // Drop self-authored messages. The WS path filters these in
-    // OctoGateway.handleMessage(); webhook mode calls onInbound directly, so
-    // apply the same guard here (otherwise a bot's own group message could be
-    // cached into group context as un-processed chatter).
+    // Drop self-authored messages. OctoGateway.handleMessage() already filters
+    // these on the WS path; guard here too for safety (otherwise a bot's own
+    // group message could be cached into group context as un-processed chatter).
     if (msg.from_uid === gateway.botId) return;
     const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId)
       .catch((err) => {
@@ -231,47 +229,16 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   };
   gateway.setMessageHandler(onInbound);
 
-  // v1.0 webhook transport: instead of the WS, run an HTTP server that feeds the
-  // same handler. The bot still registered over REST above (botId + outbound).
-  const useWebhook = config.transport === 'webhook';
-  let webhookServer: WebhookServer | undefined;
-  if (useWebhook) {
-    if (!config.webhook?.secret) {
-      // loadConfig enforces this, but guard for hand-built configs/tests.
-      throw new Error('webhook transport requires webhook.secret');
-    }
-    webhookServer = new WebhookServer({
-      host: config.webhook.host,
-      port: config.webhook.port,
-      path: config.webhook.path,
-      secret: config.webhook.secret,
-    });
-    webhookServer.setMessageHandler(onInbound);
-  }
-
-  // Phase 2 (called by main() after cross-registration): open the transport.
-  // Async + awaited so a webhook bind failure fails startup instead of leaving
+  // Phase 2 (called by main() after cross-registration): open the WebSocket.
+  // Async + awaited so a connection failure fails startup instead of leaving
   // the process "ready" with no inbound endpoint.
   const connect = async (): Promise<void> => {
-    if (useWebhook && webhookServer) {
-      // Bind the HTTP server FIRST so a bind failure (e.g. port taken) throws
-      // before we start the heartbeat / signal handlers — otherwise a failed
-      // start could leave those services + the lock running for this stack.
-      await webhookServer.listen(); // rejects on bind error → propagates to main()
-      // Then start REST runtime services (heartbeat + token refresh + signal-
-      // based graceful shutdown) WITHOUT opening the WS — webhook mode still
-      // depends on REST for outbound sends and needs the same lifecycle.
-      gateway.startServices();
-      console.log(`[cc-channel-octo] ${label}Bot ready (webhook): id=${gateway.botId}`);
-    } else {
-      gateway.connect();
-      console.log(`[cc-channel-octo] ${label}Bot connected: id=${gateway.botId}`);
-    }
+    gateway.connect();
+    console.log(`[cc-channel-octo] ${label}Bot connected: id=${gateway.botId}`);
   };
 
   const shutdown = async (): Promise<void> => {
     clearInterval(cwdCleanupTimer);
-    if (webhookServer) await webhookServer.close();
     await gateway.stop(activeHandlers);
     store.close();
   };
@@ -592,17 +559,19 @@ export async function handleMessage(
       // sessionCtx (cwd/memory partition) was built earlier so inbound images
       // could be downloaded into this session's sandbox.
 
-      // v0.3 tool progress (opt-in): send a brief "🔧 Running <tool>…" notice as
-      // the agent invokes tools. Dedup consecutive identical tools and cap the
-      // number of notices per turn so a tool-heavy run doesn't spam the channel.
-      let onToolUse: ((toolName: string) => void) | undefined;
+      // v0.3 tool progress (opt-in): send a brief "🔧 Running <tool>(<params>)"
+      // notice as the agent invokes tools. Dedup consecutive identical notices
+      // and cap the count per turn so a tool-heavy run doesn't spam the channel.
+      let onToolUse: ((toolName: string, toolInput?: unknown) => void) | undefined;
       if (config.sdk.toolProgress) {
-        let lastTool = '';
+        let lastNotice = '';
         let noticeCount = 0;
         const MAX_TOOL_NOTICES = 10;
-        onToolUse = (toolName: string): void => {
-          if (toolName === lastTool) return; // collapse repeats (e.g. Read×5)
-          lastTool = toolName;
+        onToolUse = (toolName: string, toolInput?: unknown): void => {
+          const params = formatToolParams(toolInput);
+          const label = params ? `${toolName}(${params})` : toolName;
+          if (label === lastNotice) return; // collapse exact repeats
+          lastNotice = label;
           if (noticeCount >= MAX_TOOL_NOTICES) return;
           noticeCount++;
           // Fire-and-forget — never block or fail the agent stream on a notice.
@@ -611,7 +580,7 @@ export async function handleMessage(
             botToken: config.botToken,
             channelId,
             channelType,
-            content: `🔧 Running ${toolName}…`,
+            content: `🔧 Running ${label}…`,
           }).catch((err) =>
             console.error(`[cc-channel-octo] tool-progress send failed: ${String(err)}`),
           );
@@ -747,6 +716,53 @@ export async function handleMessage(
 }
 
 // ─── G1/G11 helpers ───────────────────────────────────────────────────────────────────
+
+/** Max length of the rendered tool-params string in a 🔧 progress notice. */
+export const MAX_TOOL_PARAM_CHARS = 120;
+
+/**
+ * Render a tool's `input` as a compact, truncated one-liner for a tool-progress
+ * notice — e.g. `{command:"octo-cli group list"}` → `command: octo-cli group…`.
+ *
+ * Best-effort + defensive: this string is sent to a chat channel, so it is
+ * length-capped (MAX_TOOL_PARAM_CHARS) to avoid flooding and to bound accidental
+ * exposure of long inputs. Returns '' when there's nothing useful to show (the
+ * caller then renders just the bare tool name). Newlines collapse to one line.
+ */
+export function formatToolParams(input: unknown): string {
+  if (input === undefined || input === null) return '';
+  let s: string;
+  if (typeof input === 'string') {
+    s = input;
+  } else if (typeof input === 'object') {
+    // Prefer a flat "k: v, k: v" of primitive fields; fall back to JSON only
+    // when there ARE keys but none are primitive (e.g. all-nested). An object
+    // with no own keys renders as nothing (bare tool name).
+    const obj = input as Record<string, unknown>;
+    const parts: string[] = [];
+    for (const [k, v] of Object.entries(obj)) {
+      if (v === null || typeof v === 'object') continue; // skip nested/empty
+      parts.push(`${k}: ${String(v)}`);
+    }
+    if (parts.length > 0) s = parts.join(', ');
+    else if (Object.keys(obj).length === 0) s = '';
+    else s = safeJson(obj);
+  } else {
+    s = String(input);
+  }
+  s = s.replace(/\s+/g, ' ').trim();
+  if (s.length === 0) return '';
+  return s.length > MAX_TOOL_PARAM_CHARS ? `${s.slice(0, MAX_TOOL_PARAM_CHARS - 1)}…` : s;
+}
+
+/** JSON.stringify that never throws (circular refs → ''). */
+function safeJson(v: unknown): string {
+  try {
+    return JSON.stringify(v) ?? '';
+  } catch {
+    return '';
+  }
+}
 
 /**
  * Compact rendering of a message for the rolling [Group context] cache.

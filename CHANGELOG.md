@@ -8,6 +8,11 @@ While the major version is `0`, minor releases may carry breaking changes.
 
 ## [Unreleased]
 
+### Removed
+
+- **Webhook transport** (#105) — removed; the Octo server does not POST to the
+  bot, so webhook mode was dead code. WebSocket is the only transport.
+
 ### Fixed
 
 - **Router drops non-conversation channel types** (#68) — found in live
@@ -44,18 +49,6 @@ While the major version is `0`, minor releases may carry breaking changes.
   verified). New `src/skill-linker.ts`; `Config` gains derived `skillsDir` /
   `globalSkillsDir`. `sdk.settingSources` default flipped `[]` → `['project']`.
 
-- **Webhook inbound transport** (v1.0) — set `transport: "webhook"`
-  (`CC_OCTO_TRANSPORT=webhook`) to receive Octo messages over HTTP instead of the
-  WuKongIM WebSocket; the bot still registers over REST for its id and outbound
-  sends. New `src/webhook.ts` runs a `node:http` server: a shared secret is
-  **required** (`webhook.secret` / `CC_OCTO_WEBHOOK_SECRET`, header
-  `x-webhook-secret` or `?secret=`, constant-time compared; startup fails without
-  it), bodies are capped at 256 KiB, the bind host defaults to `127.0.0.1`, and
-  each valid POST feeds the same message pipeline as the WS path. Config gains
-  `transport` + `webhook.{host,port,path,secret}`, overridable per bot in
-  `bots[]`; multi-bot webhook binds must be distinct (validated at config time)
-  and webhook mode preserves the full REST lifecycle (heartbeat, token refresh,
-  graceful shutdown) without opening the WS.
 - **Per-group instructions** (v1.0, GROUP.md) — set `groupConfigDir`
   (`CC_OCTO_GROUP_CONFIG_DIR`) to a directory of `<groupId>.md` files; a matching
   file's contents are injected into that group's system prompt as a trusted

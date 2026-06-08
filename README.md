@@ -18,14 +18,13 @@ Users talk to a bot in Octo (DM or group @mention). The bot sends messages to Cl
 ## Features
 
 - **Streaming output** — Real-time response delivery via Octo's stream API with 800 ms throttled flushes, typing indicators, and automatic fallback to plain messages.
-- **Tool progress** *(opt-in)* — With `sdk.toolProgress` enabled, the bot posts brief `🔧 Running <tool>…` notices as the agent invokes tools, so users see activity during long tool-heavy turns (deduped + capped per turn).
+- **Tool progress** *(opt-in)* — With `sdk.toolProgress` enabled, the bot posts brief `🔧 Running <tool>(<params>)…` notices as the agent invokes tools (params are a truncated one-liner), so users see activity during long tool-heavy turns (deduped + capped per turn).
 - **Group chat awareness** — Responds only to @mentions. Injects recent group conversation as context so Claude understands the discussion.
 - **Session persistence** — SQLite-backed conversation history (40-message sliding window) with automatic 7-day expiry.
 - **In-chat commands** — `/reset` clears your own session's stored history (not the shared recent-group-context cache), `/config` shows the active settings, `/help` lists commands. Scoped per-user (even in groups); subject to the same per-session rate limit as normal messages.
 - **Rate limiting** — Per-session token bucket (default 5 req/min) with debounced rejection notices.
 - **Security by configuration** — `allowedTools` whitelist + per-session workspace isolation. No runtime permission prompts (headless mode).
 - **Multi-bot** — Run several independent bots in one process via a `bots[]` config array; each gets its own token, data directory, and sandbox root (no shared history).
-- **Webhook mode** — Optional HTTP inbound transport (`transport: "webhook"`) as an alternative to the WuKongIM long connection; a shared-secret-authenticated endpoint feeds the same pipeline.
 - **Zero infrastructure** — Single process, single SQLite file, `npm start` and go.
 
 ## Quick Start
@@ -120,7 +119,7 @@ configurable.
 | `sdk.permissionMode` | `bypassPermissions` | SDK permission mode |
 | `sdk.maxTurns` | *(SDK default)* | Max agentic turns per query |
 | `sdk.systemPrompt` | *(built-in)* | Custom system prompt (a `<baseDir>/<id>/SOUL.md` overrides this). |
-| `sdk.toolProgress` | `false` | When true, post `🔧 Running <tool>…` notices as the agent invokes tools (deduped, capped per turn) |
+| `sdk.toolProgress` | `false` | When true, post `🔧 Running <tool>(<params>)…` notices as the agent invokes tools (params truncated; deduped, capped per turn) |
 | `sdk.persistentSession` | `false` | When true, persist agent workspace state across messages via the SDK v2 Session API (resume by stored session id). `/reset` clears it. |
 | `sdk.settingSources` | `['project']` | Filesystem settings sources the SDK loads. Default `['project']` so it discovers skills symlinked into the session sandbox's `.claude/skills/` (see [Agent skills](#agent-skills)). Memory stays isolated regardless (inline auto-memory dir pin). Add `'user'` only to deliberately load the operator's real `~/.claude`. |
 | `groupConfigDir` | *(unset)* | Directory of per-group instruction files (`<groupId>.md`). A match is injected into the system prompt as trusted custom instructions for that group. See [Per-group instructions](#per-group-instructions). |
@@ -130,9 +129,6 @@ configurable.
 | `context.historyLimit` | `40` | Max messages in session history window |
 | `botBlocklist` | `[]` | Bot UIDs to ignore in DMs (prevents bot loops) |
 | `mentionFreeGroups` | `[]` | Group channel IDs where the bot responds to every text message without requiring an `@bot` mention (G12). |
-| `transport` | `websocket` | Inbound transport: `websocket` (WuKongIM long connection) or `webhook` (HTTP endpoint). See [Webhook mode](#webhook-mode). |
-| `webhook.secret` | *(unset)* | Shared secret required in webhook mode (header `x-webhook-secret` or `?secret=`). |
-| `webhook.host` / `.port` / `.path` | `127.0.0.1` / `8787` / `/octo/webhook` | Webhook server bind + route. |
 
 ### Self-hosted gateway
 
@@ -256,37 +252,9 @@ Each bot runs a fully independent stack (gateway, router, store). Its
 `data`/`workspace`/`memory` are derived as `<baseDir>/<id>/…`, so **bots never
 share conversation history, working directories, or memory** — the isolation is
 structural and not overridable. A bot may override shared fields (`apiUrl`,
-`model`, `systemPrompt`, `transport`, `webhook`, `botBlocklist`, mention lists)
+`model`, `systemPrompt`, `botBlocklist`, mention lists)
 in its inline `bots[]` entry or, with higher priority, its per-bot config.json.
 A single bot is just one entry (conventionally `id: "default"`).
-
-### Webhook mode
-
-By default the gateway holds a WuKongIM WebSocket. Set `transport: "webhook"` to
-instead receive inbound messages over HTTP — useful behind a reverse proxy or
-where outbound long connections aren't possible. The bot still registers over
-REST (for its id and for sending replies); only the inbound path changes.
-
-```jsonc
-// ~/.cc-channel-octo/config.json (or a per-bot config.json)
-{
-  "transport": "webhook",
-  "webhook": { "secret": "<openssl rand -hex 32>", "port": 8787 }
-}
-// → POST http://127.0.0.1:8787/octo/webhook
-```
-
-Every request must present the shared secret (header `x-webhook-secret` or
-`?secret=`), compared in constant time — `webhook.secret` is **required** in this
-mode (startup fails without it), since an open endpoint would let anyone inject
-messages. Bodies are capped at 256 KiB. The server binds `127.0.0.1` by default;
-put TLS termination / the public hop in front of it (a reverse proxy), and post
-the Octo message JSON (top-level, or under `message`/`data`) to the path.
-
-In multi-bot mode, each webhook bot needs a **distinct** `host:port` (a separate
-path is not enough — one HTTP server per bot binds the whole port) — add
-`transport`/`webhook` overrides per `bots[]` entry; startup fails fast if two
-bots would bind the same `host:port`.
 
 ## Security Model
 
@@ -440,7 +408,7 @@ src/
 | **v0.1** | Text messaging, streaming, session persistence, rate limiting, security model |
 | **v0.2** *(released)* | Media reception & sending (image/file/RichText), @mention, group context, per-session `cwdBase` isolation, self-hosted gateway, SSRF/prompt-injection hardening |
 | **v0.3** *(merged, unreleased)* | Slash commands, tool progress, multi-bot, v2 Session API |
-| **v1.0** *(merged, unreleased)* | GROUP.md per-group instructions, webhook mode |
+| **v1.0** *(merged, unreleased)* | GROUP.md per-group instructions |
 
 ## Contributing
 
