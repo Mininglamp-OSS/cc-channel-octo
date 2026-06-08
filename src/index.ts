@@ -12,7 +12,8 @@ import { SessionStore } from './session-store.js';
 import { OctoGateway } from './gateway.js';
 import { SessionRouter } from './session-router.js';
 import { GroupContext } from './group-context.js';
-import { queryAgent, sanitizeForSystemPrompt } from './agent-bridge.js';
+import { queryAgent } from './agent-bridge.js';
+import { sanitizeDisplayName, escapeSectionMarkers, sanitizePromptBody } from './prompt-safety.js';
 import type { SessionCtx } from './cwd-resolver.js';
 import { cleanupExpiredCwds, resolveMemoryDir } from './cwd-resolver.js';
 import { StreamRelay } from './stream-relay.js';
@@ -25,7 +26,6 @@ import { handleCommand } from './commands.js';
 import { loadGroupConfig } from './group-config.js';
 import { WebhookServer } from './webhook.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes } from './file-inline-wrap.js';
-import { Buffer } from 'node:buffer';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -414,27 +414,15 @@ export async function handleMessage(
         const rawReplyFrom = replyData.from_name ?? replyData.from_uid ?? 'unknown';
         if (rawReplyContent) {
           const QUOTE_MAX_BYTES = 4_096;
-          let truncated = rawReplyContent;
-          if (Buffer.byteLength(rawReplyContent, 'utf-8') > QUOTE_MAX_BYTES) {
-            // Byte-safe truncate: take a generous char slice then trim by bytes.
-            // 4096 bytes can hold ~1365 CJK chars; slice 1366 to be safe and shrink.
-            truncated = rawReplyContent.slice(0, QUOTE_MAX_BYTES);
-            while (Buffer.byteLength(truncated, 'utf-8') > QUOTE_MAX_BYTES) {
-              truncated = truncated.slice(0, -1);
-            }
-            truncated += '…[truncated]';
-          }
-          // S3 sanitization: strip ']' and newlines from from_name (prevent
-          // breaking out of the `[Quoted message from ...]` marker), then
-          // escape any section-marker patterns in the body. The combined
-          // string is then sanitized once more to escape any [Quoted message
-          // from ...] pattern the body might contain.
-          const replyFrom = String(rawReplyFrom)
-            .replace(/[\]\r\n]/g, ' ')
-            .slice(0, 128);
-          const sanitizedBody = sanitizeForSystemPrompt(truncated);
-          quotePrefix = sanitizeForSystemPrompt(
-            `[Quoted message from ${replyFrom}]: ${sanitizedBody}\n---\n`,
+          // Reuse the shared byte-safe truncator (no second copy of the loop).
+          const { truncated: body, wasTruncated } = truncateUtf8ByBytes(rawReplyContent, QUOTE_MAX_BYTES);
+          const quoteBody = wasTruncated ? `${body}…[truncated]` : body;
+          // Shared choke point: bound+strip the user display name so it can't
+          // break out of the `[Quoted message from <name>]` marker, and escape
+          // role labels + section markers in the body (sanitizePromptBody).
+          const replyFrom = sanitizeDisplayName(rawReplyFrom, 'unknown');
+          quotePrefix = escapeSectionMarkers(
+            `[Quoted message from ${replyFrom}]: ${sanitizePromptBody(quoteBody)}\n---\n`,
           );
         }
       }
