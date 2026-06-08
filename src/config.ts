@@ -372,148 +372,6 @@ function mergeConfig(base: Config, override: PartialConfig): Config {
   };
 }
 
-function parseCsv(value: string): string[] {
-  return value
-    .split(',')
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-}
-
-function parseIntStrict(value: string, name: string, minValue = 1): number {
-  if (!/^\d+$/.test(value)) {
-    throw new Error(`Invalid integer for ${name}: ${value}`);
-  }
-  const n = Number(value);
-  if (!Number.isFinite(n) || n < minValue) {
-    throw new Error(`Invalid integer for ${name}: ${value} (must be >= ${minValue})`);
-  }
-  return n;
-}
-
-function applyEnv(cfg: Config): Config {
-  const env = process.env;
-  const next: Config = {
-    ...cfg,
-    sdk: { ...cfg.sdk },
-    rateLimit: { ...cfg.rateLimit },
-    context: { ...cfg.context },
-  };
-
-  // Fail loudly on REMOVED directory env vars instead of silently ignoring them.
-  // Dirs are now derived from baseDir (<baseDir>/<id>/{data,workspace,memory}),
-  // so a deploy that still sets e.g. CC_OCTO_DATA_DIR=/mnt/vol would otherwise
-  // write under ~/.cc-channel-octo and quietly miss its mounted volume.
-  const removedDirEnv = ['CC_OCTO_CWDBASE', 'CC_OCTO_CWD', 'CC_OCTO_DATA_DIR', 'CC_OCTO_MEMORY_BASE']
-    .filter((k) => env[k] !== undefined && env[k] !== '');
-  if (removedDirEnv.length > 0) {
-    throw new Error(
-      `Removed config env var(s): ${removedDirEnv.join(', ')}. Per-bot directories ` +
-      `are no longer configurable — they are derived as <baseDir>/<botId>/{data,` +
-      `workspace,memory}, where baseDir is the directory of ~/.cc-channel-octo/config.json. ` +
-      `Move data by relocating ~/.cc-channel-octo (e.g. a symlink to your volume) and ` +
-      `unset these variables.`,
-    );
-  }
-
-  if (env.CC_OCTO_BOT_TOKEN) next.botToken = env.CC_OCTO_BOT_TOKEN;
-  if (env.CC_OCTO_API_URL) next.apiUrl = env.CC_OCTO_API_URL;
-  if (env.CC_OCTO_GROUP_CONFIG_DIR) next.groupConfigDir = env.CC_OCTO_GROUP_CONFIG_DIR;
-  // v1.0 webhook transport env overrides.
-  if (env.CC_OCTO_TRANSPORT) {
-    const t = env.CC_OCTO_TRANSPORT.trim().toLowerCase();
-    if (t === 'websocket' || t === 'webhook') next.transport = t;
-  }
-  if (
-    env.CC_OCTO_WEBHOOK_HOST || env.CC_OCTO_WEBHOOK_PORT ||
-    env.CC_OCTO_WEBHOOK_PATH || env.CC_OCTO_WEBHOOK_SECRET
-  ) {
-    next.webhook = { ...next.webhook };
-    if (env.CC_OCTO_WEBHOOK_HOST) next.webhook.host = env.CC_OCTO_WEBHOOK_HOST;
-    if (env.CC_OCTO_WEBHOOK_PORT) {
-      next.webhook.port = parseIntStrict(env.CC_OCTO_WEBHOOK_PORT, 'CC_OCTO_WEBHOOK_PORT', 1);
-    }
-    if (env.CC_OCTO_WEBHOOK_PATH) next.webhook.path = env.CC_OCTO_WEBHOOK_PATH;
-    if (env.CC_OCTO_WEBHOOK_SECRET) next.webhook.secret = env.CC_OCTO_WEBHOOK_SECRET;
-  }
-
-  if (env.CC_OCTO_SDK_MODEL) next.sdk.model = env.CC_OCTO_SDK_MODEL;
-  if (env.CC_OCTO_SDK_ALLOWED_TOOLS) {
-    // Q2: a `*` token anywhere in the value means "allow every tool" — collapse
-    // to the wildcard sentinel rather than passing a literal `*` through as a
-    // (bogus) tool name. So `*`, ` * `, and `*,Read` all mean wildcard.
-    const tools = parseCsv(env.CC_OCTO_SDK_ALLOWED_TOOLS);
-    next.sdk.allowedTools = tools.includes('*') ? '*' : tools;
-  }
-  if (env.CC_OCTO_SDK_PERMISSION_MODE) {
-    next.sdk.permissionMode = env.CC_OCTO_SDK_PERMISSION_MODE;
-  }
-  if (env.CC_OCTO_SDK_MAX_TURNS) {
-    next.sdk.maxTurns = parseIntStrict(env.CC_OCTO_SDK_MAX_TURNS, 'CC_OCTO_SDK_MAX_TURNS', 0);
-  }
-  if (env.CC_OCTO_SDK_SYSTEM_PROMPT) next.sdk.systemPrompt = env.CC_OCTO_SDK_SYSTEM_PROMPT;
-  if (env.CC_OCTO_SDK_SETTING_SOURCES) {
-    next.sdk.settingSources = parseCsv(env.CC_OCTO_SDK_SETTING_SOURCES);
-  }
-  // v0.3: tool-progress messages. Accept the usual truthy spellings.
-  if (env.CC_OCTO_SDK_TOOL_PROGRESS !== undefined) {
-    next.sdk.toolProgress = /^(1|true|yes|on)$/i.test(env.CC_OCTO_SDK_TOOL_PROGRESS.trim());
-  }
-  // v0.3: persistent (v2) sessions.
-  if (env.CC_OCTO_SDK_PERSISTENT_SESSION !== undefined) {
-    next.sdk.persistentSession = /^(1|true|yes|on)$/i.test(env.CC_OCTO_SDK_PERSISTENT_SESSION.trim());
-  }
-  // Q1: ANTHROPIC_BASE_URL uses the Anthropic SDK standard variable name
-  // (no CC_OCTO_ prefix) so operators can reuse existing gateway configs.
-  if (env.ANTHROPIC_BASE_URL) {
-    next.sdk.anthropicBaseUrl = env.ANTHROPIC_BASE_URL;
-  }
-
-  if (env.CC_OCTO_RATE_LIMIT_MAX_PER_MINUTE) {
-    next.rateLimit.maxPerMinute = parseIntStrict(
-      env.CC_OCTO_RATE_LIMIT_MAX_PER_MINUTE,
-      'CC_OCTO_RATE_LIMIT_MAX_PER_MINUTE',
-      0,
-    );
-  }
-
-  if (env.CC_OCTO_CONTEXT_MAX_CHARS) {
-    next.context.maxContextChars = parseIntStrict(
-      env.CC_OCTO_CONTEXT_MAX_CHARS,
-      'CC_OCTO_CONTEXT_MAX_CHARS',
-      0,
-    );
-  }
-  if (env.CC_OCTO_CONTEXT_HISTORY_LIMIT) {
-    next.context.historyLimit = parseIntStrict(
-      env.CC_OCTO_CONTEXT_HISTORY_LIMIT,
-      'CC_OCTO_CONTEXT_HISTORY_LIMIT',
-      0,
-    );
-  }
-
-  if (env.CC_OCTO_BOT_BLOCKLIST) {
-    next.botBlocklist = parseCsv(env.CC_OCTO_BOT_BLOCKLIST);
-  }
-
-  if (env.CC_OCTO_ALLOWED_BOT_UIDS) {
-    next.allowedBotUids = parseCsv(env.CC_OCTO_ALLOWED_BOT_UIDS);
-  }
-
-  if (env.CC_OCTO_MENTION_FREE_GROUPS) {
-    next.mentionFreeGroups = parseCsv(env.CC_OCTO_MENTION_FREE_GROUPS);
-  }
-
-  if (env.CC_OCTO_MAX_RESPONSE_CHARS) {
-    next.maxResponseChars = parseIntStrict(
-      env.CC_OCTO_MAX_RESPONSE_CHARS,
-      'CC_OCTO_MAX_RESPONSE_CHARS',
-      1,
-    );
-  }
-
-  return next;
-}
-
 /**
  * SSRF protection for apiUrl: implemented in url-policy.ts (isAllowedApiUrl).
  * S6 fix: now rejects https://127.0.0.1 too — https doesn't make a private
@@ -534,8 +392,11 @@ export function loadConfig(configPath?: string): Config {
     );
   }
   const fileCfg = readConfigFile(path);
-  const merged = mergeConfig(defaults(), fileCfg);
-  const final = applyEnv(merged);
+  // Config comes ONLY from config.json (global + per-bot layers) — there is no
+  // environment-variable override path (#103). The sole exception that still
+  // *reads* the environment lives nowhere here: `sdk.anthropicBaseUrl` is set in
+  // config.json and forwarded to the SDK subprocess by agent-bridge.
+  const final = mergeConfig(defaults(), fileCfg);
 
   // baseDir = the directory containing the global config.json. Every bot's
   // subtree lives at <baseDir>/<botId>/…. resolveBotConfigs() derives the

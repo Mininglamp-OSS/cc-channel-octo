@@ -100,48 +100,39 @@ npm start
 
 The bot is now online. Send it a DM or @mention it in a group.
 
-### Environment Variables
-
-Shared/global fields can be overridden via environment variables (highest priority):
-
-```bash
-CC_OCTO_API_URL=https://octo.example.com \
-npm start
-```
-
-> Per-bot tokens and the directory layout are NOT env-configurable — the token
-> lives in `<baseDir>/<id>/config.json` and all dirs derive from `baseDir`.
-
 ## Configuration
 
-Two layers: a **global** `~/.cc-channel-octo/config.json` (shared defaults + the
-`bots` list) and one **per-bot** `~/.cc-channel-octo/<id>/config.json` (its
-token + overrides). Per-bot fields win; env vars override the shared layer.
+All configuration comes from JSON files — there are **no environment-variable
+overrides**. Two layers: a **global** `~/.cc-channel-octo/config.json` (shared
+defaults + the `bots` list) and one **per-bot** `~/.cc-channel-octo/<id>/config.json`
+(its token + overrides). Per-bot fields win over the global layer; per-bot
+directories are derived from `baseDir` (see the tree above) and are not
+configurable.
 
-| Field | Env Var | Default | Description |
-|-------|---------|---------|-------------|
-| `botToken` | — | *(required, per-bot)* | Octo bot token (`bf_*`). Lives in `<baseDir>/<id>/config.json`, not the global file. |
-| `apiUrl` | `CC_OCTO_API_URL` | *(required)* | Octo API base URL (shared; a bot may override). |
-| `bots` | — | `[{id:"default"}]` | Which bots to run; each `id` selects its subtree + per-bot config. |
-| *(dirs)* | — | *(derived)* | `data`/`workspace`/`memory` are always `<baseDir>/<id>/…` — not configurable. |
-| `sdk.model` | `CC_OCTO_SDK_MODEL` | *(SDK default)* | Claude model override |
-| `sdk.allowedTools` | `CC_OCTO_SDK_ALLOWED_TOOLS` | `"*"` | Either `"*"` (allow every tool the SDK exposes) or an explicit string array whitelist. Env accepts a value containing `*` (wildcard) or a CSV list. |
-| `sdk.permissionMode` | `CC_OCTO_SDK_PERMISSION_MODE` | `bypassPermissions` | SDK permission mode |
-| `sdk.maxTurns` | `CC_OCTO_SDK_MAX_TURNS` | *(SDK default)* | Max agentic turns per query |
-| `sdk.systemPrompt` | `CC_OCTO_SDK_SYSTEM_PROMPT` | *(built-in)* | Custom system prompt |
-| `sdk.toolProgress` | `CC_OCTO_SDK_TOOL_PROGRESS` | `false` | When true, post `🔧 Running <tool>…` notices as the agent invokes tools (deduped, capped per turn) |
-| `sdk.persistentSession` | `CC_OCTO_SDK_PERSISTENT_SESSION` | `false` | When true, persist agent workspace state across messages via the SDK v2 Session API (resume by stored session id). `/reset` clears it. |
-| `sdk.settingSources` | `CC_OCTO_SDK_SETTING_SOURCES` | `['project']` | Filesystem settings sources the SDK loads. Default `['project']` so it discovers skills symlinked into the session sandbox's `.claude/skills/` (see [Agent skills](#agent-skills)). Memory stays isolated regardless (inline auto-memory dir pin). Add `'user'` only to deliberately load the operator's real `~/.claude`. |
-| `groupConfigDir` | `CC_OCTO_GROUP_CONFIG_DIR` | *(unset)* | Directory of per-group instruction files (`<groupId>.md`). A match is injected into the system prompt as trusted custom instructions for that group. See [Per-group instructions](#per-group-instructions). |
-| `sdk.anthropicBaseUrl` | `ANTHROPIC_BASE_URL` | *(unset)* | Override the upstream Claude API endpoint. See [Self-hosted gateway](#self-hosted-gateway) below. |
-| `rateLimit.maxPerMinute` | `CC_OCTO_RATE_LIMIT_MAX_PER_MINUTE` | `5` | Max requests per minute per session |
-| `context.maxContextChars` | `CC_OCTO_CONTEXT_MAX_CHARS` | `6000` | Max characters of group context injected into prompts |
-| `context.historyLimit` | `CC_OCTO_CONTEXT_HISTORY_LIMIT` | `40` | Max messages in session history window |
-| `botBlocklist` | `CC_OCTO_BOT_BLOCKLIST` | `[]` | Comma-separated bot UIDs to ignore in DMs (prevents bot loops) |
-| `mentionFreeGroups` | `CC_OCTO_MENTION_FREE_GROUPS` | `[]` | Comma-separated group channel IDs where the bot responds to every text message without requiring an `@bot` mention (G12). |
-| `transport` | `CC_OCTO_TRANSPORT` | `websocket` | Inbound transport: `websocket` (WuKongIM long connection) or `webhook` (HTTP endpoint). See [Webhook mode](#webhook-mode). |
-| `webhook.secret` | `CC_OCTO_WEBHOOK_SECRET` | *(unset)* | Shared secret required in webhook mode (header `x-webhook-secret` or `?secret=`). |
-| `webhook.host` / `.port` / `.path` | `CC_OCTO_WEBHOOK_HOST` / `_PORT` / `_PATH` | `127.0.0.1` / `8787` / `/octo/webhook` | Webhook server bind + route. |
+| Field | Default | Description |
+|-------|---------|-------------|
+| `botToken` | *(required, per-bot)* | Octo bot token (`bf_*`). Lives in `<baseDir>/<id>/config.json`, not the global file. |
+| `apiUrl` | *(required)* | Octo API base URL (shared; a bot may override). |
+| `bots` | `[{id:"default"}]` | Which bots to run; each `id` selects its subtree + per-bot config. |
+| *(dirs)* | *(derived)* | `data`/`workspace`/`memory`/`skills` are always `<baseDir>/<id>/…` — not configurable. |
+| `sdk.model` | *(SDK default)* | Claude model override |
+| `sdk.allowedTools` | `"*"` | Either `"*"` (allow every tool the SDK exposes) or an explicit string array whitelist. |
+| `sdk.permissionMode` | `bypassPermissions` | SDK permission mode |
+| `sdk.maxTurns` | *(SDK default)* | Max agentic turns per query |
+| `sdk.systemPrompt` | *(built-in)* | Custom system prompt (a `<baseDir>/<id>/SOUL.md` overrides this). |
+| `sdk.toolProgress` | `false` | When true, post `🔧 Running <tool>…` notices as the agent invokes tools (deduped, capped per turn) |
+| `sdk.persistentSession` | `false` | When true, persist agent workspace state across messages via the SDK v2 Session API (resume by stored session id). `/reset` clears it. |
+| `sdk.settingSources` | `['project']` | Filesystem settings sources the SDK loads. Default `['project']` so it discovers skills symlinked into the session sandbox's `.claude/skills/` (see [Agent skills](#agent-skills)). Memory stays isolated regardless (inline auto-memory dir pin). Add `'user'` only to deliberately load the operator's real `~/.claude`. |
+| `groupConfigDir` | *(unset)* | Directory of per-group instruction files (`<groupId>.md`). A match is injected into the system prompt as trusted custom instructions for that group. See [Per-group instructions](#per-group-instructions). |
+| `sdk.anthropicBaseUrl` | *(unset)* | Override the upstream Claude API endpoint. See [Self-hosted gateway](#self-hosted-gateway) below. |
+| `rateLimit.maxPerMinute` | `5` | Max requests per minute per session |
+| `context.maxContextChars` | `6000` | Max characters of group context injected into prompts |
+| `context.historyLimit` | `40` | Max messages in session history window |
+| `botBlocklist` | `[]` | Bot UIDs to ignore in DMs (prevents bot loops) |
+| `mentionFreeGroups` | `[]` | Group channel IDs where the bot responds to every text message without requiring an `@bot` mention (G12). |
+| `transport` | `websocket` | Inbound transport: `websocket` (WuKongIM long connection) or `webhook` (HTTP endpoint). See [Webhook mode](#webhook-mode). |
+| `webhook.secret` | *(unset)* | Shared secret required in webhook mode (header `x-webhook-secret` or `?secret=`). |
+| `webhook.host` / `.port` / `.path` | `127.0.0.1` / `8787` / `/octo/webhook` | Webhook server bind + route. |
 
 ### Self-hosted gateway
 
@@ -165,13 +156,6 @@ resolve to a private/link-local address. An unsafe value fails fast at startup.
 }
 ```
 
-Or via environment (highest priority, no `CC_OCTO_` prefix — uses the Anthropic
-SDK standard variable name):
-
-```bash
-ANTHROPIC_BASE_URL=https://claude-gw.internal.example.com npm start
-```
-
 Leave the field unset to talk to Anthropic's public endpoint directly.
 
 ### Per-group instructions
@@ -183,10 +167,11 @@ that group's system prompt as a trusted, **unsanitized** `[Group instructions]`
 block. Only groups use this; DMs key on the peer uid. The key is the channel id,
 so all topics under one `CommunityTopic` channel id share the same file.
 
-```bash
-CC_OCTO_GROUP_CONFIG_DIR=/home/deploy/cc-octo-groups npm start
-# /home/deploy/cc-octo-groups/s12_345.md:
-#   Always answer in formal English and cite sources.
+```jsonc
+// ~/.cc-channel-octo/config.json
+{ "groupConfigDir": "/home/deploy/cc-octo-groups" }
+// /home/deploy/cc-octo-groups/s12_345.md:
+//   Always answer in formal English and cite sources.
 ```
 
 > ⚠️ **Security — this is a trusted, unsanitized prompt-injection sink.** Its
@@ -282,12 +267,13 @@ instead receive inbound messages over HTTP — useful behind a reverse proxy or
 where outbound long connections aren't possible. The bot still registers over
 REST (for its id and for sending replies); only the inbound path changes.
 
-```bash
-CC_OCTO_TRANSPORT=webhook \
-CC_OCTO_WEBHOOK_SECRET=$(openssl rand -hex 32) \
-CC_OCTO_WEBHOOK_PORT=8787 \
-npm start
-# → POST http://127.0.0.1:8787/octo/webhook
+```jsonc
+// ~/.cc-channel-octo/config.json (or a per-bot config.json)
+{
+  "transport": "webhook",
+  "webhook": { "secret": "<openssl rand -hex 32>", "port": 8787 }
+}
+// → POST http://127.0.0.1:8787/octo/webhook
 ```
 
 Every request must present the shared secret (header `x-webhook-secret` or

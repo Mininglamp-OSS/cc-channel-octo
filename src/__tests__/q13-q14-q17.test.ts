@@ -63,12 +63,10 @@ describe("SessionRouter global rate limit (Q13)", () => {
   });
 });
 
-// ─── Q14: parseIntStrict allows 0 ──────────────────────────────────────────
+// ─── Q14: 0 is a valid maxTurns / historyLimit ─────────────────────────────
 
 describe("parseIntStrict allows 0 (Q14)", () => {
-  it("accepts 0 for maxTurns", async () => {
-    // This is tested via config.test.ts 'accepts zero for maxTurns' test.
-    // Additional verification here: loadConfig with env var set to 0.
+  it("accepts 0 for maxTurns from the config file", async () => {
     const { loadConfig } = await import("../config.js");
     const { writeFileSync, mkdtempSync } = await import("node:fs");
     const { join } = await import("node:path");
@@ -76,18 +74,13 @@ describe("parseIntStrict allows 0 (Q14)", () => {
 
     const dir = mkdtempSync(join(tmpdir(), "q14-"));
     const cfgPath = join(dir, "config.json");
-    writeFileSync(cfgPath, JSON.stringify({ botToken: "bf_t", apiUrl: "https://a", cwdBase: "/test/cwdbase" }));
+    writeFileSync(cfgPath, JSON.stringify({ botToken: "bf_t", apiUrl: "https://a", sdk: { maxTurns: 0 } }));
 
-    process.env.CC_OCTO_SDK_MAX_TURNS = "0";
-    try {
-      const cfg = loadConfig(cfgPath);
-      expect(cfg.sdk.maxTurns).toBe(0);
-    } finally {
-      delete process.env.CC_OCTO_SDK_MAX_TURNS;
-    }
+    const cfg = loadConfig(cfgPath);
+    expect(cfg.sdk.maxTurns).toBe(0);
   });
 
-  it("accepts 0 for historyLimit", async () => {
+  it("accepts 0 for historyLimit from the config file", async () => {
     const { loadConfig } = await import("../config.js");
     const { writeFileSync, mkdtempSync } = await import("node:fs");
     const { join } = await import("node:path");
@@ -95,40 +88,10 @@ describe("parseIntStrict allows 0 (Q14)", () => {
 
     const dir = mkdtempSync(join(tmpdir(), "q14-"));
     const cfgPath = join(dir, "config.json");
-    writeFileSync(cfgPath, JSON.stringify({ botToken: "bf_t", apiUrl: "https://a", cwdBase: "/test/cwdbase" }));
+    writeFileSync(cfgPath, JSON.stringify({ botToken: "bf_t", apiUrl: "https://a", context: { historyLimit: 0 } }));
 
-    process.env.CC_OCTO_CONTEXT_HISTORY_LIMIT = "0";
-    try {
-      const cfg = loadConfig(cfgPath);
-      expect(cfg.context.historyLimit).toBe(0);
-    } finally {
-      delete process.env.CC_OCTO_CONTEXT_HISTORY_LIMIT;
-    }
-  });
-
-  it("still rejects negative and non-numeric", async () => {
-    const { loadConfig } = await import("../config.js");
-    const { writeFileSync, mkdtempSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    const { tmpdir } = await import("node:os");
-
-    const dir = mkdtempSync(join(tmpdir(), "q14-"));
-    const cfgPath = join(dir, "config.json");
-    writeFileSync(cfgPath, JSON.stringify({ botToken: "bf_t", apiUrl: "https://a", cwdBase: "/test/cwdbase" }));
-
-    process.env.CC_OCTO_SDK_MAX_TURNS = "-1";
-    try {
-      expect(() => loadConfig(cfgPath)).toThrow(/Invalid integer/);
-    } finally {
-      delete process.env.CC_OCTO_SDK_MAX_TURNS;
-    }
-
-    process.env.CC_OCTO_SDK_MAX_TURNS = "abc";
-    try {
-      expect(() => loadConfig(cfgPath)).toThrow(/Invalid integer/);
-    } finally {
-      delete process.env.CC_OCTO_SDK_MAX_TURNS;
-    }
+    const cfg = loadConfig(cfgPath);
+    expect(cfg.context.historyLimit).toBe(0);
   });
 });
 

@@ -2,12 +2,10 @@
  * Config tests.
  *
  * Coverage:
- *  - loadConfig three-level priority (env > file > defaults)
- *  - parseCsv / parseIntStrict boundary cases
+ *  - loadConfig file-over-defaults priority
  *  - Required field validation (botToken / apiUrl)
  *  - Invalid JSON error message includes file path
  *  - _-prefix key filtering
- *  - Full CC_OCTO_* env override coverage
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -108,9 +106,9 @@ describe('loadConfig defaults', () => {
   });
 });
 
-// ─── 2. Three-Level Priority ────────────────────────────────────────────────
+// ─── 2. Config File over Defaults ───────────────────────────────────────────
 
-describe('three-level priority: env > file > defaults', () => {
+describe('config-file over defaults', () => {
   beforeEach(setup);
   afterEach(teardown);
 
@@ -123,26 +121,6 @@ describe('three-level priority: env > file > defaults', () => {
     const cfg = loadConfig(path);
     expect(cfg.apiUrl).toBe('https://file.test');
     expect(cfg.rateLimit.maxPerMinute).toBe(10);
-  });
-
-  it('env overrides file', () => {
-    const path = writeConfig({
-      botToken: 'bf_file',
-      apiUrl: 'https://file.test',
-    });
-    process.env.CC_OCTO_API_URL = 'https://env.override';
-    const cfg = loadConfig(path);
-    expect(cfg.apiUrl).toBe('https://env.override');
-  });
-
-  it('env overrides defaults when no config file', () => {
-    process.env.CC_OCTO_BOT_TOKEN = 'bf_env';
-    process.env.CC_OCTO_API_URL = 'https://env.test';
-    const cfg = loadConfig(join(tmpDir, 'nonexistent.json'));
-    expect(cfg.botToken).toBe('bf_env');
-    expect(cfg.apiUrl).toBe('https://env.test');
-    // baseDir derives from the (nonexistent) config path's directory.
-    expect(cfg.baseDir).toBe(tmpDir);
   });
 });
 
@@ -183,28 +161,6 @@ describe('required field validation', () => {
   });
 });
 
-// ─── Removed dir env vars fail loudly (migration safety) ────────────────
-
-describe('removed directory env vars', () => {
-  beforeEach(setup);
-  afterEach(teardown);
-
-  it.each(['CC_OCTO_CWDBASE', 'CC_OCTO_CWD', 'CC_OCTO_DATA_DIR', 'CC_OCTO_MEMORY_BASE'])(
-    'throws a migration error when %s is set (no silent mislocation)',
-    (envVar) => {
-      const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-      process.env[envVar] = '/some/path';
-      expect(() => loadConfig(path)).toThrow(/Removed config env var/);
-    },
-  );
-
-  it('a blank removed env var is treated as unset (no throw)', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_DATA_DIR = '';
-    expect(() => loadConfig(path)).not.toThrow();
-  });
-});
-
 // ─── 4. Invalid JSON ───────────────────────────────────────────────────────
 
 describe('invalid config file', () => {
@@ -238,182 +194,16 @@ describe('_-prefix key filtering', () => {
   });
 });
 
-// ─── 6. Env Override Full Coverage ──────────────────────────────────────────
-
-describe('CC_OCTO_* env override coverage', () => {
-  beforeEach(setup);
-  afterEach(teardown);
-
-  it('CC_OCTO_BOT_TOKEN + CC_OCTO_API_URL', () => {
-    process.env.CC_OCTO_BOT_TOKEN = 'bf_env_tok';
-    process.env.CC_OCTO_API_URL = 'https://env-api';
-    const cfg = loadConfig(join(tmpDir, 'nope.json'));
-    expect(cfg.botToken).toBe('bf_env_tok');
-    expect(cfg.apiUrl).toBe('https://env-api');
-  });
-
-  it('CC_OCTO_SDK_MODEL', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_MODEL = 'claude-opus-4-0-20250514';
-    expect(loadConfig(path).sdk.model).toBe('claude-opus-4-0-20250514');
-  });
-
-  it('CC_OCTO_SDK_ALLOWED_TOOLS (csv)', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_ALLOWED_TOOLS = 'Read, Grep, Glob';
-    expect(loadConfig(path).sdk.allowedTools).toEqual(['Read', 'Grep', 'Glob']);
-  });
-
-  it('CC_OCTO_SDK_PERMISSION_MODE', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_PERMISSION_MODE = 'acceptEdits';
-    expect(loadConfig(path).sdk.permissionMode).toBe('acceptEdits');
-  });
-
-  it('CC_OCTO_SDK_MAX_TURNS', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_MAX_TURNS = '10';
-    expect(loadConfig(path).sdk.maxTurns).toBe(10);
-  });
-
-  it('CC_OCTO_SDK_SYSTEM_PROMPT', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_SYSTEM_PROMPT = 'You are a helpful bot';
-    expect(loadConfig(path).sdk.systemPrompt).toBe('You are a helpful bot');
-  });
-
-  it('CC_OCTO_SDK_SETTING_SOURCES (csv)', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_SETTING_SOURCES = 'user, project';
-    expect(loadConfig(path).sdk.settingSources).toEqual(['user', 'project']);
-  });
-
-  it('CC_OCTO_RATE_LIMIT_MAX_PER_MINUTE', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_RATE_LIMIT_MAX_PER_MINUTE = '20';
-    expect(loadConfig(path).rateLimit.maxPerMinute).toBe(20);
-  });
-
-  it('CC_OCTO_CONTEXT_MAX_CHARS', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_CONTEXT_MAX_CHARS = '3000';
-    expect(loadConfig(path).context.maxContextChars).toBe(3000);
-  });
-
-  it('CC_OCTO_CONTEXT_HISTORY_LIMIT', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_CONTEXT_HISTORY_LIMIT = '20';
-    expect(loadConfig(path).context.historyLimit).toBe(20);
-  });
-
-  it('CC_OCTO_BOT_BLOCKLIST (csv)', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_BOT_BLOCKLIST = 'bot-a, bot-b, bot-c';
-    expect(loadConfig(path).botBlocklist).toEqual(['bot-a', 'bot-b', 'bot-c']);
-  });
-
-  it('CC_OCTO_MENTION_FREE_GROUPS (csv) overrides config (G12)', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_MENTION_FREE_GROUPS = 'group-1, group-2,group-3';
-    expect(loadConfig(path).mentionFreeGroups).toEqual(['group-1', 'group-2', 'group-3']);
-  });
-});
-
-// ─── 7. parseIntStrict Boundary Cases ───────────────────────────────────────
-
-describe('parseIntStrict via env', () => {
-  beforeEach(setup);
-  afterEach(teardown);
-
-  it('rejects hex string (0xff)', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_MAX_TURNS = '0xff';
-    expect(() => loadConfig(path)).toThrow(/Invalid integer/);
-  });
-
-  it('rejects negative number', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_MAX_TURNS = '-5';
-    expect(() => loadConfig(path)).toThrow(/Invalid integer/);
-  });
-
-  it('accepts zero for maxTurns', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_MAX_TURNS = '0';
-    expect(loadConfig(path).sdk.maxTurns).toBe(0);
-  });
-
-  it('rejects scientific notation', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_MAX_TURNS = '1e3';
-    expect(() => loadConfig(path)).toThrow(/Invalid integer/);
-  });
-
-  it('rejects float', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_MAX_TURNS = '3.14';
-    expect(() => loadConfig(path)).toThrow(/Invalid integer/);
-  });
-
-  it('rejects empty string (env var set but empty)', () => {
-    // Empty string env vars are falsy, so CC_OCTO_SDK_MAX_TURNS="" won't trigger parseIntStrict.
-    // But let's verify the behavior: empty string should not override.
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_MAX_TURNS = '';
-    const cfg = loadConfig(path);
-    expect(cfg.sdk.maxTurns).toBeUndefined(); // empty string = falsy = no override
-  });
-
-  it('rejects non-numeric string', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_MAX_TURNS = 'abc';
-    expect(() => loadConfig(path)).toThrow(/Invalid integer/);
-  });
-
-  it('accepts valid positive integer', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_MAX_TURNS = '42';
-    expect(loadConfig(path).sdk.maxTurns).toBe(42);
-  });
-});
-
-// ─── 8. parseCsv Edge Cases ─────────────────────────────────────────────────
-
-describe('parseCsv via env', () => {
-  beforeEach(setup);
-  afterEach(teardown);
-
-  it('trims whitespace around items', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_ALLOWED_TOOLS = '  Read ,  Grep  , Glob  ';
-    expect(loadConfig(path).sdk.allowedTools).toEqual(['Read', 'Grep', 'Glob']);
-  });
-
-  it('filters empty segments from trailing commas', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_ALLOWED_TOOLS = 'Read,,Grep,,,';
-    expect(loadConfig(path).sdk.allowedTools).toEqual(['Read', 'Grep']);
-  });
-
-  it('single item without commas', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_ALLOWED_TOOLS = 'Read';
-    expect(loadConfig(path).sdk.allowedTools).toEqual(['Read']);
-  });
-});
-
-// ─── 9. Config File Missing ─────────────────────────────────────────────────
+// ─── 6. Config File Missing ─────────────────────────────────────────────────
 
 describe('missing config file', () => {
   beforeEach(setup);
   afterEach(teardown);
 
-  it('falls back to defaults + env when config file does not exist', () => {
-    process.env.CC_OCTO_BOT_TOKEN = 'bf_env';
-    process.env.CC_OCTO_API_URL = 'https://env-api';
-    const cfg = loadConfig(join(tmpDir, 'missing.json'));
-    expect(cfg.botToken).toBe('bf_env');
-    expect(cfg.sdk.permissionMode).toBe('bypassPermissions'); // default
+  it('throws on a missing config file (apiUrl has no source)', () => {
+    // With no env override path, a missing config.json leaves apiUrl unset,
+    // which is a required field — loadConfig must fail loudly.
+    expect(() => loadConfig(join(tmpDir, 'missing.json'))).toThrow(/apiUrl/);
   });
 });
 
@@ -474,23 +264,6 @@ describe('Q1: anthropicBaseUrl', () => {
     expect(loadConfig(path).sdk.anthropicBaseUrl).toBe('https://gw.example.com');
   });
 
-  it('ANTHROPIC_BASE_URL env overrides config file', () => {
-    const path = writeConfig({
-      botToken: 'bf_t',
-      apiUrl: 'https://a',
-      sdk: { anthropicBaseUrl: 'https://from-file' },
-    });
-    process.env.ANTHROPIC_BASE_URL = 'https://from-env';
-    expect(loadConfig(path).sdk.anthropicBaseUrl).toBe('https://from-env');
-  });
-
-  it('uses Anthropic SDK standard variable name (no CC_OCTO_ prefix)', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    // A CC_OCTO_ANTHROPIC_BASE_URL would NOT take effect — only the bare var.
-    process.env.ANTHROPIC_BASE_URL = 'https://standard';
-    expect(loadConfig(path).sdk.anthropicBaseUrl).toBe('https://standard');
-  });
-
   it('rejects an http:// (non-localhost) anthropicBaseUrl (SSRF protection)', () => {
     const path = writeConfig({
       botToken: 'bf_t',
@@ -541,42 +314,6 @@ describe('Q2: allowedTools wildcard', () => {
       sdk: { allowedTools: ['Read', 'Glob', 'Grep'] },
     });
     expect(loadConfig(path).sdk.allowedTools).toEqual(['Read', 'Glob', 'Grep']);
-  });
-
-  it('CC_OCTO_SDK_ALLOWED_TOOLS="*" maps to the wildcard sentinel', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_ALLOWED_TOOLS = '*';
-    expect(loadConfig(path).sdk.allowedTools).toBe('*');
-  });
-
-  it('CC_OCTO_SDK_ALLOWED_TOOLS=" * " (whitespace) still maps to wildcard', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_ALLOWED_TOOLS = ' * ';
-    expect(loadConfig(path).sdk.allowedTools).toBe('*');
-  });
-
-  it('CC_OCTO_SDK_ALLOWED_TOOLS with a "*" element anywhere maps to wildcard', () => {
-    // Regression: a CSV containing `*` must collapse to the wildcard sentinel
-    // rather than passing a literal `*` through as a (bogus) tool name.
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_ALLOWED_TOOLS = '*,Read';
-    expect(loadConfig(path).sdk.allowedTools).toBe('*');
-  });
-
-  it('CC_OCTO_SDK_ALLOWED_TOOLS without "*" stays a CSV array', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_ALLOWED_TOOLS = 'Read, Glob ,Grep';
-    expect(loadConfig(path).sdk.allowedTools).toEqual(['Read', 'Glob', 'Grep']);
-  });
-
-  it('env "*" overrides a config-file array', () => {
-    const path = writeConfig({
-      botToken: 'bf_t',
-      apiUrl: 'https://a',
-      sdk: { allowedTools: ['Read'] },
-    });
-    process.env.CC_OCTO_SDK_ALLOWED_TOOLS = '*';
-    expect(loadConfig(path).sdk.allowedTools).toBe('*');
   });
 });
 
@@ -644,28 +381,6 @@ describe('v0.3: tool progress toggle', () => {
     });
     expect(loadConfig(path).sdk.toolProgress).toBe(true);
   });
-
-  it.each(['true', '1', 'yes', 'on', 'TRUE', 'On'])(
-    'CC_OCTO_SDK_TOOL_PROGRESS=%s enables it',
-    (val) => {
-      const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-      process.env.CC_OCTO_SDK_TOOL_PROGRESS = val;
-      expect(loadConfig(path).sdk.toolProgress).toBe(true);
-    },
-  );
-
-  it.each(['false', '0', 'no', 'off', ''])(
-    'CC_OCTO_SDK_TOOL_PROGRESS=%s disables it',
-    (val) => {
-      const path = writeConfig({
-        botToken: 'bf_t',
-        apiUrl: 'https://a',
-        sdk: { toolProgress: true },
-      });
-      process.env.CC_OCTO_SDK_TOOL_PROGRESS = val;
-      expect(loadConfig(path).sdk.toolProgress).toBe(false);
-    },
-  );
 });
 
 // ─── #100: derived skill dirs ──────────────────────────────────────────
@@ -847,20 +562,6 @@ describe('v0.3: persistent session toggle', () => {
     });
     expect(loadConfig(path).sdk.persistentSession).toBe(true);
   });
-
-  it.each(['true', '1', 'yes', 'on'])('CC_OCTO_SDK_PERSISTENT_SESSION=%s enables it', (val) => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_PERSISTENT_SESSION = val;
-    expect(loadConfig(path).sdk.persistentSession).toBe(true);
-  });
-
-  it.each(['false', '0', 'off', ''])('CC_OCTO_SDK_PERSISTENT_SESSION=%s disables it', (val) => {
-    const path = writeConfig({
-      botToken: 'bf_t', apiUrl: 'https://a', sdk: { persistentSession: true },
-    });
-    process.env.CC_OCTO_SDK_PERSISTENT_SESSION = val;
-    expect(loadConfig(path).sdk.persistentSession).toBe(false);
-  });
 });
 
 // ─── v1.0: groupConfigDir trust-boundary validation ────────────────────
@@ -900,12 +601,6 @@ describe('v1.0: groupConfigDir must be outside cwdBase', () => {
       groupConfigDir: `${tmpDir}/default/workspace/x/../groups`,
     }));
     expect(() => resolveBotConfigs(cfg)).toThrow(/Unsafe groupConfigDir/);
-  });
-
-  it('rejects nested groupConfigDir set via env (CC_OCTO_GROUP_CONFIG_DIR)', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_GROUP_CONFIG_DIR = `${tmpDir}/default/workspace/groups`;
-    expect(() => resolveBotConfigs(loadConfig(path))).toThrow(/Unsafe groupConfigDir/);
   });
 
   it('does not reject a sibling dir that shares a name prefix with the workspace', () => {
@@ -952,31 +647,6 @@ describe('v1.0: webhook transport', () => {
       botToken: 'bf_t', apiUrl: 'https://a', transport: 'websocket',
     }));
     expect(() => resolveBotConfigs(cfg)).not.toThrow();
-  });
-
-  it('env overrides: CC_OCTO_TRANSPORT + CC_OCTO_WEBHOOK_*', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_TRANSPORT = 'webhook';
-    process.env.CC_OCTO_WEBHOOK_PORT = '7000';
-    process.env.CC_OCTO_WEBHOOK_SECRET = 'envsecret';
-    const cfg = loadConfig(path);
-    expect(cfg.transport).toBe('webhook');
-    expect(cfg.webhook?.port).toBe(7000);
-    expect(cfg.webhook?.secret).toBe('envsecret');
-  });
-
-  it('env secret satisfies the webhook validation', () => {
-    const path = writeConfig({
-      botToken: 'bf_t', apiUrl: 'https://a', transport: 'webhook',
-    });
-    process.env.CC_OCTO_WEBHOOK_SECRET = 'envsecret';
-    expect(() => loadConfig(path)).not.toThrow();
-  });
-
-  it('ignores an invalid CC_OCTO_TRANSPORT value', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_TRANSPORT = 'carrier-pigeon';
-    expect(loadConfig(path).transport).toBeUndefined();
   });
 });
 
