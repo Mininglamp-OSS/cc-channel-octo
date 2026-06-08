@@ -42,8 +42,8 @@ const DEFAULT_HEADERS = {
  * Converts 16+ digit numeric message_id values to strings before JSON.parse
  * to prevent JavaScript precision loss for IDs exceeding Number.MAX_SAFE_INTEGER.
  *
- * Exported so other inbound paths (e.g. the webhook transport) parse Octo JSON
- * with the same int64 safety as the REST client.
+ * Exported so other inbound paths parse Octo JSON with the same int64 safety as
+ * the REST client.
  */
 export function parseOctoJson<T>(text: string): T {
   const safeText = text.replace(

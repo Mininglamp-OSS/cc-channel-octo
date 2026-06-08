@@ -4,8 +4,6 @@
 
   "_comment_overrides": "Any of these optional fields override the global config for THIS bot only:",
   "_comment_apiUrl": "apiUrl — override the Octo API base for this bot.",
-  "_comment_transport": "v1.0: 'websocket' (default) or 'webhook'. In webhook mode set webhook.secret (REQUIRED) and a distinct host:port per bot.",
-  "_comment_webhook": "webhook: { host, port, path, secret } — used when transport='webhook'.",
 
   "sdk": {
     "_comment_model": "Override the model for this bot, e.g. 'vertexai/claude-opus-4-8'.",

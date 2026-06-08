@@ -89,29 +89,6 @@ export interface Config {
    * per-session cwd sandbox (which the agent can write). Unset = feature off.
    */
   groupConfigDir?: string;
-  /**
-   * v1.0: inbound transport. `websocket` (default) keeps the WuKongIM long
-   * connection. `webhook` instead runs a small HTTP server that receives Octo
-   * message webhooks and feeds the same pipeline (see `webhook`). The bot still
-   * registers over REST either way (for botId/ownerUid and outbound sends).
-   */
-  transport?: 'websocket' | 'webhook';
-  /** v1.0: webhook-mode HTTP server settings (used when transport='webhook'). */
-  webhook?: {
-    /** Bind host. Default `127.0.0.1` — keep it local behind a reverse proxy. */
-    host?: string;
-    /** Bind port. Default `8787`. */
-    port?: number;
-    /** Path that accepts message POSTs. Default `/octo/webhook`. */
-    path?: string;
-    /**
-     * Shared secret. A request must present it (header `x-webhook-secret` or
-     * `?secret=`) or it is rejected 401. REQUIRED when transport='webhook' —
-     * loadConfig throws if missing, since an unauthenticated endpoint would let
-     * anyone inject messages.
-     */
-    secret?: string;
-  };
   sdk: {
     model?: string;
     /**
@@ -238,27 +215,12 @@ export interface BotOverride {
   botBlocklist?: string[];
   allowedBotUids?: string[];
   mentionFreeGroups?: string[];
-  /** v1.0: per-bot inbound transport (defaults to the shared `transport`). */
-  transport?: 'websocket' | 'webhook';
-  /**
-   * v1.0: per-bot webhook server settings, merged over the shared `webhook`.
-   * In multi-bot webhook mode each bot MUST bind a distinct host:port (and may
-   * use distinct paths/secrets); resolveBotConfigs() rejects colliding binds.
-   */
-  webhook?: {
-    host?: string;
-    port?: number;
-    path?: string;
-    secret?: string;
-  };
 }
 
 type PartialConfig = {
   botToken?: string;
   apiUrl?: string;
   groupConfigDir?: string;
-  transport?: 'websocket' | 'webhook';
-  webhook?: Partial<Config['webhook']>;
   sdk?: Partial<Config['sdk']>;
   rateLimit?: Partial<Config['rateLimit']>;
   context?: Partial<Config['context']>;
@@ -348,10 +310,6 @@ function mergeConfig(base: Config, override: PartialConfig): Config {
     dataDir: base.dataDir,
     memoryBase: base.memoryBase,
     groupConfigDir: override.groupConfigDir ?? base.groupConfigDir,
-    transport: override.transport ?? base.transport,
-    webhook: (override.webhook || base.webhook)
-      ? { ...base.webhook, ...(override.webhook ?? {}) }
-      : undefined,
     sdk: {
       ...base.sdk,
       ...(override.sdk ?? {}),
@@ -492,8 +450,8 @@ function isPathInside(child: string, parent: string): boolean {
  *   memory    = <baseDir>/<id>/memory
  * and its personality from `<baseDir>/<id>/SOUL.md` (overrides systemPrompt).
  *
- * Throws on missing/duplicate tokens, duplicate ids, invalid id slugs, unsafe
- * apiUrl, or webhook misconfig (fail fast at boot).
+ * Throws on missing/duplicate tokens, duplicate ids, invalid id slugs, or unsafe
+ * apiUrl (fail fast at boot).
  */
 export function resolveBotConfigs(config: Config): Config[] {
   // Single-bot: synthesize one entry with id "default".
@@ -551,10 +509,6 @@ export function resolveBotConfigs(config: Config): Config[] {
       botSoul ?? perBotFile.sdk?.systemPrompt ?? bot.systemPrompt ?? sharedSystemPrompt;
 
     const apiUrl = perBotFile.apiUrl ?? bot.apiUrl ?? config.apiUrl;
-    const transport = perBotFile.transport ?? bot.transport ?? config.transport;
-    const webhook = (perBotFile.webhook || bot.webhook || config.webhook)
-      ? { ...config.webhook, ...(bot.webhook ?? {}), ...(perBotFile.webhook ?? {}) }
-      : undefined;
     const model = perBotFile.sdk?.model ?? bot.model ?? config.sdk.model;
 
     const resolved: Config = {
@@ -575,8 +529,6 @@ export function resolveBotConfigs(config: Config): Config[] {
       mentionFreeGroups:
         perBotFile.mentionFreeGroups ?? bot.mentionFreeGroups ?? config.mentionFreeGroups,
       groupConfigDir: perBotFile.groupConfigDir ?? config.groupConfigDir,
-      transport,
-      webhook,
       sdk: {
         ...config.sdk,
         ...(perBotFile.sdk ?? {}),
@@ -589,44 +541,8 @@ export function resolveBotConfigs(config: Config): Config[] {
     }
     // GROUP.md trust boundary: groupConfigDir must not be the bot's writable cwd.
     assertGroupConfigDirOutsideCwd(resolved);
-    // Webhook mode needs a secret + valid path/port per bot.
-    if (resolved.transport === 'webhook') {
-      if (!resolved.webhook?.secret) {
-        throw new Error(
-          `Bot "${id}": webhook transport requires webhook.secret — an unauthenticated ` +
-          `endpoint would let anyone inject messages.`,
-        );
-      }
-      const wpath = resolved.webhook?.path;
-      if (wpath !== undefined && !wpath.startsWith('/')) {
-        throw new Error(`Bot "${id}": invalid webhook.path "${wpath}" — must start with "/"`);
-      }
-      const wport = resolved.webhook?.port;
-      if (wport !== undefined && (!Number.isInteger(wport) || wport < 1 || wport > 65535)) {
-        throw new Error(`Bot "${id}": invalid webhook.port ${wport} — must be an integer in 1..65535`);
-      }
-    }
     return resolved;
   });
-
-  // Multi-bot webhook: each bot runs its own HTTP server, so the OS bind
-  // identity is host:port. Require a distinct host:port per webhook bot.
-  const seenBinds = new Map<string, string>();
-  for (const c of resolvedBots) {
-    if (c.transport !== 'webhook') continue;
-    const host = c.webhook?.host ?? '127.0.0.1';
-    const port = c.webhook?.port ?? 8787;
-    const bind = `${host}:${port}`;
-    const prev = seenBinds.get(bind);
-    if (prev) {
-      throw new Error(
-        `Bots "${prev}" and "${c.botId}" both bind webhook ${bind}. ` +
-        `Each webhook bot needs a distinct host:port (a separate path is not enough — ` +
-        `one HTTP server per bot binds the whole port).`,
-      );
-    }
-    seenBinds.set(bind, c.botId ?? '');
-  }
 
   return resolvedBots;
 }
