@@ -500,12 +500,13 @@ export async function handleMessage(
 
       // --- Query agent with structural role separation (Q3 fix) ---
       // userContentForLLM → user role (prompt), history + context → system role (systemPrompt)
-      // Q3 cwd isolation: the SessionCtx carries the router-produced sessionKey
+      // cwd isolation: the SessionCtx carries the router-produced sessionKey
       // verbatim, so the cwd partition is byte-for-byte identical to the history
-      // partition. Group keys embed from_uid (`${channel_id}:${uid}`), so every
-      // group member gets their OWN sandbox — matching per-user group history
-      // and honoring the documented "one user cannot read/mutate another's
-      // working tree" guarantee.
+      // partition. Group keys are the channel_id alone (session-router.ts), so a
+      // whole group SHARES one sandbox (and one history + one memory) — a group
+      // is a shared workspace, with no member-to-member isolation. DM keys are
+      // per-peer, so DM sandboxes stay private. (This is the intentional reversal
+      // of the per-(channel×user) group isolation; see cwd-resolver.ts header.)
       const sessionCtx: SessionCtx = {
         kind: isGroup ? 'group' : 'dm',
         sessionKey,
