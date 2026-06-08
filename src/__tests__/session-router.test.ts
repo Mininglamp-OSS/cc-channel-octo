@@ -66,6 +66,13 @@ describe('SessionRouter', () => {
     expect(router.sessionKey(c)).toBe('g2');
   });
 
+  it('throws on a group message with no channel_id (never collapses to one shared key)', () => {
+    // A channel-less group message is unroutable — falling back to '' would
+    // merge unrelated channels into ONE shared session (history/memory leak).
+    const m = makeMsg({ channel_type: ChannelType.Group, channel_id: undefined, from_uid: 'u1' });
+    expect(() => router.sessionKey(m)).toThrow(/no channel_id/);
+  });
+
   it('DM stays per-user even with the same/other channel', () => {
     const u1 = makeMsg({ channel_type: ChannelType.DM, from_uid: 'u1' });
     const u2 = makeMsg({ channel_type: ChannelType.DM, from_uid: 'u2' });

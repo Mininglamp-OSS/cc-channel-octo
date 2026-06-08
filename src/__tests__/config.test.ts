@@ -180,6 +180,28 @@ describe('required field validation', () => {
   });
 });
 
+// ─── Removed dir env vars fail loudly (migration safety) ────────────────
+
+describe('removed directory env vars', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it.each(['CC_OCTO_CWDBASE', 'CC_OCTO_CWD', 'CC_OCTO_DATA_DIR', 'CC_OCTO_MEMORY_BASE'])(
+    'throws a migration error when %s is set (no silent mislocation)',
+    (envVar) => {
+      const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+      process.env[envVar] = '/some/path';
+      expect(() => loadConfig(path)).toThrow(/Removed config env var/);
+    },
+  );
+
+  it('a blank removed env var is treated as unset (no throw)', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    process.env.CC_OCTO_DATA_DIR = '';
+    expect(() => loadConfig(path)).not.toThrow();
+  });
+});
+
 // ─── 4. Invalid JSON ───────────────────────────────────────────────────────
 
 describe('invalid config file', () => {
@@ -386,7 +408,6 @@ describe('missing config file', () => {
   it('falls back to defaults + env when config file does not exist', () => {
     process.env.CC_OCTO_BOT_TOKEN = 'bf_env';
     process.env.CC_OCTO_API_URL = 'https://env-api';
-    process.env.CC_OCTO_CWDBASE = '/env-cwdbase'; // required
     const cfg = loadConfig(join(tmpDir, 'missing.json'));
     expect(cfg.botToken).toBe('bf_env');
     expect(cfg.sdk.permissionMode).toBe('bypassPermissions'); // default
@@ -403,13 +424,11 @@ describe('Config file permission warning (Q12)', () => {
     // Minimal env to pass required field validation
     process.env.CC_OCTO_BOT_TOKEN = 'test-token';
     process.env.CC_OCTO_API_URL = 'https://test-api';
-    process.env.CC_OCTO_CWDBASE = '/test/cwdbase'; // required
   });
 
   afterEach(() => {
     delete process.env.CC_OCTO_BOT_TOKEN;
     delete process.env.CC_OCTO_API_URL;
-    delete process.env.CC_OCTO_CWDBASE;
     rmSync(tmpDir, { recursive: true, force: true });
   });
 

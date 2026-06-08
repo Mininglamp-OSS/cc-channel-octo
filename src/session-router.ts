@@ -149,7 +149,15 @@ export class SessionRouter {
     // N private chats. (Reverses the per-(channel×user) split from PR #64; see
     // src/cwd-resolver.ts header. Space isolation is implicit: one bot = one
     // space = one process with its own dataDir/cwdBase/memoryBase.)
-    return msg.channel_id ?? '';
+    //
+    // channel_id IS the group's identity here, so a missing one is unroutable —
+    // never fall back to '' (that would collapse every channel-less group message
+    // into ONE shared session across unrelated channels, leaking history/memory
+    // between them). Fail loud instead; route() treats the throw as a drop.
+    if (!msg.channel_id) {
+      throw new Error('Group message has no channel_id — cannot derive a session key');
+    }
+    return msg.channel_id;
   }
 
   /**

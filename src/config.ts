@@ -368,6 +368,22 @@ function applyEnv(cfg: Config): Config {
     context: { ...cfg.context },
   };
 
+  // Fail loudly on REMOVED directory env vars instead of silently ignoring them.
+  // Dirs are now derived from baseDir (<baseDir>/<id>/{data,workspace,memory}),
+  // so a deploy that still sets e.g. CC_OCTO_DATA_DIR=/mnt/vol would otherwise
+  // write under ~/.cc-channel-octo and quietly miss its mounted volume.
+  const removedDirEnv = ['CC_OCTO_CWDBASE', 'CC_OCTO_CWD', 'CC_OCTO_DATA_DIR', 'CC_OCTO_MEMORY_BASE']
+    .filter((k) => env[k] !== undefined && env[k] !== '');
+  if (removedDirEnv.length > 0) {
+    throw new Error(
+      `Removed config env var(s): ${removedDirEnv.join(', ')}. Per-bot directories ` +
+      `are no longer configurable — they are derived as <baseDir>/<botId>/{data,` +
+      `workspace,memory}, where baseDir is the directory of ~/.cc-channel-octo/config.json. ` +
+      `Move data by relocating ~/.cc-channel-octo (e.g. a symlink to your volume) and ` +
+      `unset these variables.`,
+    );
+  }
+
   if (env.CC_OCTO_BOT_TOKEN) next.botToken = env.CC_OCTO_BOT_TOKEN;
   if (env.CC_OCTO_API_URL) next.apiUrl = env.CC_OCTO_API_URL;
   if (env.CC_OCTO_GROUP_CONFIG_DIR) next.groupConfigDir = env.CC_OCTO_GROUP_CONFIG_DIR;
@@ -475,6 +491,17 @@ function applyEnv(cfg: Config): Config {
 
 export function loadConfig(configPath?: string): Config {
   const path = configPath ?? DEFAULT_CONFIG_PATH;
+  // Migration aid: if the fixed global config is missing but a legacy
+  // ./config.json exists in the cwd, point the operator at the move rather than
+  // failing later with a cryptic "Missing required config: apiUrl".
+  if (configPath === undefined && !existsSync(path) && existsSync('./config.json')) {
+    throw new Error(
+      `No config at ${path}, but ./config.json exists. The config location moved: ` +
+      `cc-channel-octo now loads ~/.cc-channel-octo/config.json (shared, no token) plus ` +
+      `~/.cc-channel-octo/<botId>/config.json (per-bot token). Move your settings there ` +
+      `(see config.example.json / config.bot.example.json).`,
+    );
+  }
   const fileCfg = readConfigFile(path);
   const merged = mergeConfig(defaults(), fileCfg);
   const final = applyEnv(merged);

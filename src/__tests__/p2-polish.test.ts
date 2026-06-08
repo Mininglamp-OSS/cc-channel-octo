@@ -174,25 +174,21 @@ describe('Q32: maxResponseChars config', () => {
     const { loadConfig } = await import('../config.js');
     process.env.CC_OCTO_BOT_TOKEN = 'test';
     process.env.CC_OCTO_API_URL = 'https://test';
-    process.env.CC_OCTO_CWDBASE = '/test/cwdbase';
     const cfg = loadConfig('/nonexistent/config.json');
     expect(cfg.maxResponseChars).toBe(524_288);
     delete process.env.CC_OCTO_BOT_TOKEN;
     delete process.env.CC_OCTO_API_URL;
-    delete process.env.CC_OCTO_CWDBASE;
   });
 
   it('can be overridden via CC_OCTO_MAX_RESPONSE_CHARS env', async () => {
     const { loadConfig } = await import('../config.js');
     process.env.CC_OCTO_BOT_TOKEN = 'test';
     process.env.CC_OCTO_API_URL = 'https://test';
-    process.env.CC_OCTO_CWDBASE = '/test/cwdbase';
     process.env.CC_OCTO_MAX_RESPONSE_CHARS = '1000';
     const cfg = loadConfig('/nonexistent/config.json');
     expect(cfg.maxResponseChars).toBe(1000);
     delete process.env.CC_OCTO_BOT_TOKEN;
     delete process.env.CC_OCTO_API_URL;
-    delete process.env.CC_OCTO_CWDBASE;
     delete process.env.CC_OCTO_MAX_RESPONSE_CHARS;
   });
 });

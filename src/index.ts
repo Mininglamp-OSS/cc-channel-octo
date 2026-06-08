@@ -27,6 +27,7 @@ import { WebhookServer } from './webhook.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes } from './file-inline-wrap.js';
 import { Buffer } from 'node:buffer';
 import { join } from 'node:path';
+import { mkdirSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 async function main(): Promise<void> {
@@ -141,6 +142,11 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   if (cleaned > 0) {
     console.log(`[cc-channel-octo] ${label}Cleaned ${cleaned} expired session(s)`);
   }
+
+  // --- Auto-memory base (create eagerly so a deleted/unmounted memory volume
+  // fails loudly at boot instead of silently disabling recall at message time). ---
+  const memoryBase = config.memoryBase ?? join(config.dataDir, 'memory');
+  mkdirSync(memoryBase, { recursive: true });
 
   // --- Group context ---
   const groupContext = new GroupContext(adapter, config.context.maxContextChars);

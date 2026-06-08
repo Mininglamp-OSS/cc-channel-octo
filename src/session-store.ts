@@ -88,6 +88,20 @@ function rowToSession(row: SessionRow): Session {
   };
 }
 
+/**
+ * Neutralize forged turn labels in user-authored message content before it is
+ * rendered into the shared `[Conversation history]` block. A line that begins
+ * (after optional whitespace) with `[user ...]:` or `[assistant ...]:` would
+ * otherwise look like a real turn boundary; we prefix a zero-width-safe escape
+ * (`\`) so the model sees the literal text, not a structural marker. Only
+ * line-leading labels are escaped — incidental `[assistant ...]` mid-sentence is
+ * left alone. Matches the intent of agent-bridge's sanitizeForSystemPrompt
+ * (which guards section markers) for the role-label case.
+ */
+function escapeRoleLabels(content: string): string {
+  return content.replace(/^(\s*)(\[(?:user|assistant)\b[^\]]*\]:)/gim, '$1\\$2');
+}
+
 export class SessionStore {
   private readonly adapter: DbAdapter;
 
@@ -117,8 +131,9 @@ export class SessionStore {
     // Migrations: add columns missing on pre-existing DBs (SQLite can't add them
     // via CREATE TABLE IF NOT EXISTS). Guarded + throw on real failure (Q1-2) so
     // a silent failure can't surface later as cryptic SQL errors. Note: this is
-    // schema presence, NOT data back-compat — render assumes from_name is always
-    // written (callers pass a name for every turn).
+    // schema presence, NOT data back-compat. New rows always write from_name;
+    // older rows added before this column may be NULL, which renderTurn handles
+    // via `from_name ?? role` — keep that coalesce (it is not dead code).
     try {
       const cols = this.adapter
         .prepare("PRAGMA table_info(messages)")
@@ -225,9 +240,19 @@ export class SessionStore {
    * `[assistant <botName>]:`. The name is sanitized at write time (see append())
    * so it cannot forge turn labels; the `?? role` coalesce only guards rows from
    * before this column existed.
+   *
+   * SECURITY: the message CONTENT is also user-controlled and travels into the
+   * shared `[Conversation history]` block. A body whose line starts with
+   * `[assistant ...]:` / `[user ...]:` would forge an extra turn that, in shared
+   * group mode, every member then reads as real conversation (cross-user context
+   * poisoning — the same threat the from_name strip closes, but via content and
+   * easier to exploit since no display name is needed). So we neutralize any
+   * line-leading role label in the content here, at render time. This is the one
+   * coherent policy: turn labels can ONLY originate from this renderer, never
+   * from a user-controlled name or body.
    */
   private renderTurn(r: MessageRow): string {
-    return `[${r.role} ${r.from_name ?? r.role}]: ${r.content}`;
+    return `[${r.role} ${r.from_name ?? r.role}]: ${escapeRoleLabels(r.content)}`;
   }
 
   buildHistoryPrefix(sessionId: string, limit: number): string {
