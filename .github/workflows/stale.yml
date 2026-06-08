@@ -1,0 +1,15 @@
+name: Stale
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  stale:
+    uses: Mininglamp-OSS/.github/.github/workflows/reusable-stale.yml@v1
+    permissions:
+      issues: write
+      pull-requests: write
