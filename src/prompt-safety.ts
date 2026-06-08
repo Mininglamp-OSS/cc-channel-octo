@@ -108,3 +108,28 @@ export function escapeSectionMarkers(text: string): string {
 export function sanitizePromptBody(text: string): string {
   return escapeSectionMarkers(escapeRoleLabels(text));
 }
+
+/**
+ * Branded string that has provably passed through a prompt-safety escaper. It is
+ * a plain string at runtime, but only the functions below can MINT one, so a
+ * system-prompt assembler that requires `SafeText` for its user-controlled
+ * fragments makes "raw user text reached the prompt" a compile error rather than
+ * a convention every call site must remember. (Finding #10 — choke-point depth.)
+ */
+export type SafeText = string & { readonly __promptSafe: unique symbol };
+
+/** Mint SafeText from a user-authored BODY (escapes role labels + section markers). */
+export function safeBody(text: string): SafeText {
+  return sanitizePromptBody(text) as SafeText;
+}
+
+/** Mint SafeText from already-per-line-escaped content that only needs section-marker escaping (e.g. rendered history). */
+export function safeSectioned(text: string): SafeText {
+  return escapeSectionMarkers(text) as SafeText;
+}
+
+/** Mint SafeText from operator-TRUSTED text (GROUP.md, config systemPrompt, our own constants) — no escaping, but the brand documents the trust decision at the call site. */
+export function trustedText(text: string): SafeText {
+  return text as SafeText;
+}
+

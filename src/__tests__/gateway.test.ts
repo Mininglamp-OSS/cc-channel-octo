@@ -112,6 +112,16 @@ describe('Process lock', () => {
     await gw.start();
     const [pidField] = readFileSync(lockPath, 'utf-8').trim().split(/\s+/);
     expect(pidField).toBe(String(process.pid));
+    await gw.stop();  });
+
+  it('reclaims an empty/corrupt lock file (atomic-create path)', async () => {
+    const lockPath = join(tmpDir, 'gateway.lock');
+    writeFileSync(lockPath, '', { mode: 0o600 }); // 0-byte lock (partial write)
+
+    const gw = new OctoGateway(makeConfig());
+    await gw.start(); // reclaimIfStale → unlink → atomic re-create succeeds
+    const [pidField] = readFileSync(lockPath, 'utf-8').trim().split(/\s+/);
+    expect(pidField).toBe(String(process.pid));
     await gw.stop();
   });
 

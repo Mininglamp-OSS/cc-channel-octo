@@ -54,10 +54,8 @@ export function isPrivateOrLocalAddress(address: string): boolean {
     if (v4MappedDot) return isPrivateIPv4(v4MappedDot[1]);
     const v4MappedHex = lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
     if (v4MappedHex) {
-      const high = parseInt(v4MappedHex[1], 16);
-      const low = parseInt(v4MappedHex[2], 16);
-      const dotted = `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
-      return isPrivateIPv4(dotted);
+      const dotted = decodeEmbeddedV4(v4MappedHex[1], v4MappedHex[2]);
+      if (dotted) return isPrivateIPv4(dotted);
     }
     // IPv4-compatible IPv6: `::a.b.c.d` (deprecated form, but resolvable).
     const v4CompatDot = lower.match(/^::(\d+\.\d+\.\d+\.\d+)$/);
@@ -65,10 +63,8 @@ export function isPrivateOrLocalAddress(address: string): boolean {
     // IPv4-compatible IPv6 hex form: `::a:b` where a:b decodes to dotted-quad.
     const v4CompatHex = lower.match(/^::([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
     if (v4CompatHex) {
-      const high = parseInt(v4CompatHex[1], 16);
-      const low = parseInt(v4CompatHex[2], 16);
-      const dotted = `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
-      return isPrivateIPv4(dotted);
+      const dotted = decodeEmbeddedV4(v4CompatHex[1], v4CompatHex[2]);
+      if (dotted) return isPrivateIPv4(dotted);
     }
     // NAT64 well-known prefix 64:ff9b::/96 — the last 32 bits embed an IPv4
     // address. A name resolving to e.g. `64:ff9b::7f00:1` (= 127.0.0.1) on a
