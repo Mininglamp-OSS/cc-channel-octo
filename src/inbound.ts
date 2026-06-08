@@ -231,6 +231,21 @@ function truncateByBytes(input: string, maxBytes: number, marker: string): { tex
   return wasTruncated ? { text: shortened + marker, truncated: true } : { text: shortened, truncated: false };
 }
 
+/**
+ * Coerce a user-supplied coordinate to a finite number, or null. Accepts only a
+ * real number or a numeric string — rejects null/undefined/objects/booleans so
+ * `Number(null)===0` can't render a bogus `0` (and a non-numeric string can't
+ * forge a label).
+ */
+function toFiniteCoord(v: unknown): number | null {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
 function buildRichTextPlain(blocks: Array<Record<string, unknown>>): string {
   let out = '';
   for (const blk of blocks) {
@@ -424,13 +439,13 @@ export function resolveContent(payload: MessagePayload | undefined, apiUrl?: str
 
     case MessageType.Location: {
       // SECURITY: lat/lng are user-controlled. A `!= null` gate alone lets a
-      // string like "0]\n[assistant bot]: forged" through and forge a label in
-      // the rendered text. Coerce to finite numbers and only render when both
-      // are valid numerics.
-      const lat = Number(payload.latitude ?? payload.lat);
-      const lng = Number(payload.longitude ?? payload.lng ?? payload.lon);
+      // string like "0]\n[assistant bot]: forged" through and forge a label.
+      // Accept only a real finite number or a numeric string — NOT null/object
+      // (Number(null)===0 would otherwise render a bogus `0`).
+      const lat = toFiniteCoord(payload.latitude ?? payload.lat);
+      const lng = toFiniteCoord(payload.longitude ?? payload.lng ?? payload.lon);
       return {
-        text: Number.isFinite(lat) && Number.isFinite(lng)
+        text: lat !== null && lng !== null
           ? `[位置信息: ${lat},${lng}]`
           : '[位置信息]',
       };

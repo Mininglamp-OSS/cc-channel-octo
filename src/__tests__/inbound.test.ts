@@ -241,6 +241,23 @@ describe('resolveContent: Location', () => {
     expect(r.text).toBe('[位置信息]');
     expect(r.text).not.toContain('assistant bot');
   });
+
+  it('treats null coordinates as absent, not 0 (regression, issue #82)', () => {
+    // Number(null)===0 would render a bogus "0,0"; null must fall back.
+    const r = resolveContent(
+      { type: MessageType.Location, latitude: null, longitude: null } as unknown as MessagePayload,
+      API_URL,
+    );
+    expect(r.text).toBe('[位置信息]');
+  });
+
+  it('accepts numeric-string coordinates', () => {
+    const r = resolveContent(
+      { type: MessageType.Location, latitude: '31.23', longitude: '121.47' } as unknown as MessagePayload,
+      API_URL,
+    );
+    expect(r.text).toBe('[位置信息: 31.23,121.47]');
+  });
 });
 
 describe('resolveContent: Card', () => {
