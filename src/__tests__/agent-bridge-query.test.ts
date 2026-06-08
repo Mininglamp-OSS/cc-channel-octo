@@ -471,3 +471,53 @@ describe('queryAgent', () => {
     expect(chunks).toEqual(['still streamed']);
   });
 });
+
+describe('queryAgent — sdk.env injection (#107)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  function drain(config: Config): Promise<void> {
+    mockQuery.mockReturnValue(createMockStream([
+      { type: 'assistant', session_id: 's', message: { content: [{ type: 'text', text: 'hi' }] } },
+    ]));
+    return (async () => {
+      for await (const _ of queryAgent('t', '', '', config)) { void _; }
+    })();
+  }
+
+  it('injects sdk.env into the subprocess env (preserving process.env)', async () => {
+    const config = makeConfig({
+      sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: [], env: { OCTO_BOT_ID: 'cli_x' } },
+    });
+    await drain(config);
+    const env = mockQuery.mock.calls[0][0].options.env;
+    expect(env.OCTO_BOT_ID).toBe('cli_x');
+    expect(env.PATH).toBe(process.env.PATH); // process.env preserved
+  });
+
+  it('merges sdk.env with anthropicBaseUrl (both present)', async () => {
+    const config = makeConfig({
+      sdk: {
+        allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: [],
+        env: { OCTO_BOT_ID: 'cli_x', FOO: 'bar' }, anthropicBaseUrl: 'https://llm.example.com',
+      },
+    });
+    await drain(config);
+    const env = mockQuery.mock.calls[0][0].options.env;
+    expect(env.OCTO_BOT_ID).toBe('cli_x');
+    expect(env.FOO).toBe('bar');
+    expect(env.ANTHROPIC_BASE_URL).toBe('https://llm.example.com');
+  });
+
+  it('omits env entirely when neither sdk.env nor anthropicBaseUrl is set', async () => {
+    await drain(makeConfig());
+    expect(mockQuery.mock.calls[0][0].options).not.toHaveProperty('env');
+  });
+
+  it('omits env when sdk.env is an empty object', async () => {
+    const config = makeConfig({
+      sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: [], env: {} },
+    });
+    await drain(config);
+    expect(mockQuery.mock.calls[0][0].options).not.toHaveProperty('env');
+  });
+});

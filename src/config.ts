@@ -139,9 +139,18 @@ export interface Config {
     /**
      * Q1: Override the upstream Claude API endpoint (e.g. self-hosted gateway).
      * Forwarded to the SDK subprocess via the standard `ANTHROPIC_BASE_URL`
-     * environment variable. Env priority: `ANTHROPIC_BASE_URL` > this field.
+     * environment variable.
      */
     anthropicBaseUrl?: string;
+    /**
+     * #107: extra environment variables injected verbatim into the agent's SDK
+     * subprocess (on top of the inherited process.env). Generic and declarative
+     * — cc knows nothing about what they mean. Use it to give a bot's skills the
+     * env their external CLIs need, e.g. `{ "OCTO_BOT_ID": "<robotId>" }` so a
+     * multi-bot deploy's `octo-cli` calls select the right stored profile.
+     * Per-bot (set in `<baseDir>/<id>/config.json`).
+     */
+    env?: Record<string, string>;
   };
   rateLimit: {
     maxPerMinute: number;

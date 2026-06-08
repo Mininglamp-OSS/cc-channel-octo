@@ -124,6 +124,7 @@ configurable.
 | `sdk.settingSources` | `['project']` | Filesystem settings sources the SDK loads. Default `['project']` so it discovers skills symlinked into the session sandbox's `.claude/skills/` (see [Agent skills](#agent-skills)). Memory stays isolated regardless (inline auto-memory dir pin). Add `'user'` only to deliberately load the operator's real `~/.claude`. |
 | `groupConfigDir` | *(unset)* | Directory of per-group instruction files (`<groupId>.md`). A match is injected into the system prompt as trusted custom instructions for that group. See [Per-group instructions](#per-group-instructions). |
 | `sdk.anthropicBaseUrl` | *(unset)* | Override the upstream Claude API endpoint. See [Self-hosted gateway](#self-hosted-gateway) below. |
+| `sdk.env` | *(unset)* | Extra environment variables (`{ "KEY": "value" }`) injected verbatim into the agent's tool subprocess. Per-bot. Use to give a bot's skills what their CLIs need — e.g. `{ "OCTO_BOT_ID": "<robotId>" }` so a multi-bot deploy's `octo-cli` selects the right stored profile. See [Agent skills](#agent-skills). |
 | `rateLimit.maxPerMinute` | `5` | Max requests per minute per session |
 | `context.maxContextChars` | `6000` | Max characters of group context injected into prompts |
 | `context.historyLimit` | `40` | Max messages in session history window |
@@ -222,6 +223,12 @@ CLI a skill needs (`npm i -g @mininglamp-oss/octo-cli`, etc.) and authenticate i
 agent only runs the already-authenticated CLI. Skills are operator-owned and
 trusted (like `SOUL.md`/`GROUP.md`); since their contents are visible to the
 model, **never put secrets in a skill file**.
+
+**Multi-bot tool identity.** When several bots share one CLI whose credential
+store keys by identity (e.g. `octo-cli`, which needs `--bot-id`/`OCTO_BOT_ID` to
+pick among ≥2 stored profiles), give each bot its selector via `sdk.env` in its
+per-bot config.json — e.g. `{ "sdk": { "env": { "OCTO_BOT_ID": "<robotId>" } } }`.
+cc injects it into that bot's tool subprocess so the CLI acts as the right bot.
 
 ### Multi-bot
 
