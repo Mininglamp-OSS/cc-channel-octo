@@ -4,6 +4,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const mockQuery = vi.hoisted(() => vi.fn());
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: mockQuery,
+  // octo-tools.ts (imported transitively via agent-bridge) uses these; provide
+  // lightweight stand-ins so the module loads under the mock.
+  createSdkMcpServer: (opts: { name: string }) => ({ type: 'sdk', name: opts.name, instance: {} }),
+  tool: (name: string, description: string, inputSchema: unknown, handler: unknown) => ({ name, description, inputSchema, handler }),
 }));
 
 import { queryAgent } from '../agent-bridge.js';
@@ -367,6 +371,26 @@ describe('queryAgent', () => {
     ]));
     for await (const _ of queryAgent('t', '', '', makeConfig())) { void _; }
     expect(mockQuery.mock.calls[0][0].options).not.toHaveProperty('settings');
+  });
+
+  it('wires the octo MCP tool server only when sdk.octoTools is enabled (#87)', async () => {
+    mockQuery.mockReturnValue(createMockStream([
+      { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
+    ]));
+    const config = makeConfig({ sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: [], octoTools: true } });
+    for await (const _ of queryAgent('t', '', '', config)) { void _; }
+    const options = mockQuery.mock.calls[0][0].options;
+    expect(options.mcpServers).toBeDefined();
+    expect(options.mcpServers.octo).toBeDefined();
+    expect(options.mcpServers.octo.name).toBe('octo');
+  });
+
+  it('omits mcpServers when sdk.octoTools is off (default)', async () => {
+    mockQuery.mockReturnValue(createMockStream([
+      { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
+    ]));
+    for await (const _ of queryAgent('t', '', '', makeConfig())) { void _; }
+    expect(mockQuery.mock.calls[0][0].options).not.toHaveProperty('mcpServers');
   });
 
   it('reports the SDK session_id once via onSessionId', async () => {

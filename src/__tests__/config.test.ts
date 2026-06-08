@@ -29,6 +29,7 @@ const CC_VARS = [
   'CC_OCTO_CONTEXT_HISTORY_LIMIT', 'CC_OCTO_BOT_BLOCKLIST',
   'CC_OCTO_MENTION_FREE_GROUPS', 'CC_OCTO_MAX_RESPONSE_CHARS',
   'ANTHROPIC_BASE_URL', 'CC_OCTO_SDK_TOOL_PROGRESS', 'CC_OCTO_SDK_PERSISTENT_SESSION',
+  'CC_OCTO_SDK_OCTO_TOOLS',
   'CC_OCTO_GROUP_CONFIG_DIR',
   'CC_OCTO_TRANSPORT', 'CC_OCTO_WEBHOOK_HOST', 'CC_OCTO_WEBHOOK_PORT',
   'CC_OCTO_WEBHOOK_PATH', 'CC_OCTO_WEBHOOK_SECRET',
@@ -663,6 +664,35 @@ describe('v0.3: tool progress toggle', () => {
       expect(loadConfig(path).sdk.toolProgress).toBe(false);
     },
   );
+});
+
+// ─── #87: sdk.octoTools ────────────────────────────────────────────────
+
+describe('sdk.octoTools toggle', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('defaults to undefined (off)', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    expect(loadConfig(path).sdk.octoTools).toBeUndefined();
+  });
+
+  it('reads sdk.octoTools=true from the config file', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a', sdk: { octoTools: true } });
+    expect(loadConfig(path).sdk.octoTools).toBe(true);
+  });
+
+  it.each(['true', '1', 'yes', 'on'])('CC_OCTO_SDK_OCTO_TOOLS=%s enables it', (val) => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    process.env.CC_OCTO_SDK_OCTO_TOOLS = val;
+    expect(loadConfig(path).sdk.octoTools).toBe(true);
+  });
+
+  it.each(['false', '0', 'off', ''])('CC_OCTO_SDK_OCTO_TOOLS=%s disables it', (val) => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a', sdk: { octoTools: true } });
+    process.env.CC_OCTO_SDK_OCTO_TOOLS = val;
+    expect(loadConfig(path).sdk.octoTools).toBe(false);
+  });
 });
 
 // ─── Multi-bot (resolveBotConfigs, two-layer) ──────────────────────────
