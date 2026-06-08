@@ -51,9 +51,11 @@ cc-channel-octo uses a fixed, bot-first directory layout under **`~/.cc-channel-
 ```
 ~/.cc-channel-octo/
 ├── config.json            ← GLOBAL: shared defaults + the list of bots (no token)
+├── skills/                ← optional: skills shared by ALL bots (see Agent skills)
 └── <botId>/               ← one self-contained subtree per bot ("default" for a single bot)
     ├── config.json        ← THIS bot: botToken (required) + per-bot overrides
     ├── SOUL.md            ← optional personality (overrides sdk.systemPrompt)
+    ├── skills/            ← optional: skills for THIS bot (override same-named global)
     ├── data/              ← SQLite history
     ├── workspace/         ← per-session cwd sandboxes (auto-created)
     └── memory/            ← long-term auto-memory (auto-created)
@@ -127,10 +129,9 @@ token + overrides). Per-bot fields win; env vars override the shared layer.
 | `sdk.permissionMode` | `CC_OCTO_SDK_PERMISSION_MODE` | `bypassPermissions` | SDK permission mode |
 | `sdk.maxTurns` | `CC_OCTO_SDK_MAX_TURNS` | *(SDK default)* | Max agentic turns per query |
 | `sdk.systemPrompt` | `CC_OCTO_SDK_SYSTEM_PROMPT` | *(built-in)* | Custom system prompt |
-| `sdk.settingSources` | `CC_OCTO_SDK_SETTING_SOURCES` | `[]` *(isolation)* | Host filesystem settings the SDK loads (`user,project,local`). Default `[]` — the bot does **not** read or write the operator's real `~/.claude` config. Set `user` only as an explicit opt-in. |
 | `sdk.toolProgress` | `CC_OCTO_SDK_TOOL_PROGRESS` | `false` | When true, post `🔧 Running <tool>…` notices as the agent invokes tools (deduped, capped per turn) |
 | `sdk.persistentSession` | `CC_OCTO_SDK_PERSISTENT_SESSION` | `false` | When true, persist agent workspace state across messages via the SDK v2 Session API (resume by stored session id). `/reset` clears it. |
-| `sdk.octoCli` | `CC_OCTO_SDK_OCTO_CLI` | `false` | When true, let the agent operate Octo (groups, members, messages, threads, files — read + write) by shelling out to the external [`octo-cli`](https://github.com/Mininglamp-OSS/octo-cli) binary via Bash. Requires `octo-cli` on PATH (`npm i -g @mininglamp-oss/octo-cli`). See [Octo CLI integration](#octo-cli-integration). |
+| `sdk.settingSources` | `CC_OCTO_SDK_SETTING_SOURCES` | `['project']` | Filesystem settings sources the SDK loads. Default `['project']` so it discovers skills symlinked into the session sandbox's `.claude/skills/` (see [Agent skills](#agent-skills)). Memory stays isolated regardless (inline auto-memory dir pin). Add `'user'` only to deliberately load the operator's real `~/.claude`. |
 | `groupConfigDir` | `CC_OCTO_GROUP_CONFIG_DIR` | *(unset)* | Directory of per-group instruction files (`<groupId>.md`). A match is injected into the system prompt as trusted custom instructions for that group. See [Per-group instructions](#per-group-instructions). |
 | `sdk.anthropicBaseUrl` | `ANTHROPIC_BASE_URL` | *(unset)* | Override the upstream Claude API endpoint. See [Self-hosted gateway](#self-hosted-gateway) below. |
 | `rateLimit.maxPerMinute` | `CC_OCTO_RATE_LIMIT_MAX_PER_MINUTE` | `5` | Max requests per minute per session |
@@ -206,46 +207,47 @@ CC_OCTO_GROUP_CONFIG_DIR=/home/deploy/cc-octo-groups npm start
 > but that is a backstop, not the guarantee. Files larger than 16 KiB are
 > truncated; an unsafe group id (path separators, `..`) is ignored.
 
-### Octo CLI integration
+### Agent skills
 
-With `sdk.octoCli` enabled (`CC_OCTO_SDK_OCTO_CLI=true`), the agent can operate
-the Octo platform — list/get groups, list/search members, send/edit/sync
-messages, manage threads, upload/download files — by shelling out to the
-external [`octo-cli`](https://github.com/Mininglamp-OSS/octo-cli) binary through
-the built-in **Bash** tool. This is the full read + write surface; what a given
-bot may actually do is authorized **server-side** by its token kind (`bf_*` User
-Bots can write; `app_*` App Bots are DM-only).
+cc supports external tooling generically through **Claude skills**. Drop a skill
+into a `skills/` directory and the agent can use it — there is **no per-tool code
+in cc**. A skill is a standard directory with a `SKILL.md` (plus optional
+`references/` and `scripts/`); it teaches the agent how to drive some external
+CLI (`octo-cli`, `gh`, anything on `PATH`).
 
-This replaces the earlier in-process MCP tool server (#87) — instead of
-re-implementing Octo operations as SDK tools, cc reuses octo-cli's 47 operations
-and JSON-envelope output directly.
+**Two layers** (mirroring the config model):
 
-**Prerequisite:** `octo-cli` must be on the gateway's `PATH`:
+| Location | Scope |
+|----------|-------|
+| `~/.cc-channel-octo/skills/<name>/` | shared by **all** bots |
+| `~/.cc-channel-octo/<id>/skills/<name>/` | **one** bot (overrides a same-named global skill) |
+
+cc symlinks both layers into each session sandbox's `.claude/skills/` on every
+turn, and the SDK discovers them because `sdk.settingSources` defaults to
+`['project']`. (Memory isolation is unaffected — the auto-memory directory is
+pinned via inline settings, which the SDK ranks above any project-level value.)
+
+**Installing a skill.** Copy or symlink any `SKILL.md` directory into a `skills/`
+folder. For octo operations, octo-cli ships ready-made skills:
 
 ```bash
-npm install -g @mininglamp-oss/octo-cli
+mkdir -p ~/.cc-channel-octo/skills
+octo-cli skills --install ~/.cc-channel-octo/skills   # octo-shared, octo-messaging, …
 ```
 
-**Token safety.** The raw bot token **never reaches the model**. On startup cc
-seeds an encrypted, machine-bound octo-cli credential profile
-(`octo-cli auth login --bot-id <robotId> --with-token`, token piped via stdin —
-never argv, never a log line). At runtime the agent selects its identity by the
-**non-secret robot id** (exported as `OCTO_BOT_ID`); octo-cli masks the token in
-all its output. The agent is told (via a system-prompt guide) that auth is
-already handled and it should just run commands. `OCTO_API_BASE_URL` is exported
-too, so the agent never needs the endpoint either.
-
-The guide is delivered as trusted system-prompt text (not a filesystem skill),
-which keeps the default `settingSources: []` isolation — and therefore
-auto-memory containment — intact. The agent can pull deeper per-domain docs on
-demand with `octo-cli skills <name>`.
+**Prerequisites are the operator's responsibility, out-of-band:** install the
+CLI a skill needs (`npm i -g @mininglamp-oss/octo-cli`, etc.) and authenticate it
+(`octo-cli auth login`, `gh auth login`). **cc never handles credentials** — the
+agent only runs the already-authenticated CLI. Skills are operator-owned and
+trusted (like `SOUL.md`/`GROUP.md`); since their contents are visible to the
+model, **never put secrets in a skill file**.
 
 ### Multi-bot
 
 To run several bots from one process, list them in the global config's `bots`
 array. Each `id` is a slug (letters, digits, `.`, `_`, `-`) that names the bot's
 subtree under `baseDir`; each bot's **token + overrides live in its own
-`<baseDir>/<id>/config.json`** (the highest-priority layer).
+`<baseDir>/<id>/config.json`** (the highest-priority layer):
 
 Global `~/.cc-channel-octo/config.json`:
 

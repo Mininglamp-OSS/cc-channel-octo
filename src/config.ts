@@ -68,6 +68,21 @@ export interface Config {
    */
   memoryBase?: string;
   /**
+   * DERIVED (not user-configurable): per-bot skills directory,
+   * `<baseDir>/<botId>/skills`. Each immediate subdir is a Claude skill
+   * (`SKILL.md` + optional `references/`, `scripts/`). Symlinked into each
+   * session sandbox's `.claude/skills/` so the SDK discovers it (requires
+   * `sdk.settingSources` to include `project`). Per-bot skills override
+   * same-named global skills. Populated by `resolveBotConfigs()`.
+   */
+  skillsDir?: string;
+  /**
+   * DERIVED (not user-configurable): install-wide skills directory shared by all
+   * bots, `<baseDir>/skills`. Loaded for every bot (lower precedence than the
+   * per-bot `skillsDir`). Populated by `resolveBotConfigs()`.
+   */
+  globalSkillsDir?: string;
+  /**
    * v1.0: directory of per-group instruction files (`<groupId>.md`). When set,
    * a matching file's contents are injected into the system prompt as trusted
    * custom instructions for that group. Operator-controlled — must NOT be the
@@ -112,15 +127,21 @@ export interface Config {
     systemPrompt?: string;
     /**
      * Which filesystem settings sources the SDK loads (`user`/`project`/`local`).
-     * Default is `[]` — SDK isolation mode. The bot runs as a service and must
-     * NOT read or write the operator's real `~/.claude` config: with `["user"]`
-     * the agent loads the host's global `~/.claude/CLAUDE.md` into context and,
-     * when told to "remember" something, writes there instead of its scoped
-     * auto-memory dir (observed in live testing). Memory flows only through the
-     * dedicated auto-memory directory (see `memoryBase`). Operators who
-     * deliberately want host config can set `["user"]`/`["project"]`/etc.
-     * Note: this controls what is LOADED (read), not what tools may write —
-     * tool-write scope is governed by `permissionMode`/`allowedTools`.
+     * Default is `['project']` so the SDK discovers skills symlinked into the
+     * session sandbox's `.claude/skills/` (#100 — generic external tooling).
+     *
+     * Memory isolation is preserved INDEPENDENTLY of this: the auto-memory
+     * directory is pinned via inline `settings.autoMemoryDirectory` (the SDK's
+     * `flagSettings` tier), which takes precedence over any `projectSettings`
+     * value — and the SDK explicitly ignores `autoMemoryDirectory` coming from a
+     * checked-in `projectSettings` for security. So `['project']` lets the bot
+     * read the sandbox `.claude/` (skills, and any CLAUDE.md/settings.json the
+     * agent itself wrote — acceptable, it's the agent's own workspace) WITHOUT
+     * the memory leaking into the host `~/.claude` (verified empirically).
+     *
+     * `'user'` would additionally load the operator's real `~/.claude` config —
+     * opt into that deliberately only. Note: this controls what is LOADED (read),
+     * not tool-write scope (governed by `permissionMode`/`allowedTools`).
      */
     settingSources: string[];
     /**
@@ -130,18 +151,6 @@ export interface Config {
      * opt-in. Env: `CC_OCTO_SDK_TOOL_PROGRESS=true`.
      */
     toolProgress?: boolean;
-    /**
-     * #94: when true, enable the external `octo-cli` integration — the agent
-     * shells out to the `octo-cli` binary (via the built-in Bash tool) to run
-     * Octo operations (groups, members, messages, threads, files; read + write).
-     * Enabling this (a) injects a trusted octo-cli usage guide into the system
-     * prompt, (b) sets `OCTO_API_BASE_URL` / `OCTO_BOT_ID` in the agent
-     * subprocess env, and (c) auto-seeds an encrypted octo-cli profile at
-     * startup so the raw token never reaches the model. Default false (opt-in —
-     * it widens the agent's reach and requires `octo-cli` on PATH). Env:
-     * `CC_OCTO_SDK_OCTO_CLI=true`. Replaces the removed in-process MCP (#87).
-     */
-    octoCli?: boolean;
     /**
      * v0.3: when true, use the SDK's v2 Session API to persist agent workspace
      * state across messages — each session's SDK session id is stored and
@@ -276,8 +285,10 @@ function defaults(): Config {
       // Q2: default to wildcard — operators tighten only when they need to.
       allowedTools: '*',
       permissionMode: 'bypassPermissions',
-      // v1.1: SDK isolation mode by default — never touch the host's ~/.claude.
-      settingSources: [],
+      // #100: load project-scope settings so the SDK discovers skills symlinked
+      // into the session sandbox's .claude/skills/. Memory stays isolated via the
+      // inline settings.autoMemoryDirectory pin (flagSettings > projectSettings).
+      settingSources: ['project'],
     },
     rateLimit: {
       maxPerMinute: 5,
@@ -446,10 +457,6 @@ function applyEnv(cfg: Config): Config {
   // v0.3: tool-progress messages. Accept the usual truthy spellings.
   if (env.CC_OCTO_SDK_TOOL_PROGRESS !== undefined) {
     next.sdk.toolProgress = /^(1|true|yes|on)$/i.test(env.CC_OCTO_SDK_TOOL_PROGRESS.trim());
-  }
-  // #94: external octo-cli integration (opt-in).
-  if (env.CC_OCTO_SDK_OCTO_CLI !== undefined) {
-    next.sdk.octoCli = /^(1|true|yes|on)$/i.test(env.CC_OCTO_SDK_OCTO_CLI.trim());
   }
   // v0.3: persistent (v2) sessions.
   if (env.CC_OCTO_SDK_PERSISTENT_SESSION !== undefined) {
@@ -656,6 +663,10 @@ export function resolveBotConfigs(config: Config): Config[] {
     const botDataDir = pathJoin(botRoot, 'data');
     const botCwdBase = pathJoin(botRoot, 'workspace');
     const botMemoryBase = pathJoin(botRoot, 'memory');
+    // #100: per-bot skills (<baseDir>/<id>/skills) + install-wide global skills
+    // (<baseDir>/skills). Symlinked into each session sandbox by skill-linker.
+    const botSkillsDir = pathJoin(botRoot, 'skills');
+    const globalSkillsDir = pathJoin(config.baseDir, 'skills');
 
     // Per-bot config.json (in the bot's own subtree) is the highest-priority
     // layer: global shared ⊕ inline bots[] entry ⊕ <baseDir>/<id>/config.json.
@@ -696,6 +707,8 @@ export function resolveBotConfigs(config: Config): Config[] {
       cwdBase: botCwdBase,
       cwd: botCwdBase,
       memoryBase: botMemoryBase,
+      skillsDir: botSkillsDir,
+      globalSkillsDir,
       botBlocklist: perBotFile.botBlocklist ?? bot.botBlocklist ?? config.botBlocklist,
       allowedBotUids: perBotFile.allowedBotUids ?? bot.allowedBotUids ?? config.allowedBotUids,
       mentionFreeGroups:

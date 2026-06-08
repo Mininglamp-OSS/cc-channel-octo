@@ -25,7 +25,6 @@ import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } f
 import { downloadInboundImage, MAX_IMAGES_PER_MESSAGE } from './media-inbound.js';
 import { handleCommand } from './commands.js';
 import { loadGroupConfig } from './group-config.js';
-import { seedOctoCliProfile } from './octo-cli.js';
 import { WebhookServer } from './webhook.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes } from './file-inline-wrap.js';
 import { join } from 'node:path';
@@ -181,18 +180,6 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   // no message can arrive before the handler below is installed.
   await gateway.register();
   console.log(`[cc-channel-octo] ${label}Bot registered: id=${gateway.botId}`);
-
-  // #94: when the external octo-cli integration is on, seed its encrypted
-  // credential profile now — we hold both the raw token and the robot id, and
-  // the agent must NOT (the token goes via the child's stdin, never argv/env).
-  // Best-effort: the helper never throws, so a missing binary can't fail boot.
-  if (config.sdk.octoCli) {
-    await seedOctoCliProfile({
-      apiUrl: config.apiUrl,
-      botToken: config.botToken,
-      robotId: gateway.botId,
-    });
-  }
 
   // #86: prefetch the media CDN host (best-effort). Octo serves media from a
   // separate CDN than apiUrl; without this, inbound image URLs on the CDN host
@@ -638,7 +625,7 @@ export async function handleMessage(
       // double-injecting history. We still persist to our own store (for the
       // non-persistent fallback, /reset, and group context), so this only
       // changes what the agent is *prompted* with, not what we record.
-      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; memoryDir?: string; botRobotId?: string } | undefined;
+      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; memoryDir?: string } | undefined;
       let historyForQuery = historyPrefix;
       if (config.sdk.persistentSession) {
         const resume = store.getSdkSessionId(sessionKey);
@@ -668,13 +655,6 @@ export async function handleMessage(
         if (groupInstructions) {
           sessionOpts = { ...(sessionOpts ?? {}), groupInstructions };
         }
-      }
-
-      // #94: when octo-cli is on, pass the bot's robot id so agent-bridge can
-      // export OCTO_BOT_ID into the Bash subprocess — the agent then runs
-      // octo-cli as the right bot without ever handling the raw token.
-      if (config.sdk.octoCli) {
-        sessionOpts = { ...(sessionOpts ?? {}), botRobotId: botId };
       }
 
       const rawChunks = queryAgent(userContentForLLM, historyForQuery, contextStr, config, sessionCtx, onToolUse, sessionOpts);

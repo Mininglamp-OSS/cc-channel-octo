@@ -29,7 +29,6 @@ const CC_VARS = [
   'CC_OCTO_CONTEXT_HISTORY_LIMIT', 'CC_OCTO_BOT_BLOCKLIST',
   'CC_OCTO_MENTION_FREE_GROUPS', 'CC_OCTO_MAX_RESPONSE_CHARS',
   'ANTHROPIC_BASE_URL', 'CC_OCTO_SDK_TOOL_PROGRESS', 'CC_OCTO_SDK_PERSISTENT_SESSION',
-  'CC_OCTO_SDK_OCTO_CLI',
   'CC_OCTO_GROUP_CONFIG_DIR',
   'CC_OCTO_TRANSPORT', 'CC_OCTO_WEBHOOK_HOST', 'CC_OCTO_WEBHOOK_PORT',
   'CC_OCTO_WEBHOOK_PATH', 'CC_OCTO_WEBHOOK_SECRET',
@@ -88,9 +87,9 @@ describe('loadConfig defaults', () => {
     // Q2: default is the wildcard sentinel — no whitelist applied at the SDK layer.
     expect(cfg.sdk.allowedTools).toBe('*');
     expect(cfg.sdk.permissionMode).toBe('bypassPermissions');
-    // v1.1: SDK isolation mode by default — the bot must not read/write the
-    // operator's real ~/.claude config.
-    expect(cfg.sdk.settingSources).toEqual([]);
+    // #100: project-scope by default so the SDK discovers sandbox .claude/skills/.
+    // Memory stays isolated via the inline autoMemoryDirectory pin.
+    expect(cfg.sdk.settingSources).toEqual(['project']);
     expect(cfg.sdk.anthropicBaseUrl).toBeUndefined(); // Q1: unset by default
     expect(cfg.rateLimit.maxPerMinute).toBe(5);
     expect(cfg.context.maxContextChars).toBe(6000);
@@ -103,6 +102,9 @@ describe('loadConfig defaults', () => {
     expect(bot.dataDir).toBe(`${tmpDir}/default/data`);
     expect(bot.cwdBase).toBe(`${tmpDir}/default/workspace`);
     expect(bot.memoryBase).toBe(`${tmpDir}/default/memory`);
+    // #100: skill dirs derived (per-bot + install-wide global).
+    expect(bot.skillsDir).toBe(`${tmpDir}/default/skills`);
+    expect(bot.globalSkillsDir).toBe(`${tmpDir}/skills`);
   });
 });
 
@@ -666,32 +668,32 @@ describe('v0.3: tool progress toggle', () => {
   );
 });
 
-// ─── #94: sdk.octoCli ──────────────────────────────────────────────────
+// ─── #100: derived skill dirs ──────────────────────────────────────────
 
-describe('sdk.octoCli toggle', () => {
+describe('skill dirs (derived, two-layer)', () => {
   beforeEach(setup);
   afterEach(teardown);
 
-  it('defaults to undefined (off)', () => {
+  it('single bot: skillsDir=<baseDir>/default/skills, globalSkillsDir=<baseDir>/skills', () => {
     const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    expect(loadConfig(path).sdk.octoCli).toBeUndefined();
+    const [bot] = resolveBotConfigs(loadConfig(path));
+    expect(bot.skillsDir).toBe(`${tmpDir}/default/skills`);
+    expect(bot.globalSkillsDir).toBe(`${tmpDir}/skills`);
   });
 
-  it('reads sdk.octoCli=true from the config file', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a', sdk: { octoCli: true } });
-    expect(loadConfig(path).sdk.octoCli).toBe(true);
-  });
-
-  it.each(['true', '1', 'yes', 'on'])('CC_OCTO_SDK_OCTO_CLI=%s enables it', (val) => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_SDK_OCTO_CLI = val;
-    expect(loadConfig(path).sdk.octoCli).toBe(true);
-  });
-
-  it.each(['false', '0', 'off', ''])('CC_OCTO_SDK_OCTO_CLI=%s disables it', (val) => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a', sdk: { octoCli: true } });
-    process.env.CC_OCTO_SDK_OCTO_CLI = val;
-    expect(loadConfig(path).sdk.octoCli).toBe(false);
+  it('multi-bot: each bot has its own skillsDir; global is shared', () => {
+    const path = writeConfig({
+      apiUrl: 'https://a',
+      bots: [{ id: 'alice', botToken: 'bf_a' }, { id: 'bob', botToken: 'bf_b' }],
+    });
+    const bots = resolveBotConfigs(loadConfig(path));
+    const alice = bots.find((b) => b.botId === 'alice')!;
+    const bob = bots.find((b) => b.botId === 'bob')!;
+    expect(alice.skillsDir).toBe(`${tmpDir}/alice/skills`);
+    expect(bob.skillsDir).toBe(`${tmpDir}/bob/skills`);
+    // Global skills dir is install-wide (same for both).
+    expect(alice.globalSkillsDir).toBe(`${tmpDir}/skills`);
+    expect(bob.globalSkillsDir).toBe(`${tmpDir}/skills`);
   });
 });
 

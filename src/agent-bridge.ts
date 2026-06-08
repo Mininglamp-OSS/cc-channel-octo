@@ -14,9 +14,9 @@ import type { PermissionMode, SettingSource, Settings } from '@anthropic-ai/clau
 import type { Config } from './config.js';
 import { resolveSessionCwd } from './cwd-resolver.js';
 import type { SessionCtx } from './cwd-resolver.js';
+import { linkSkillsIntoSandbox } from './skill-linker.js';
 import { safeBody, safeSectioned, trustedText, escapeSectionMarkers } from './prompt-safety.js';
 import type { SafeText } from './prompt-safety.js';
-import { OCTO_CLI_GUIDE } from './octo-cli-guide.js';
 
 const VALID_PERMISSION_MODES: Set<string> = new Set([
   'default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto',
@@ -108,7 +108,6 @@ export function buildSystemPrompt(
   groupContext: string,
   customPrompt?: string,
   groupInstructions?: string,
-  octoCliGuide?: string,
 ): string {
   // parts is SafeText[]: every element must be MINTED by a prompt-safety helper,
   // so a future section that interpolates user text can't be pushed raw — the
@@ -119,12 +118,6 @@ export function buildSystemPrompt(
   if (customPrompt) {
     // Operator-provided global instruction (config systemPrompt / SOUL.md) — trusted.
     parts.push(trustedText(customPrompt));
-  }
-  if (octoCliGuide) {
-    // #94: octo-cli usage guide — trusted operator-provided text (a fixed
-    // constant, not user input). Placed after the SOUL prompt so it reads as
-    // capability documentation, before the user-authored group context/history.
-    parts.push(trustedText(octoCliGuide));
   }
   if (groupInstructions) {
     // v1.0 GROUP.md: operator-provided, trusted per-group instructions. Placed
@@ -273,19 +266,18 @@ export async function* queryAgent(
   config: Config,
   sessionCtx?: SessionCtx,
   onToolUse?: (toolName: string) => void,
-  opts?: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; memoryDir?: string; botRobotId?: string },
+  opts?: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; memoryDir?: string },
 ): AsyncIterable<string> {
   const permissionMode = toPermissionMode(config.sdk.permissionMode);
   const settingSources = toSettingSources(config.sdk.settingSources);
 
-  // Build system prompt: non-overridable security prefix + custom + octo-cli
-  // guide (#94) + group instructions (v1.0 GROUP.md) + context + history
+  // Build system prompt: non-overridable security prefix + custom + group
+  // instructions (v1.0 GROUP.md) + context + history
   const systemPrompt = buildSystemPrompt(
     historyPrefix,
     groupContext,
     config.sdk.systemPrompt,
     opts?.groupInstructions,
-    config.sdk.octoCli ? OCTO_CLI_GUIDE : undefined,
   );
 
   // Q3: per-session cwd under cwdBase — creates the directory on first use.
@@ -295,25 +287,27 @@ export async function* queryAgent(
   const cwdBase = config.cwdBase ?? config.cwd;
   const cwd = sessionCtx ? resolveSessionCwd(cwdBase, sessionCtx) : cwdBase;
 
-  // Q1: forward scoped env vars to the SDK subprocess via the `env` option
-  // instead of mutating the gateway's global process.env. The SDK's `env`
-  // REPLACES the subprocess environment entirely, so spread process.env first
-  // to preserve PATH/HOME/ANTHROPIC_API_KEY. Scoping it here means overrides
-  // never leak across requests. When nothing needs overriding, omit `env` so
-  // the subprocess simply inherits process.env.
-  //   - ANTHROPIC_BASE_URL: gateway → model gateway routing.
-  //   - OCTO_API_BASE_URL / OCTO_BOT_ID (#94): so the agent's `octo-cli` calls
-  //     (via Bash) hit the right Octo API as the right bot WITHOUT the model
-  //     ever handling the raw token (the token lives only in octo-cli's
-  //     encrypted profile, selected by the non-secret robot id).
-  const needEnv = Boolean(config.sdk.anthropicBaseUrl) || Boolean(config.sdk.octoCli);
-  const env = needEnv
-    ? {
-        ...process.env,
-        ...(config.sdk.anthropicBaseUrl ? { ANTHROPIC_BASE_URL: config.sdk.anthropicBaseUrl } : {}),
-        ...(config.sdk.octoCli ? { OCTO_API_BASE_URL: config.apiUrl } : {}),
-        ...(config.sdk.octoCli && opts?.botRobotId ? { OCTO_BOT_ID: opts.botRobotId } : {}),
-      }
+  // #100: when the SDK is allowed to discover project-scope skills, symlink the
+  // operator-owned skill dirs (global + per-bot) into this session's sandbox at
+  // <cwd>/.claude/skills/ so `Lj7` finds them. Generic — cc knows nothing about
+  // which tools the skills drive. Best-effort; never throws. Per-bot overrides
+  // global (later source wins).
+  if (sessionCtx && settingSources.includes('project')) {
+    const sources = [config.globalSkillsDir, config.skillsDir].filter(
+      (d): d is string => typeof d === 'string' && d.length > 0,
+    );
+    if (sources.length > 0) linkSkillsIntoSandbox(cwd, sources);
+  }
+
+  // Q1: forward ANTHROPIC_BASE_URL to the SDK subprocess via the scoped `env`
+  // option instead of mutating the gateway's global process.env. The SDK's
+  // `env` REPLACES the subprocess environment entirely, so spread process.env
+  // first to preserve PATH/HOME/ANTHROPIC_API_KEY. Scoping it here means the
+  // override never leaks across requests and never persists after the field is
+  // cleared (no stale-global problem). When unset, omit `env` so the subprocess
+  // simply inherits process.env.
+  const env = config.sdk.anthropicBaseUrl
+    ? { ...process.env, ANTHROPIC_BASE_URL: config.sdk.anthropicBaseUrl }
     : undefined;
 
   const stream = sdkQuery({
