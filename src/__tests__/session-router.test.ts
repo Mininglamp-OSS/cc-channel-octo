@@ -260,6 +260,41 @@ describe('SessionRouter', () => {
 
   // --- Serial queue ---
 
+  it('group rate limit is per-member, not one shared bucket for the whole channel', async () => {
+    // Regression: with the per-channel sessionKey, keying the session bucket by
+    // sessionKey alone collapsed the whole room into one quota. Each member must
+    // get their own maxPerMinute in the same channel.
+    const cfg = makeConfig({ rateLimit: { maxPerMinute: 2 } });
+    router = new SessionRouter(cfg, ROBOT_ID);
+    const CH = 'group-shared';
+    const mentioned = { type: MessageType.Text, content: 'hi', mention: { uids: [ROBOT_ID] } };
+
+    // Alice uses her full quota (2).
+    const a1 = await router.route(makeMsg({ message_id: 'a1', channel_id: CH, from_uid: 'alice', channel_type: ChannelType.Group, payload: mentioned }));
+    const a2 = await router.route(makeMsg({ message_id: 'a2', channel_id: CH, from_uid: 'alice', channel_type: ChannelType.Group, payload: mentioned }));
+    expect(a1!.shouldProcess).toBe(true);
+    expect(a2!.shouldProcess).toBe(true);
+
+    // Bob in the SAME channel still has his own quota — not blocked by Alice.
+    const b1 = await router.route(makeMsg({ message_id: 'b1', channel_id: CH, from_uid: 'bob', channel_type: ChannelType.Group, payload: mentioned }));
+    const b2 = await router.route(makeMsg({ message_id: 'b2', channel_id: CH, from_uid: 'bob', channel_type: ChannelType.Group, payload: mentioned }));
+    expect(b1!.shouldProcess).toBe(true);
+    expect(b2!.shouldProcess).toBe(true);
+
+    // Alice's 3rd IS blocked (her own quota exhausted).
+    const a3 = await router.route(makeMsg({ message_id: 'a3', channel_id: CH, from_uid: 'alice', channel_type: ChannelType.Group, payload: mentioned }));
+    expect(a3!.shouldProcess).toBe(false);
+  });
+
+  it('sessionKey throws on a DM with empty from_uid (no shared-session collapse)', () => {
+    const cfg = makeConfig({ rateLimit: { maxPerMinute: 5 } });
+    router = new SessionRouter(cfg, ROBOT_ID);
+    const msg = makeMsg({ channel_type: ChannelType.DM, from_uid: '', channel_id: 'dm-ch' });
+    expect(() => router.sessionKey(msg)).toThrow(/no from_uid/);
+  });
+
+  // --- Serial queue (continued) ---
+
   it('processes same session key sequentially', async () => {
     const order: number[] = [];
     const cfg = makeConfig({ rateLimit: { maxPerMinute: 100 } });

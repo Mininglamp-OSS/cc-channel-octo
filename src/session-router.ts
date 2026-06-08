@@ -142,6 +142,13 @@ export class SessionRouter {
     const spaceId = this.extractSpaceId(msg);
     if (msg.channel_type === ChannelType.DM) {
       // DM is per-user (private): same peer always resumes the same session.
+      // from_uid IS the peer's identity here; a missing one is unroutable —
+      // never fall back to '' (that would collapse every uid-less DM into ONE
+      // shared session across unrelated peers, leaking history/memory). Mirrors
+      // the group channel_id guard below. Caught upstream → message dropped.
+      if (!msg.from_uid) {
+        throw new Error('DM message has no from_uid — cannot derive a session key');
+      }
       return spaceId ? `${spaceId}:${msg.from_uid}` : msg.from_uid;
     }
     // Group is per-CHANNEL (shared): every member of a group shares one session,
@@ -385,7 +392,16 @@ export class SessionRouter {
     const globalMax = maxPerMinute * GLOBAL_RATE_MULTIPLIER;
 
     const globalBucket = this.getOrCreateGlobalBucket(now, globalMax);
-    const sessionBucket = this.getOrCreateBucket(this.tokenBuckets, key, now, maxPerMinute);
+    // Per-participant session bucket: key by session AND uid. For a group the
+    // sessionKey is the channel_id (shared), so keying the rate bucket by
+    // sessionKey alone would collapse the WHOLE room into one maxPerMinute quota
+    // (the 6th message/min from ANY member blocked). Including uid restores a
+    // per-member per-channel quota — matching the pre-shared-session behavior —
+    // while the global + per-user buckets still bound abuse. For a DM the
+    // sessionKey already embeds the peer, so this is just per-peer. Joined with a
+    // newline (never present in a uid/key) so distinct pairs can't alias.
+    const sessionBucketKey = `${key}\n${uid}`;
+    const sessionBucket = this.getOrCreateBucket(this.tokenBuckets, sessionBucketKey, now, maxPerMinute);
     const userBucket = this.getOrCreateBucket(this.userBuckets, uid, now, maxPerMinute);
 
     this.refillBucket(globalBucket, now, globalMax);
