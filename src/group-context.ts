@@ -4,6 +4,7 @@
 
 import type { DbAdapter, PreparedStatement } from './db-adapter.js';
 import { getGroupMembers, fetchUserInfo } from './octo/api.js';
+import { sanitizeDisplayName } from './prompt-safety.js';
 
 interface GroupMessage {
   fromUid: string;
@@ -105,19 +106,24 @@ export class GroupContext {
     content: string,
     timestamp: number,
   ): void {
+    // SECURITY: fromName is the user-controlled IM display name and is rendered
+    // into the [Group context] block as `<name>：<content>`. Bound + strip it at
+    // the boundary (shared choke point) so it can't forge a label/line; fall
+    // back to the uid when nothing survives.
+    const safeName = sanitizeDisplayName(fromName, fromUid);
     let window = this.messageCache.get(channelId);
     if (!window) {
       window = [];
       this.messageCache.set(channelId, window);
     }
-    window.push({ fromUid, fromName, content, timestamp });
+    window.push({ fromUid, fromName: safeName, content, timestamp });
     while (window.length > this.maxWindowSize) {
       window.shift();
     }
-    this.learnMember(channelId, fromUid, fromName);
+    this.learnMember(channelId, fromUid, safeName);
 
     try {
-      this.insertMessage.run(channelId, fromUid, fromName, content, timestamp);
+      this.insertMessage.run(channelId, fromUid, safeName, content, timestamp);
       // Trim old messages to keep DB bounded (keep 2x window for safety)
       this.deleteOldMessages.run(channelId, channelId, this.maxWindowSize * 2);
     } catch (err) {

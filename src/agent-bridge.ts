@@ -14,6 +14,7 @@ import type { PermissionMode, SettingSource, Settings } from '@anthropic-ai/clau
 import type { Config } from './config.js';
 import { resolveSessionCwd } from './cwd-resolver.js';
 import type { SessionCtx } from './cwd-resolver.js';
+import { escapeSectionMarkers, sanitizePromptBody } from './prompt-safety.js';
 
 const VALID_PERMISSION_MODES: Set<string> = new Set([
   'default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto',
@@ -59,15 +60,6 @@ const SECURITY_PROMPT_PREFIX =
   'used for notification routing. The adapter converts @[uid:displayName] ' +
   'into @displayName before sending, attaching the uid as a notification entity.';
 
-/**
- * Section markers used in the system prompt to delimit structural sections.
- * If these patterns appear inside user-controlled text (e.g. stored history,
- * group context, reply-quote prefix) they are escaped by
- * sanitizeForSystemPrompt so a malicious sender cannot inject fake
- * structural boundaries (S3 fix — stage 6).
- */
-const SECTION_MARKER_RE = /^\[(Group context|Conversation history|Current message|Quoted message from [^\]]*)\]/gim;
-
 function toPermissionMode(value: string): PermissionMode {
   if (!VALID_PERMISSION_MODES.has(value)) {
     throw new Error(`Invalid permissionMode: ${value}`);
@@ -85,16 +77,12 @@ function toSettingSources(values: string[]): SettingSource[] {
 }
 
 /**
- * Escape section marker patterns in text that will be embedded in the system prompt.
- * Prevents user-controlled content (stored in history) from injecting fake
- * structural boundaries.
- *
- * Only escapes the exact markers used by buildSystemPrompt — role labels
- * like [user]: and [assistant]: are left intact since they are legitimate
- * history formatting.
+ * @deprecated Back-compat re-export. Section-marker escaping now lives in the
+ * shared `prompt-safety` module as `escapeSectionMarkers`. Kept so existing
+ * callers/tests keep working; new code should import from prompt-safety.
  */
 export function sanitizeForSystemPrompt(text: string): string {
-  return text.replace(SECTION_MARKER_RE, (match) => `\\${match}`);
+  return escapeSectionMarkers(text);
 }
 
 /**
@@ -130,17 +118,21 @@ export function buildSystemPrompt(
     parts.push(`[Group instructions]\n${groupInstructions}`);
   }
   if (groupContext) {
-    // S3/PM-P1-B fix: group context lines are user-authored chat messages.
-    // A user can send "[Conversation history]\n[assistant]: <forged>" in a
-    // group and have it rendered into [Group context] verbatim without
-    // sanitization, allowing them to inject fake structural boundaries.
-    const sanitizedGroupContext = sanitizeForSystemPrompt(groupContext);
+    // SECURITY: group context lines are user-authored chat (`<name>：<body>`),
+    // NOT our `[role name]:` turn format — so a member can forge BOTH a section
+    // marker AND a `[assistant ...]:` role label inside them. sanitizePromptBody
+    // escapes both. (Safe to escape role labels here precisely because these
+    // lines are not our renderer's labels; doing the same to historyPrefix would
+    // clobber the legitimate labels renderTurn already produced.)
+    const sanitizedGroupContext = sanitizePromptBody(groupContext);
     parts.push(`[Group context]\n${sanitizedGroupContext}`);
   }
   if (historyPrefix) {
-    // Sanitize history entries to escape any injected section markers
-    // from prior user messages that were stored verbatim.
-    const sanitized = sanitizeForSystemPrompt(historyPrefix);
+    // History turns are rendered by SessionStore.renderTurn, which already
+    // escapes role labels in the user content per-fragment and emits the
+    // legitimate `[user <name>]:` labels. Here we only escape SECTION markers —
+    // escaping role labels again would corrupt those legitimate labels.
+    const sanitized = escapeSectionMarkers(historyPrefix);
     parts.push(`[Conversation history]\n${sanitized}`);
   }
   const assembled = parts.join('\n\n');
