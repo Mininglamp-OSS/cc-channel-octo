@@ -12,12 +12,14 @@
  * drift from the history partition:
  *
  *   - DM:    sessionKey = `${spaceId}:${uid}` (or bare `uid`)   → `dm:<key>`
- *   - Group: sessionKey = `${channel_id}:${uid}`                → `group:<key>`
+ *   - Group: sessionKey = `${channel_id}`                       → `group:<key>`
  *
- * Because the group sessionKey embeds `from_uid`, every group member gets their
- * OWN sandbox (matching how group history is partitioned per-user), not a
- * shared per-channel workspace. The `kind` prefix keeps a DM key and a group
- * key that happen to be byte-identical from colliding.
+ * Group sessionKey is the channel id alone, so ALL members of a group share one
+ * sandbox (a group is a collective workspace). DM is per-user, so each peer gets
+ * a private sandbox. The `kind` prefix keeps a DM key and a group key that
+ * happen to be byte-identical from colliding. (Group sharing reverses the
+ * per-(channel×user) split from PR #64 — intentional; space isolation is
+ * provided by one-bot-per-space, each with its own cwdBase.)
  */
 
 import { createHash } from 'node:crypto';
@@ -82,6 +84,21 @@ function sessionKeyToString(ctx: SessionCtx): string {
   // Prefix the router key with the channel kind so a DM key and a group key
   // that happen to be byte-identical can never resolve to the same sandbox.
   return `${ctx.kind}:${ctx.sessionKey}`;
+}
+
+/**
+ * Compute the SDK auto-memory directory for a session under `memoryBase`.
+ *
+ * Deliberately a PURE function — unlike resolveSessionCwd it does NOT mkdir,
+ * touch mtime, or write a registry marker. The SDK creates the directory on
+ * first use, and we want auto-memory to be PERMANENT (no TTL): `memoryBase`
+ * lives outside `cwdBase`, so the cwd TTL sweep (cleanupExpiredCwds) never sees
+ * it. Uses the same kind-prefixed sha256 hashing as the cwd sandbox so the
+ * memory partition tracks the session partition exactly (group=shared per
+ * channel, DM=private per peer).
+ */
+export function resolveMemoryDir(memoryBase: string, ctx: SessionCtx): string {
+  return join(memoryBase, hashKey(sessionKeyToString(ctx)));
 }
 
 /**

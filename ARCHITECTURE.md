@@ -123,7 +123,9 @@ A and B run in parallel. Messages within the same session are strictly serialize
 
 The lock is a promise chain per session key (`Map<string, Promise<void>>`). This is deliberately simple — no worker threads, no job queues. The bottleneck is the Claude Agent SDK call (seconds to minutes), not the lock mechanism.
 
-Session keys: DM uses `from_uid`; group uses `channel_id:from_uid` (per-user-per-group isolation).
+Session keys: DM uses `from_uid` (private per peer); group uses `channel_id`
+alone — **a whole group shares one session** (history, working dir, and
+auto-memory). See the shared-group threat model below.
 
 ## Security Model
 
@@ -131,17 +133,45 @@ Session keys: DM uses `from_uid`; group uses `channel_id:from_uid` (per-user-per
 
 The bot accepts messages from any Octo user who can reach it. Users can send arbitrary text that becomes a Claude Code prompt. The attack surface is: **any Octo user can instruct Claude Code to do anything the tool whitelist allows within the working directory**.
 
+### Shared-group trust domain (important)
+
+A **group is a single trust domain**, not N isolated users. The session key for a
+group is the `channel_id` alone, so every member of a channel shares **one
+conversation history, one `bypassPermissions` working-directory sandbox, and one
+long-term auto-memory store**. Concretely, within a group any member can:
+
+- **Read and modify another member's working tree** — there is one cwd sandbox
+  per channel, not per member. Files one user has the agent create or edit are
+  visible and mutable by every other member's turns.
+- **Plant persistent facts in shared auto-memory** — member A can have the bot
+  "remember" attacker-controlled information that is later recalled into member
+  B's turn as trusted long-term memory. This **survives `/reset` and restarts**
+  (auto-memory is intentionally exempt from the 7-day cwd TTL).
+- **Influence shared context** — all members read the same history window.
+  User-authored display names (`from_name`) and message bodies are sanitized at
+  the storage layer so they cannot forge `[user …]:` / `[assistant …]:` turn
+  labels, but the *content* of what others said is still shared by design.
+
+DM sessions remain private per peer (`from_uid`). Per-bot isolation is absolute:
+each bot has its own `<baseDir>/<botId>/` subtree (data, workspace, memory).
+
+**Recommendation:** for groups with mutually-untrusted members, drop `Bash`
+(and ideally `Write`/`Edit`) from `allowedTools` and treat the group sandbox as
+collectively owned. If you need per-member isolation, run separate channels (or
+separate bots) — there is no per-(channel×user) split within one group.
+
 ### Mitigations
 
 | Layer | Mechanism | Default |
 |---|---|---|
-| **Tool whitelist** | `allowedTools` restricts which Claude Code tools are available | `Read, Write, Edit, Bash, Glob, Grep, WebFetch, WebSearch` |
-| **Working directory isolation** | `cwd` must not contain secrets, credentials, or config.json | Operator responsibility |
+| **Tool whitelist** | `allowedTools` restricts which Claude Code tools are available | `"*"` (every SDK tool) |
+| **Workspace isolation** | per-session sandbox under `<baseDir>/<botId>/workspace`; keep secrets out of the bot subtree | Derived, not configurable |
 | **System prompt** | Instructs agent to reject credential exfiltration, sensitive file reads, and arbitrary network requests | Hardcoded in `agent-bridge.ts` |
-| **Setting sources** | `settingSources: ['user']` — excludes `project` to prevent malicious `.claude/settings.json` in the working directory from overriding security settings | Default |
+| **Turn-label sanitization** | `from_name` stripped at write, role labels in content escaped at render — neither can forge a turn in shared history | Always on |
+| **Setting sources** | `settingSources: []` (SDK isolation) — the bot never reads/writes the operator's real `~/.claude` config | Default |
 | **Rate limiting** | Token bucket per session, configurable `maxPerMinute` | 5 req/min |
 | **Bot blocklist** | Prevents bot-to-bot loops | Empty by default |
-| **Process lock** | PID file prevents multiple instances competing for the same bot identity | `data/gateway.lock` |
+| **Process lock** | PID file prevents multiple instances competing for the same bot identity | `<baseDir>/<botId>/data/gateway.lock` |
 
 ### Permission Mode
 

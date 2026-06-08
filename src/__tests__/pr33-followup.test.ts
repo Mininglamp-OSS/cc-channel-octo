@@ -30,9 +30,9 @@ describe('seedHistoryFromApi: bot replies stored as assistant (PR#33 follow-up)'
       const content = m.content ?? '';
       if (!content) continue;
       if (botId && m.from_uid === botId) {
-        store.appendAssistant(sessionKey, content, m.message_seq);
+        store.appendAssistant(sessionKey, content, m.message_seq, botId);
       } else {
-        store.appendUser(sessionKey, content, m.message_seq);
+        store.appendUser(sessionKey, content, m.message_seq, m.from_name ?? m.from_uid);
       }
     }
   }
@@ -62,15 +62,15 @@ describe('seedHistoryFromApi: bot replies stored as assistant (PR#33 follow-up)'
     );
 
     const history = store.buildHistoryPrefix(SESSION, 40);
-    // Bot's lines should be labeled [assistant]
-    expect(history).toContain('[assistant]: hi alice');
-    expect(history).toContain('[assistant]: hi bob');
-    // User lines should be labeled [user]
-    expect(history).toContain('[user]: hello');
-    expect(history).toContain('[user]: me too');
+    // Bot's lines are labeled [assistant <botId>]
+    expect(history).toContain('[assistant bot-xyz]: hi alice');
+    expect(history).toContain('[assistant bot-xyz]: hi bob');
+    // User lines are labeled [user <uid>] (no from_name in fixtures → uid)
+    expect(history).toContain('[user user-alice]: hello');
+    expect(history).toContain('[user user-bob]: me too');
     // Counts: 2 user + 2 assistant exactly
-    expect((history.match(/\[user\]:/g) || []).length).toBe(2);
-    expect((history.match(/\[assistant\]:/g) || []).length).toBe(2);
+    expect((history.match(/\[user /g) || []).length).toBe(2);
+    expect((history.match(/\[assistant /g) || []).length).toBe(2);
   });
 
   it('LLM no longer sees its own replies as user questions (regression)', () => {
@@ -89,9 +89,9 @@ describe('seedHistoryFromApi: bot replies stored as assistant (PR#33 follow-up)'
 
     const history = store.buildHistoryPrefix(SESSION, 40);
     // The bot's answer "2+2 equals 4" must NOT appear as a user line.
-    expect(history).not.toContain('[user]: 2+2 equals 4');
+    expect(history).not.toContain('[user user-alice]: 2+2 equals 4');
     // It must appear as an assistant line.
-    expect(history).toContain('[assistant]: 2+2 equals 4');
+    expect(history).toContain('[assistant bot-xyz]: 2+2 equals 4');
   });
 
   it('without botId all messages default to user (safety: never falsely claim assistant)', () => {
@@ -106,8 +106,8 @@ describe('seedHistoryFromApi: bot replies stored as assistant (PR#33 follow-up)'
       '',
     );
     const history = store.buildHistoryPrefix(SESSION, 40);
-    expect((history.match(/\[user\]:/g) || []).length).toBe(2);
-    expect((history.match(/\[assistant\]:/g) || []).length).toBe(0);
+    expect((history.match(/\[user /g) || []).length).toBe(2);
+    expect((history.match(/\[assistant /g) || []).length).toBe(0);
   });
 
   it('preserves chronological order via message_seq sort', () => {

@@ -189,12 +189,15 @@ describe('queryAgent', () => {
         }),
       }),
     );
-    // systemPrompt should contain security prefix + custom + group ctx + history
+    // systemPrompt is the claude_code preset (required for SDK auto-memory to
+    // activate); our composed text rides in `append`.
     const callArgs = mockQuery.mock.calls[0][0];
-    expect(callArgs.options.systemPrompt).toContain('untrusted IM users');
-    expect(callArgs.options.systemPrompt).toContain('Custom instructions');
-    expect(callArgs.options.systemPrompt).toContain('[Group context]');
-    expect(callArgs.options.systemPrompt).toContain('[Conversation history]');
+    const sp = callArgs.options.systemPrompt;
+    expect(sp).toMatchObject({ type: 'preset', preset: 'claude_code' });
+    expect(sp.append).toContain('untrusted IM users');
+    expect(sp.append).toContain('Custom instructions');
+    expect(sp.append).toContain('[Group context]');
+    expect(sp.append).toContain('[Conversation history]');
   });
 
   it('throws on invalid permissionMode', async () => {
@@ -343,6 +346,27 @@ describe('queryAgent', () => {
     ]));
     for await (const _ of queryAgent('t', '', '', makeConfig())) { void _; }
     expect(mockQuery.mock.calls[0][0].options).not.toHaveProperty('resume');
+  });
+
+  it('enables SDK auto-memory at opts.memoryDir via inline settings', async () => {
+    mockQuery.mockReturnValue(createMockStream([
+      { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
+    ]));
+    for await (const _ of queryAgent('t', '', '', makeConfig(), undefined, undefined, { memoryDir: '/mem/abc' })) {
+      void _;
+    }
+    const options = mockQuery.mock.calls[0][0].options;
+    expect(options.settings).toEqual({ autoMemoryEnabled: true, autoMemoryDirectory: '/mem/abc' });
+    // settingSources is orthogonal and left intact.
+    expect(options.settingSources).toEqual(['user']);
+  });
+
+  it('omits settings when no memoryDir is provided', async () => {
+    mockQuery.mockReturnValue(createMockStream([
+      { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
+    ]));
+    for await (const _ of queryAgent('t', '', '', makeConfig())) { void _; }
+    expect(mockQuery.mock.calls[0][0].options).not.toHaveProperty('settings');
   });
 
   it('reports the SDK session_id once via onSessionId', async () => {

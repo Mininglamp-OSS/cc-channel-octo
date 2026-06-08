@@ -76,7 +76,7 @@ describe("parseIntStrict allows 0 (Q14)", () => {
 
     const dir = mkdtempSync(join(tmpdir(), "q14-"));
     const cfgPath = join(dir, "config.json");
-    writeFileSync(cfgPath, JSON.stringify({ botToken: "bf_t", apiUrl: "https://a" }));
+    writeFileSync(cfgPath, JSON.stringify({ botToken: "bf_t", apiUrl: "https://a", cwdBase: "/test/cwdbase" }));
 
     process.env.CC_OCTO_SDK_MAX_TURNS = "0";
     try {
@@ -95,7 +95,7 @@ describe("parseIntStrict allows 0 (Q14)", () => {
 
     const dir = mkdtempSync(join(tmpdir(), "q14-"));
     const cfgPath = join(dir, "config.json");
-    writeFileSync(cfgPath, JSON.stringify({ botToken: "bf_t", apiUrl: "https://a" }));
+    writeFileSync(cfgPath, JSON.stringify({ botToken: "bf_t", apiUrl: "https://a", cwdBase: "/test/cwdbase" }));
 
     process.env.CC_OCTO_CONTEXT_HISTORY_LIMIT = "0";
     try {
@@ -114,7 +114,7 @@ describe("parseIntStrict allows 0 (Q14)", () => {
 
     const dir = mkdtempSync(join(tmpdir(), "q14-"));
     const cfgPath = join(dir, "config.json");
-    writeFileSync(cfgPath, JSON.stringify({ botToken: "bf_t", apiUrl: "https://a" }));
+    writeFileSync(cfgPath, JSON.stringify({ botToken: "bf_t", apiUrl: "https://a", cwdBase: "/test/cwdbase" }));
 
     process.env.CC_OCTO_SDK_MAX_TURNS = "-1";
     try {

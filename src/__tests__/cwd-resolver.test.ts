@@ -31,6 +31,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   resolveSessionCwd,
   cleanupExpiredCwds,
+  resolveMemoryDir,
   DEFAULT_CWD_TTL_MS,
   type SessionCtx,
 } from '../cwd-resolver.js';
@@ -112,10 +113,14 @@ describe('resolveSessionCwd — hash uniqueness', () => {
     expect(basename(grp)).toBe(expectedName('group:foo'));
   });
 
-  it('every group member gets their own sandbox (uid embedded in key)', () => {
-    const memberA = resolveSessionCwd(base, { kind: 'group', sessionKey: 'gA:alice' });
-    const memberB = resolveSessionCwd(base, { kind: 'group', sessionKey: 'gA:bob' });
-    expect(memberA).not.toBe(memberB);
+  it('distinct group sessionKeys map to distinct dirs (resolver is key-agnostic)', () => {
+    // NOTE: the resolver just hashes whatever sessionKey it's given. As of the
+    // shared-group change, SessionRouter produces ONE key per channel, so group
+    // members now share a dir — that grouping decision lives in the router, not
+    // here. This test only asserts the resolver keeps distinct keys distinct.
+    const a = resolveSessionCwd(base, { kind: 'group', sessionKey: 'gA' });
+    const b = resolveSessionCwd(base, { kind: 'group', sessionKey: 'gB' });
+    expect(a).not.toBe(b);
   });
 });
 
@@ -300,5 +305,34 @@ describe('cleanupExpiredCwds — safety', () => {
     cleanupExpiredCwds(base, DEFAULT_CWD_TTL_MS);
     expect(existsSync(stale)).toBe(false);
     expect(readdirSync(base)).toContain('sidecar.log');
+  });
+});
+
+describe('resolveMemoryDir (v1.1) — pure, stable, no fs side effects', () => {
+  let mbase: string;
+  beforeEach(() => { mbase = mkdtempSync(join(tmpdir(), 'memdir-test-')); });
+  afterEach(() => { rmSync(mbase, { recursive: true, force: true }); });
+
+  it('is deterministic for a given (kind, sessionKey)', () => {
+    const ctx: SessionCtx = { kind: 'group', sessionKey: 'chan-1' };
+    expect(resolveMemoryDir(mbase, ctx)).toBe(resolveMemoryDir(mbase, ctx));
+  });
+
+  it('hashes the kind-prefixed key (matches cwd scheme) under memoryBase', () => {
+    const dir = resolveMemoryDir(mbase, { kind: 'group', sessionKey: 'chan-1' });
+    expect(dir).toBe(join(mbase, expectedName('group:chan-1')));
+  });
+
+  it('separates dm vs group with identical key', () => {
+    const dm = resolveMemoryDir(mbase, { kind: 'dm', sessionKey: 'x' });
+    const grp = resolveMemoryDir(mbase, { kind: 'group', sessionKey: 'x' });
+    expect(dm).not.toBe(grp);
+  });
+
+  it('is PURE — creates no directory, no registry marker (SDK owns the dir, no TTL)', () => {
+    const before = readdirSync(mbase).sort();
+    resolveMemoryDir(mbase, { kind: 'dm', sessionKey: 'alice' });
+    expect(readdirSync(mbase).sort()).toEqual(before); // nothing written
+    expect(existsSync(join(mbase, REGISTRY_DIR))).toBe(false);
   });
 });

@@ -14,7 +14,7 @@ import { SessionRouter } from './session-router.js';
 import { GroupContext } from './group-context.js';
 import { queryAgent, sanitizeForSystemPrompt } from './agent-bridge.js';
 import type { SessionCtx } from './cwd-resolver.js';
-import { cleanupExpiredCwds } from './cwd-resolver.js';
+import { cleanupExpiredCwds, resolveMemoryDir } from './cwd-resolver.js';
 import { StreamRelay } from './stream-relay.js';
 import { sendMessage, sendReadReceipt, getChannelMessages } from './octo/api.js';
 import type { HistoricalMessage } from './octo/api.js';
@@ -27,6 +27,7 @@ import { WebhookServer } from './webhook.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes } from './file-inline-wrap.js';
 import { Buffer } from 'node:buffer';
 import { join } from 'node:path';
+import { mkdirSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 async function main(): Promise<void> {
@@ -141,6 +142,11 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   if (cleaned > 0) {
     console.log(`[cc-channel-octo] ${label}Cleaned ${cleaned} expired session(s)`);
   }
+
+  // --- Auto-memory base (create eagerly so a deleted/unmounted memory volume
+  // fails loudly at boot instead of silently disabling recall at message time). ---
+  const memoryBase = config.memoryBase ?? join(config.dataDir, 'memory');
+  mkdirSync(memoryBase, { recursive: true });
 
   // --- Group context ---
   const groupContext = new GroupContext(adapter, config.context.maxContextChars);
@@ -496,16 +502,17 @@ export async function handleMessage(
         }
       }
 
-      store.appendUser(sessionKey, userContent, msg.message_seq);
+      store.appendUser(sessionKey, userContent, msg.message_seq, msg.from_name ?? msg.from_uid);
 
       // --- Query agent with structural role separation (Q3 fix) ---
       // userContentForLLM → user role (prompt), history + context → system role (systemPrompt)
-      // Q3 cwd isolation: the SessionCtx carries the router-produced sessionKey
+      // cwd isolation: the SessionCtx carries the router-produced sessionKey
       // verbatim, so the cwd partition is byte-for-byte identical to the history
-      // partition. Group keys embed from_uid (`${channel_id}:${uid}`), so every
-      // group member gets their OWN sandbox — matching per-user group history
-      // and honoring the documented "one user cannot read/mutate another's
-      // working tree" guarantee.
+      // partition. Group keys are the channel_id alone (session-router.ts), so a
+      // whole group SHARES one sandbox (and one history + one memory) — a group
+      // is a shared workspace, with no member-to-member isolation. DM keys are
+      // per-peer, so DM sandboxes stay private. (This is the intentional reversal
+      // of the per-(channel×user) group isolation; see cwd-resolver.ts header.)
       const sessionCtx: SessionCtx = {
         kind: isGroup ? 'group' : 'dm',
         sessionKey,
@@ -544,7 +551,7 @@ export async function handleMessage(
       // double-injecting history. We still persist to our own store (for the
       // non-persistent fallback, /reset, and group context), so this only
       // changes what the agent is *prompted* with, not what we record.
-      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string } | undefined;
+      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; memoryDir?: string } | undefined;
       let historyForQuery = historyPrefix;
       if (config.sdk.persistentSession) {
         const resume = store.getSdkSessionId(sessionKey);
@@ -553,6 +560,17 @@ export async function handleMessage(
           resume,
           onSessionId: (id: string) => store.setSdkSessionId(sessionKey, id),
         };
+      }
+
+      // v1.1: point the SDK auto-memory at a stable per-session dir under
+      // memoryBase (<baseDir>/<botId>/memory, outside cwdBase so it's never
+      // reclaimed by the cwd TTL). Same partitioning as the session: group=shared
+      // per channel, DM=per peer. memoryBase is always populated by
+      // resolveBotConfigs(); fall back defensively for hand-built configs/tests.
+      {
+        const memBase = config.memoryBase ?? join(config.dataDir, 'memory');
+        const memoryDir = resolveMemoryDir(memBase, sessionCtx);
+        sessionOpts = { ...(sessionOpts ?? {}), memoryDir };
       }
 
       // v1.0 GROUP.md: inject operator-provided per-group instructions (from
@@ -593,7 +611,7 @@ export async function handleMessage(
       // --- Store assistant response in history ---
       const fullResponse = collected.join('');
       if (fullResponse) {
-        store.appendAssistant(sessionKey, fullResponse, msg.message_seq);
+        store.appendAssistant(sessionKey, fullResponse, msg.message_seq, botId);
         // G10: mark this message_seq as the last one we replied to. Next turn's
         // segmented history will treat messages with seq <= this as [answered].
         store.setLastBotReplySeq(sessionKey, msg.message_seq);
@@ -710,9 +728,9 @@ function seedHistoryFromApi(
       : placeholder;
     if (!content) continue;
     if (botId && m.from_uid === botId) {
-      store.appendAssistant(sessionKey, content, m.message_seq);
+      store.appendAssistant(sessionKey, content, m.message_seq, botId);
     } else {
-      store.appendUser(sessionKey, content, m.message_seq);
+      store.appendUser(sessionKey, content, m.message_seq, m.from_name ?? m.from_uid);
     }
   }
 }

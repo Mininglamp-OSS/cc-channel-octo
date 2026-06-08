@@ -144,7 +144,8 @@ describe("SessionStore history segmentation (G10)", () => {
     const history = store.buildSegmentedHistoryPrefix("test-session", 40);
     expect(history).not.toContain("[answered history]");
     expect(history).not.toContain("[new messages]");
-    expect(history).toContain("[user]: hello");
+    // No from_name supplied → label defaults to the role.
+    expect(history).toContain("[user user]: hello");
   });
 
   it("marks all as new when no assistant messages", async () => {

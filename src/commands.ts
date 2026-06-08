@@ -10,9 +10,10 @@
  * router has stripped any leading @bot mention), so `@bot /reset` works in
  * groups. Matching is case-insensitive and tolerant of surrounding whitespace.
  *
- * A command is scoped to the sessionKey of the message — in a group, `/reset`
- * only clears the calling member's own session (group history is per-user), not
- * the whole room.
+ * A command is scoped to the sessionKey of the message. In a group the session
+ * is shared per channel, so `/reset` clears the WHOLE group's conversation
+ * history (every member shares one session), not just the caller's. In a DM it
+ * clears that peer's history. Note: it does NOT clear long-term auto-memory.
  *
  * Note: commands are handled inside the router's processing callback, AFTER the
  * per-session rate limit is applied. A user who has exhausted their token bucket
@@ -63,7 +64,7 @@ export function parseCommand(
 /** Human-readable list of supported commands. */
 const HELP_TEXT = [
   'Available commands:',
-  '• `/reset` — clear your own conversation history (does not affect the shared group context)',
+  '• `/reset` — clear the conversation history for this session (the whole group, in a group chat); does not clear long-term memory',
   '• `/config` — show the current session settings',
   '• `/help` — show this message',
 ].join('\n');
@@ -111,8 +112,9 @@ export function handleCommand(
 
   switch (parsed.name) {
     case 'reset': {
-      // Scoped to THIS sessionKey only — in a group, clears the caller's own
-      // per-user history, never the whole room.
+      // Scoped to THIS sessionKey. In a group the session is shared per channel,
+      // so this clears the whole group's conversation history; in a DM it clears
+      // that peer's. Long-term auto-memory (under memoryBase) is NOT cleared.
       store.deleteSession(sessionKey);
       // Persist a barrier at this message_seq so G4 cold-start backfill (which
       // refetches channel history when the local cache is empty) cannot
@@ -123,7 +125,7 @@ export function handleCommand(
       // v0.3 persistent sessions: also forget the SDK session id, otherwise the
       // next turn would `resume` it and bring the just-cleared conversation back.
       store.clearSdkSessionId(sessionKey);
-      return { handled: true, reply: '✓ Conversation history cleared. Starting fresh.' };
+      return { handled: true, reply: '✓ Conversation history cleared (long-term memory is kept).' };
     }
     case 'config': {
       return { handled: true, reply: renderConfig(config) };

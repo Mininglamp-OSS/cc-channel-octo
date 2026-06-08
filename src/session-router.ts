@@ -141,9 +141,23 @@ export class SessionRouter {
   sessionKey(msg: BotMessage): string {
     const spaceId = this.extractSpaceId(msg);
     if (msg.channel_type === ChannelType.DM) {
+      // DM is per-user (private): same peer always resumes the same session.
       return spaceId ? `${spaceId}:${msg.from_uid}` : msg.from_uid;
     }
-    return `${msg.channel_id ?? ''}:${msg.from_uid}`;
+    // Group is per-CHANNEL (shared): every member of a group shares one session,
+    // history, working dir, and memory — a group is a collective workspace, not
+    // N private chats. (Reverses the per-(channel×user) split from PR #64; see
+    // src/cwd-resolver.ts header. Space isolation is implicit: one bot = one
+    // space = one process with its own dataDir/cwdBase/memoryBase.)
+    //
+    // channel_id IS the group's identity here, so a missing one is unroutable —
+    // never fall back to '' (that would collapse every channel-less group message
+    // into ONE shared session across unrelated channels, leaking history/memory
+    // between them). Fail loud instead; route() treats the throw as a drop.
+    if (!msg.channel_id) {
+      throw new Error('Group message has no channel_id — cannot derive a session key');
+    }
+    return msg.channel_id;
   }
 
   /**

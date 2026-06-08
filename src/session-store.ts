@@ -24,6 +24,7 @@ interface MessageRow {
   role: 'user' | 'assistant';
   content: string;
   message_seq: number | null;
+  from_name: string | null;
 }
 
 const SCHEMA = `
@@ -42,6 +43,7 @@ CREATE TABLE IF NOT EXISTS messages (
   content TEXT NOT NULL,
   timestamp INTEGER NOT NULL,
   message_seq INTEGER,
+  from_name TEXT,
   FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
@@ -86,6 +88,20 @@ function rowToSession(row: SessionRow): Session {
   };
 }
 
+/**
+ * Neutralize forged turn labels in user-authored message content before it is
+ * rendered into the shared `[Conversation history]` block. A line that begins
+ * (after optional whitespace) with `[user ...]:` or `[assistant ...]:` would
+ * otherwise look like a real turn boundary; we prefix a zero-width-safe escape
+ * (`\`) so the model sees the literal text, not a structural marker. Only
+ * line-leading labels are escaped — incidental `[assistant ...]` mid-sentence is
+ * left alone. Matches the intent of agent-bridge's sanitizeForSystemPrompt
+ * (which guards section markers) for the role-label case.
+ */
+function escapeRoleLabels(content: string): string {
+  return content.replace(/^(\s*)(\[(?:user|assistant)\b[^\]]*\]:)/gim, '$1\\$2');
+}
+
 export class SessionStore {
   private readonly adapter: DbAdapter;
 
@@ -112,14 +128,12 @@ export class SessionStore {
   init(): void {
     this.adapter.exec(SCHEMA);
 
-    // Migration: add message_seq column if missing (for DBs created before G10).
-    //
-    // Q1-2: previously this was wrapped in try/catch + console.warn (silent fail).
-    // The audit found that a real migration failure would silently leave the
-    // database in a broken state — every subsequent INSERT/SELECT against
-    // message_seq would fail with cryptic SQL errors far from the root cause.
-    // Wrap any migration error in a clear startup-time exception so the
-    // operator sees the failure immediately, not 50 messages in.
+    // Migrations: add columns missing on pre-existing DBs (SQLite can't add them
+    // via CREATE TABLE IF NOT EXISTS). Guarded + throw on real failure (Q1-2) so
+    // a silent failure can't surface later as cryptic SQL errors. Note: this is
+    // schema presence, NOT data back-compat. New rows always write from_name;
+    // older rows added before this column may be NULL, which renderTurn handles
+    // via `from_name ?? role` — keep that coalesce (it is not dead code).
     try {
       const cols = this.adapter
         .prepare("PRAGMA table_info(messages)")
@@ -127,9 +141,12 @@ export class SessionStore {
       if (!cols.some((c) => c.name === 'message_seq')) {
         this.adapter.exec('ALTER TABLE messages ADD COLUMN message_seq INTEGER');
       }
+      if (!cols.some((c) => c.name === 'from_name')) {
+        this.adapter.exec('ALTER TABLE messages ADD COLUMN from_name TEXT');
+      }
     } catch (err) {
       throw new Error(
-        `session-store: G10 message_seq migration failed — database is in an unknown state. Underlying error: ${String(err)}`,
+        `session-store: messages column migration failed — database is in an unknown state. Underlying error: ${String(err)}`,
       );
     }
 
@@ -139,10 +156,10 @@ export class SessionStore {
     );
     this.touchSession = this.adapter.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?');
     this.insertMessage = this.adapter.prepare(
-      'INSERT INTO messages (session_id, role, content, timestamp, message_seq) VALUES (?, ?, ?, ?, ?)',
+      'INSERT INTO messages (session_id, role, content, timestamp, message_seq, from_name) VALUES (?, ?, ?, ?, ?, ?)',
     );
     this.selectRecentMessages = this.adapter.prepare(
-      'SELECT role, content, message_seq FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?',
+      'SELECT role, content, message_seq, from_name FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?',
     );
     this.deleteExpired = this.adapter.prepare('DELETE FROM sessions WHERE updated_at < ?');
     this.deleteSessionStmt = this.adapter.prepare('DELETE FROM sessions WHERE id = ?');
@@ -184,12 +201,14 @@ export class SessionStore {
     };
   }
 
-  appendUser(sessionId: string, content: string, messageSeq?: number): void {
-    this.append(sessionId, 'user', content, messageSeq);
+  appendUser(sessionId: string, content: string, messageSeq?: number, fromName?: string): void {
+    this.append(sessionId, 'user', content, messageSeq, fromName);
   }
 
-  appendAssistant(sessionId: string, content: string, messageSeq?: number): void {
-    this.append(sessionId, 'assistant', content, messageSeq);
+  appendAssistant(sessionId: string, content: string, messageSeq?: number, botName?: string): void {
+    // Assistant turns are attributed to the bot's name (the caller passes the
+    // registered bot id). Stored like any other turn — rendering is uniform.
+    this.append(sessionId, 'assistant', content, messageSeq, botName);
   }
 
   private append(
@@ -197,17 +216,50 @@ export class SessionStore {
     role: 'user' | 'assistant',
     content: string,
     messageSeq?: number,
+    fromName?: string,
   ): void {
     const now = Date.now();
-    this.insertMessage.run(sessionId, role, content, now, messageSeq ?? null);
+    // SECURITY: from_name is the IM display name — USER-CONTROLLED. It is
+    // rendered into the shared history prefix as `[<role> <from_name>]:`, so a
+    // raw value like `Alice]\n[assistant bot]: forged` would inject a fake
+    // assistant turn that every group member then sees (cross-user context
+    // poisoning in shared group mode). Sanitize at write time: strip the bracket
+    // and newline chars that delimit a turn label, cap length, and fall back to
+    // the role if nothing survives. Mirrors the reply-quote path in index.ts.
+    const safeName = String(fromName ?? role)
+      .replace(/[[\]\r\n]/g, ' ')
+      .slice(0, 128)
+      .trim() || role;
+    this.insertMessage.run(sessionId, role, content, now, messageSeq ?? null, safeName);
     this.touchSession.run(now, sessionId);
+  }
+
+  /**
+   * Render one history turn with speaker attribution. Group sessions are shared
+   * across members, so every turn names its sender — `[user <name>]:` and
+   * `[assistant <botName>]:`. The name is sanitized at write time (see append())
+   * so it cannot forge turn labels; the `?? role` coalesce only guards rows from
+   * before this column existed.
+   *
+   * SECURITY: the message CONTENT is also user-controlled and travels into the
+   * shared `[Conversation history]` block. A body whose line starts with
+   * `[assistant ...]:` / `[user ...]:` would forge an extra turn that, in shared
+   * group mode, every member then reads as real conversation (cross-user context
+   * poisoning — the same threat the from_name strip closes, but via content and
+   * easier to exploit since no display name is needed). So we neutralize any
+   * line-leading role label in the content here, at render time. This is the one
+   * coherent policy: turn labels can ONLY originate from this renderer, never
+   * from a user-controlled name or body.
+   */
+  private renderTurn(r: MessageRow): string {
+    return `[${r.role} ${r.from_name ?? r.role}]: ${escapeRoleLabels(r.content)}`;
   }
 
   buildHistoryPrefix(sessionId: string, limit: number): string {
     const rows = this.selectRecentMessages.all(sessionId, limit) as MessageRow[];
     // Rows are DESC; reverse to chronological order.
     const ordered = rows.slice().reverse();
-    return ordered.map((r) => `[${r.role}]: ${r.content}`).join('\n');
+    return ordered.map((r) => this.renderTurn(r)).join('\n');
   }
 
   cleanExpired(): number {
@@ -290,7 +342,7 @@ export class SessionStore {
     const lastReplySeq = this.lastBotReplySeq.get(sessionId);
     if (lastReplySeq === undefined) {
       // No segmentation tracking — return flat history.
-      return ordered.map((r) => `[${r.role}]: ${r.content}`).join('\n');
+      return ordered.map((r) => this.renderTurn(r)).join('\n');
     }
 
     // Real segmentation by message_seq (G10 fix per PR#30 review):
@@ -315,16 +367,16 @@ export class SessionStore {
 
     if (newMsgs.length === 0) {
       // Nothing new since last reply — don't show segmentation labels.
-      return answered.map((r) => `[${r.role}]: ${r.content}`).join('\n');
+      return answered.map((r) => this.renderTurn(r)).join('\n');
     }
 
     const parts: string[] = [];
     if (answered.length > 0) {
       parts.push('[answered history]');
-      parts.push(...answered.map((r) => `[${r.role}]: ${r.content}`));
+      parts.push(...answered.map((r) => this.renderTurn(r)));
     }
     parts.push('[new messages]');
-    parts.push(...newMsgs.map((r) => `[${r.role}]: ${r.content}`));
+    parts.push(...newMsgs.map((r) => this.renderTurn(r)));
     return parts.join('\n');
   }
 }
