@@ -194,37 +194,72 @@ export class OctoGateway {
     const dir = dirname(this.lockFilePath);
     mkdirSync(dir, { recursive: true });
 
-    if (existsSync(this.lockFilePath)) {
-      // Lock format: "<pid> <nonce>" (nonce optional for forward-compat with
-      // older single-field locks).
-      const content = readFileSync(this.lockFilePath, 'utf-8').trim();
-      const pid = parseInt(content.split(/\s+/)[0], 10);
-      if (pid && !isNaN(pid)) {
-        try {
-          process.kill(pid, 0); // signal 0 = check existence
+    const content = `${process.pid} ${this.lockNonce}`;
+    // Try at most twice: first attempt, then once more after reclaiming a stale
+    // lock. The create is ATOMIC (flag 'wx' = O_EXCL) so two processes racing to
+    // acquire can't both succeed — the loser gets EEXIST and is handled as "held"
+    // (or reclaims only if the holder is provably dead).
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        writeFileSync(this.lockFilePath, content, { mode: 0o600, flag: 'wx' });
+        return; // won the lock atomically
+      } catch (err: unknown) {
+        const e = err as NodeJS.ErrnoException;
+        if (e.code !== 'EEXIST') throw err; // unexpected fs error
+        // Lock exists — decide whether the holder is alive.
+        if (attempt > 0 || !this.reclaimIfStale()) {
+          // Either we already reclaimed once and lost the re-create race (a
+          // concurrent process won — it IS running), or the holder is alive.
+          const held = this.readLockPid();
           throw new Error(
-            `Another instance is running (PID ${pid}). Lock file: ${this.lockFilePath}`,
+            `Another instance is running (PID ${held ?? 'unknown'}). Lock file: ${this.lockFilePath}`,
           );
-        } catch (err: unknown) {
-          const e = err as NodeJS.ErrnoException;
-          if (e.code === 'ESRCH') {
-            console.log(`Removing stale lock file (PID ${pid} not found)`);
-          } else if (e.message?.includes('Another instance')) {
-            throw err;
-          } else if (e.code === 'EPERM') {
-            // The PID exists but is owned by ANOTHER user — it cannot be our bot
-            // (the gateway runs as one service user with its own dataDir), so it
-            // is almost certainly a recycled PID. Treat the lock as stale and
-            // reclaim it rather than refusing to start forever.
-            console.warn(
-              `Lock PID ${pid} exists but is not signalable (EPERM) — likely a reused ` +
-              `PID; reclaiming the stale lock at ${this.lockFilePath}`,
-            );
-          }
         }
+        // reclaimIfStale() removed a dead lock — loop once to re-create.
       }
     }
-    writeFileSync(this.lockFilePath, `${process.pid} ${this.lockNonce}`, { mode: 0o600 });
+  }
+
+  /** Read the PID field of the existing lock, or null if unreadable. */
+  private readLockPid(): number | null {
+    try {
+      const pid = parseInt(readFileSync(this.lockFilePath, 'utf-8').trim().split(/\s+/)[0], 10);
+      return Number.isInteger(pid) ? pid : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * If the existing lock's holder is provably gone, remove it and return true so
+   * the caller can retry the atomic create. Returns false if the holder is alive
+   * (or the lock vanished — caller's retry will race fairly).
+   */
+  private reclaimIfStale(): boolean {
+    const pid = this.readLockPid();
+    if (pid === null) {
+      // Corrupt/empty/non-numeric lock (e.g. a partial write) — reclaim it.
+      try { unlinkSync(this.lockFilePath); } catch { /* vanished — fine */ }
+      return true;
+    }
+    try {
+      process.kill(pid, 0); // signal 0 = liveness check
+      return false; // holder is alive and signalable → genuinely held
+    } catch (err: unknown) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === 'EPERM') {
+        // PID exists but owned by another user — can't be our bot (one service
+        // user per dataDir), so almost certainly a reused PID. Reclaim.
+        console.warn(
+          `Lock PID ${pid} exists but is not signalable (EPERM) — likely a reused ` +
+          `PID; reclaiming the stale lock at ${this.lockFilePath}`,
+        );
+      } else {
+        console.log(`Removing stale lock file (PID ${pid} not found)`);
+      }
+      try { unlinkSync(this.lockFilePath); } catch { /* vanished — fine */ }
+      return true;
+    }
   }
 
   private releaseLock(): void {

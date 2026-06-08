@@ -14,7 +14,8 @@ import type { PermissionMode, SettingSource, Settings } from '@anthropic-ai/clau
 import type { Config } from './config.js';
 import { resolveSessionCwd } from './cwd-resolver.js';
 import type { SessionCtx } from './cwd-resolver.js';
-import { escapeSectionMarkers, sanitizePromptBody } from './prompt-safety.js';
+import { safeBody, safeSectioned, trustedText, escapeSectionMarkers } from './prompt-safety.js';
+import type { SafeText } from './prompt-safety.js';
 
 const VALID_PERMISSION_MODES: Set<string> = new Set([
   'default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto',
@@ -107,33 +108,37 @@ export function buildSystemPrompt(
   customPrompt?: string,
   groupInstructions?: string,
 ): string {
-  const parts: string[] = [SECURITY_PROMPT_PREFIX];
+  // parts is SafeText[]: every element must be MINTED by a prompt-safety helper,
+  // so a future section that interpolates user text can't be pushed raw — the
+  // compiler rejects a plain string here. This is the choke-point enforcement
+  // (finding #10): "unsafe text reached the prompt" is now a type error, not a
+  // convention each call site must remember.
+  const parts: SafeText[] = [trustedText(SECURITY_PROMPT_PREFIX)];
   if (customPrompt) {
-    parts.push(customPrompt);
+    // Operator-provided global instruction (config systemPrompt / SOUL.md) — trusted.
+    parts.push(trustedText(customPrompt));
   }
   if (groupInstructions) {
     // v1.0 GROUP.md: operator-provided, trusted per-group instructions. Placed
     // after the global custom prompt so a group can specialize behavior. NOT
     // sanitized like group context — this is a trusted operator file, not chat.
-    parts.push(`[Group instructions]\n${groupInstructions}`);
+    parts.push(trustedText(`[Group instructions]\n${groupInstructions}`));
   }
   if (groupContext) {
     // SECURITY: group context lines are user-authored chat (`<name>：<body>`),
     // NOT our `[role name]:` turn format — so a member can forge BOTH a section
-    // marker AND a `[assistant ...]:` role label inside them. sanitizePromptBody
-    // escapes both. (Safe to escape role labels here precisely because these
-    // lines are not our renderer's labels; doing the same to historyPrefix would
-    // clobber the legitimate labels renderTurn already produced.)
-    const sanitizedGroupContext = sanitizePromptBody(groupContext);
-    parts.push(`[Group context]\n${sanitizedGroupContext}`);
+    // marker AND a `[assistant ...]:` role label inside them. safeBody escapes
+    // both. (Safe to escape role labels here precisely because these lines are
+    // not our renderer's labels; doing the same to historyPrefix would clobber
+    // the legitimate labels renderTurn already produced.)
+    parts.push(trustedText('[Group context]\n') + safeBody(groupContext) as SafeText);
   }
   if (historyPrefix) {
     // History turns are rendered by SessionStore.renderTurn, which already
     // escapes role labels in the user content per-fragment and emits the
     // legitimate `[user <name>]:` labels. Here we only escape SECTION markers —
     // escaping role labels again would corrupt those legitimate labels.
-    const sanitized = escapeSectionMarkers(historyPrefix);
-    parts.push(`[Conversation history]\n${sanitized}`);
+    parts.push(trustedText('[Conversation history]\n') + safeSectioned(historyPrefix) as SafeText);
   }
   const assembled = parts.join('\n\n');
   // D1/P1-3 (齐 P1-3): cap the assembled system prompt to prevent
