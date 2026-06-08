@@ -4,10 +4,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const mockQuery = vi.hoisted(() => vi.fn());
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: mockQuery,
-  // octo-tools.ts (imported transitively via agent-bridge) uses these; provide
-  // lightweight stand-ins so the module loads under the mock.
-  createSdkMcpServer: (opts: { name: string }) => ({ type: 'sdk', name: opts.name, instance: {} }),
-  tool: (name: string, description: string, inputSchema: unknown, handler: unknown) => ({ name, description, inputSchema, handler }),
 }));
 
 import { queryAgent } from '../agent-bridge.js';
@@ -373,24 +369,77 @@ describe('queryAgent', () => {
     expect(mockQuery.mock.calls[0][0].options).not.toHaveProperty('settings');
   });
 
-  it('wires the octo MCP tool server only when sdk.octoTools is enabled (#87)', async () => {
+  // --- #94: external octo-cli integration (env injection + system-prompt guide) ---
+
+  it('injects OCTO_API_BASE_URL + OCTO_BOT_ID into env when octoCli is on', async () => {
     mockQuery.mockReturnValue(createMockStream([
       { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
     ]));
-    const config = makeConfig({ sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: [], octoTools: true } });
-    for await (const _ of queryAgent('t', '', '', config)) { void _; }
+    const config = makeConfig({
+      apiUrl: 'https://octo.example.com/api',
+      sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: [], octoCli: true },
+    });
+    for await (const _ of queryAgent('t', '', '', config, undefined, undefined, { botRobotId: 'cli_x' })) { void _; }
     const options = mockQuery.mock.calls[0][0].options;
-    expect(options.mcpServers).toBeDefined();
-    expect(options.mcpServers.octo).toBeDefined();
-    expect(options.mcpServers.octo.name).toBe('octo');
+    expect(options.env.OCTO_API_BASE_URL).toBe('https://octo.example.com/api');
+    expect(options.env.OCTO_BOT_ID).toBe('cli_x');
+    // process.env is preserved (SDK env REPLACES the subprocess env).
+    expect(options.env.PATH).toBe(process.env.PATH);
   });
 
-  it('omits mcpServers when sdk.octoTools is off (default)', async () => {
+  it('omits OCTO_BOT_ID when octoCli is on but no robot id is available', async () => {
+    mockQuery.mockReturnValue(createMockStream([
+      { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
+    ]));
+    const config = makeConfig({ sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: [], octoCli: true } });
+    for await (const _ of queryAgent('t', '', '', config)) { void _; }
+    const options = mockQuery.mock.calls[0][0].options;
+    expect(options.env.OCTO_API_BASE_URL).toBe('https://test.example.com');
+    expect(options.env).not.toHaveProperty('OCTO_BOT_ID');
+  });
+
+  it('sets no OCTO_* env (and may omit env entirely) when octoCli is off', async () => {
+    mockQuery.mockReturnValue(createMockStream([
+      { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
+    ]));
+    for await (const _ of queryAgent('t', '', '', makeConfig(), undefined, undefined, { botRobotId: 'cli_x' })) { void _; }
+    const options = mockQuery.mock.calls[0][0].options;
+    // No anthropicBaseUrl and octoCli off → env omitted entirely.
+    expect(options).not.toHaveProperty('env');
+  });
+
+  it('coexists with anthropicBaseUrl (all three vars present)', async () => {
+    mockQuery.mockReturnValue(createMockStream([
+      { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
+    ]));
+    const config = makeConfig({
+      apiUrl: 'https://octo.example.com/api',
+      sdk: {
+        allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: [],
+        octoCli: true, anthropicBaseUrl: 'https://llm.example.com',
+      },
+    });
+    for await (const _ of queryAgent('t', '', '', config, undefined, undefined, { botRobotId: 'cli_x' })) { void _; }
+    const env = mockQuery.mock.calls[0][0].options.env;
+    expect(env.ANTHROPIC_BASE_URL).toBe('https://llm.example.com');
+    expect(env.OCTO_API_BASE_URL).toBe('https://octo.example.com/api');
+    expect(env.OCTO_BOT_ID).toBe('cli_x');
+  });
+
+  it('appends the octo-cli guide to the system prompt only when octoCli is on', async () => {
+    mockQuery.mockReturnValue(createMockStream([
+      { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
+    ]));
+    const on = makeConfig({ sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: [], octoCli: true } });
+    for await (const _ of queryAgent('t', '', '', on)) { void _; }
+    expect(mockQuery.mock.calls[0][0].options.systemPrompt.append).toContain('[Octo CLI');
+
+    mockQuery.mockClear();
     mockQuery.mockReturnValue(createMockStream([
       { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
     ]));
     for await (const _ of queryAgent('t', '', '', makeConfig())) { void _; }
-    expect(mockQuery.mock.calls[0][0].options).not.toHaveProperty('mcpServers');
+    expect(mockQuery.mock.calls[0][0].options.systemPrompt.append).not.toContain('[Octo CLI');
   });
 
   it('reports the SDK session_id once via onSessionId', async () => {

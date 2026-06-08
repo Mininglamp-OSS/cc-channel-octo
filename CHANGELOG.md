@@ -18,6 +18,21 @@ While the major version is `0`, minor releases may carry breaking changes.
 
 ### Added
 
+- **External `octo-cli` integration** (#94) — set `sdk.octoCli`
+  (`CC_OCTO_SDK_OCTO_CLI=true`) to let the agent operate Octo (groups, members,
+  messages, threads, files — full read + write) by shelling out to the
+  [`octo-cli`](https://github.com/Mininglamp-OSS/octo-cli) binary via the
+  built-in Bash tool. Requires `octo-cli` on PATH
+  (`npm i -g @mininglamp-oss/octo-cli`). The raw bot token **never reaches the
+  model**: cc seeds an encrypted, machine-bound octo-cli profile at startup
+  (token via the child's stdin, never argv) and the agent selects its identity
+  by the non-secret robot id (`OCTO_BOT_ID`); `OCTO_API_BASE_URL` is injected
+  too. Capability is authorized server-side by token kind (`bf_*` writes,
+  `app_*` DM-only). Guidance is delivered as trusted system-prompt text (not a
+  filesystem skill), preserving the default `settingSources: []` isolation and
+  auto-memory containment. New `src/octo-cli.ts` (profile seed) +
+  `src/octo-cli-guide.ts` (usage guide). **Replaces #87** (see Removed).
+
 - **Webhook inbound transport** (v1.0) — set `transport: "webhook"`
   (`CC_OCTO_TRANSPORT=webhook`) to receive Octo messages over HTTP instead of the
   WuKongIM WebSocket; the bot still registers over REST for its id and outbound
@@ -76,6 +91,14 @@ While the major version is `0`, minor releases may carry breaking changes.
   `/reset` records a persisted reset barrier (by `message_seq`) so group
   cold-start backfill cannot resurrect the cleared history, even across a
   process restart. Commands are subject to the normal per-session rate limit.
+
+### Removed
+
+- **In-process Octo MCP tool server** (#87, never released) — the read-only
+  `mcp__octo__*` tools (`list_groups`, `group_info`, `group_members`,
+  `search_members`) and the `sdk.octoTools` toggle are removed in favor of the
+  external `octo-cli` integration (#94), which covers the full read + write
+  surface without re-implementing operations in cc.
 
 ## [0.2.0] - 2026-06-07
 

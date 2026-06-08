@@ -60,3 +60,13 @@ cwd isolation), media-upload.ts / file-inline-wrap.ts (inbound media), db-adapte
   enforced by a commitlint `commit-msg` hook on `main`.
 - **Lint is zero-tolerance** — `eslint --max-warnings 0`, so an `any` (warn-level
   rule) fails the build despite being "just a warning".
+- **octo-cli integration** (`sdk.octoCli`) — when on, the agent operates Octo by
+  shelling out to the external `octo-cli` binary (must be on PATH:
+  `npm i -g @mininglamp-oss/octo-cli`). cc auto-seeds an encrypted octo-cli
+  profile at startup (token via the child's **stdin, never argv**); the agent
+  authenticates by the non-secret robot id (`OCTO_BOT_ID`, injected into the Bash
+  subprocess env alongside `OCTO_API_BASE_URL`) — the raw token never reaches the
+  model. Guidance lives in `src/octo-cli-guide.ts` as trusted **system-prompt
+  text**, NOT a filesystem skill: discovery is gated by `settingSources`, and the
+  deploy runs `settingSources: []` to keep auto-memory contained. Replaced the
+  removed in-process MCP (#87).
