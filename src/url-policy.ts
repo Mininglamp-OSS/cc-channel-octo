@@ -70,10 +70,37 @@ export function isPrivateOrLocalAddress(address: string): boolean {
       const dotted = `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
       return isPrivateIPv4(dotted);
     }
+    // NAT64 well-known prefix 64:ff9b::/96 — the last 32 bits embed an IPv4
+    // address. A name resolving to e.g. `64:ff9b::7f00:1` (= 127.0.0.1) on a
+    // NAT64-enabled host would otherwise reach loopback. The embedded v4 is the
+    // final two hextets (dotted-quad form `64:ff9b::a.b.c.d` is also accepted).
+    if (lower.startsWith("64:ff9b:")) {
+      const dotTail = lower.match(/(\d+\.\d+\.\d+\.\d+)$/);
+      if (dotTail) return isPrivateIPv4(dotTail[1]);
+      const hexTail = lower.match(/:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+      if (hexTail) {
+        const embedded = decodeEmbeddedV4(hexTail[1], hexTail[2]);
+        if (embedded) return isPrivateIPv4(embedded);
+      }
+    }
+    // 6to4 2002::/16 — bits 16..47 embed an IPv4 address (2002:V4hi:V4lo::/48).
+    const sixToFour = lower.match(/^2002:([0-9a-f]{1,4}):([0-9a-f]{1,4}):/);
+    if (sixToFour) {
+      const embedded = decodeEmbeddedV4(sixToFour[1], sixToFour[2]);
+      if (embedded && isPrivateIPv4(embedded)) return true;
+    }
     return false;
   }
   // Not a valid IP literal — caller should resolve via DNS first.
   return false;
+}
+
+/** Decode two IPv6 hextets (hex strings) into a dotted-quad IPv4 string. */
+function decodeEmbeddedV4(hiHex: string, loHex: string): string | null {
+  const high = parseInt(hiHex, 16);
+  const low = parseInt(loHex, 16);
+  if (Number.isNaN(high) || Number.isNaN(low)) return null;
+  return `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
 }
 
 function isPrivateIPv4(address: string): boolean {

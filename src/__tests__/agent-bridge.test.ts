@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildSystemPrompt, sanitizeForSystemPrompt, buildPrompt } from '../agent-bridge.js';
+import { buildSystemPrompt, sanitizeForSystemPrompt } from '../agent-bridge.js';
 
 // --- sanitizeForSystemPrompt ---
 
@@ -211,18 +211,4 @@ describe('prompt injection defense (Q3)', () => {
   });
 });
 
-// --- buildPrompt (deprecated, backward compat) ---
-
-describe('buildPrompt (deprecated)', () => {
-  it('still produces the old format for backward compat', () => {
-    const result = buildPrompt('[user]: hello\n[assistant]: hi', 'context here', 'new message');
-    expect(result).toContain('[Group context]\ncontext here');
-    expect(result).toContain('[Conversation history]\n[user]: hello');
-    expect(result).toContain('[Current message]\nnew message');
-  });
-
-  it('omits empty sections', () => {
-    const result = buildPrompt('', '', 'just a message');
-    expect(result).toBe('[Current message]\njust a message');
-  });
-});
+// --- buildPrompt removed (dead code) ---

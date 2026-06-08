@@ -72,6 +72,26 @@ describe('isPrivateOrLocalAddress (S5 hex v4-mapped fix)', () => {
     expect(isPrivateOrLocalAddress(addr)).toBe(expected);
   });
 
+  // ── NAT64 (64:ff9b::/96) embeds an IPv4 in the low 32 bits ────
+  it.each([
+    ['64:ff9b::7f00:1', true],        // 127.0.0.1
+    ['64:ff9b::a9fe:a9fe', true],     // 169.254.169.254 (metadata)
+    ['64:ff9b::127.0.0.1', true],     // dotted-quad tail form
+    ['64:ff9b::0808:0808', false],    // 8.8.8.8 (public)
+    ['64:ff9b::8.8.8.8', false],
+  ])('NAT64 %s → %s', (addr, expected) => {
+    expect(isPrivateOrLocalAddress(addr)).toBe(expected);
+  });
+
+  // ── 6to4 (2002::/16) embeds an IPv4 in bits 16..47 ────────────
+  it.each([
+    ['2002:7f00:1::1', true],         // 127.0.0.1
+    ['2002:a9fe:a9fe::1', true],      // 169.254.169.254
+    ['2002:0808:0808::1', false],     // 8.8.8.8 (public)
+  ])('6to4 %s → %s', (addr, expected) => {
+    expect(isPrivateOrLocalAddress(addr)).toBe(expected);
+  });
+
   it('returns false for malformed input', () => {
     expect(isPrivateOrLocalAddress('not-an-ip')).toBe(false);
     expect(isPrivateOrLocalAddress('')).toBe(false);

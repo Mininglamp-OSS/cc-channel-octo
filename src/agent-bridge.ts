@@ -226,25 +226,6 @@ function truncateSystemPrompt(parts: string[]): string {
 }
 
 /**
- * Build the prompt string from history, group context, and current message.
- *
- * @deprecated Use queryAgent() directly — it builds the system prompt internally
- * with proper role separation. This function is retained only for backward
- * compatibility with existing tests.
- */
-export function buildPrompt(historyPrefix: string, groupContext: string, message: string): string {
-  const parts: string[] = [];
-  if (groupContext) {
-    parts.push(`[Group context]\n${groupContext}`);
-  }
-  if (historyPrefix) {
-    parts.push(`[Conversation history]\n${historyPrefix}`);
-  }
-  parts.push(`[Current message]\n${message}`);
-  return parts.join('\n\n');
-}
-
-/**
  * Query Claude Agent SDK with structural role separation.
  *
  * - userMessage is passed as the SDK `prompt` (user role).

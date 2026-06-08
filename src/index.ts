@@ -294,7 +294,10 @@ export async function handleMessage(
       // query — so a command never reaches the LLM, is not stored as a turn,
       // and does not leak into other members' group context. Only text
       // messages carry cleanContent; non-text payloads skip this entirely.
-      // Scoped to this sessionKey (per-user, even in groups).
+      // Scoped to this sessionKey: in a DM that's the peer; in a GROUP the
+      // sessionKey is the channel, so /reset clears the WHOLE group's shared
+      // history (any member can — by the shared-workspace design) and does NOT
+      // clear long-term memory. See commands.ts.
       if (result.cleanContent !== undefined) {
         const command = handleCommand(result.cleanContent, sessionKey, store, config, msg.message_seq);
         if (command.handled) {

@@ -628,18 +628,18 @@ export function resolveBotConfigs(config: Config): Config[] {
     seenIds.add(id);
 
     // Derive the bot's self-contained subtree under baseDir.
-    const botRoot = joinPath(config.baseDir, id);
-    const botDataDir = joinPath(botRoot, 'data');
-    const botCwdBase = joinPath(botRoot, 'workspace');
-    const botMemoryBase = joinPath(botRoot, 'memory');
+    const botRoot = pathJoin(config.baseDir, id);
+    const botDataDir = pathJoin(botRoot, 'data');
+    const botCwdBase = pathJoin(botRoot, 'workspace');
+    const botMemoryBase = pathJoin(botRoot, 'memory');
 
     // Per-bot config.json (in the bot's own subtree) is the highest-priority
     // layer: global shared ⊕ inline bots[] entry ⊕ <baseDir>/<id>/config.json.
-    const perBotFile = readConfigFile(joinPath(botRoot, 'config.json'));
+    const perBotFile = readConfigFile(pathJoin(botRoot, 'config.json'));
     const botToken = perBotFile.botToken ?? bot.botToken ?? '';
     if (!botToken) {
       throw new Error(
-        `Bot "${id}": missing botToken — set it in ${joinPath(botRoot, 'config.json')}`,
+        `Bot "${id}": missing botToken — set it in ${pathJoin(botRoot, 'config.json')}`,
       );
     }
     if (seenTokens.has(botToken)) {
@@ -733,11 +733,6 @@ export function resolveBotConfigs(config: Config): Config[] {
   return resolvedBots;
 }
 
-/** Join two path segments without importing node:path into the type surface. */
-function joinPath(a: string, b: string): string {
-  return a.replace(/\/+$/, '') + '/' + b;
-}
-
 /**
  * v1.1: openclaw-style per-bot personality. Read `<botRoot>/SOUL.md` if it
  * exists and return its trimmed contents as the bot's "soul" (voice/stance/
@@ -747,7 +742,7 @@ function joinPath(a: string, b: string): string {
  * config string. Best-effort — a read error never blocks startup.
  */
 export function loadSoul(botRoot: string): string | undefined {
-  const path = joinPath(botRoot, 'SOUL.md');
+  const path = pathJoin(botRoot, 'SOUL.md');
   if (!existsSync(path)) return undefined;
   try {
     const content = readFileSync(path, 'utf-8').trim();
