@@ -529,13 +529,21 @@ export class WKSocket extends EventEmitter {
     }
 
     try {
-      let lenBefore: number;
-      let lenAfter: number;
-      do {
-        lenBefore = this.tempBuffer.length;
-        this.tempBuffer = this.unpackOne(this.tempBuffer);
-        lenAfter = this.tempBuffer.length;
-      } while (lenBefore !== lenAfter && lenAfter >= 1);
+      // Parse complete packets using a moving cursor instead of re-slicing the
+      // whole buffer per packet. The old `tempBuffer = tempBuffer.slice(total)`
+      // per iteration was O(n²): a peer dribbling many tiny frames near the 1 MiB
+      // cap forced ~n full-array copies of an ~n-element array, stalling the event
+      // loop (shared across bots) without exceeding the byte cap. Now we advance
+      // an offset and trim the consumed prefix exactly once at the end.
+      let consumed = 0;
+      for (;;) {
+        const used = this.unpackOne(this.tempBuffer, consumed);
+        if (used === 0) break; // incomplete packet — wait for more bytes
+        consumed += used;
+      }
+      if (consumed > 0) {
+        this.tempBuffer = this.tempBuffer.slice(consumed);
+      }
     } catch (err) {
       console.debug("[WKSocket] decode error:", err);
       // Reset buffer and reconnect
@@ -546,32 +554,39 @@ export class WKSocket extends EventEmitter {
     }
   }
 
-  private unpackOne(data: number[]): number[] {
-    if (data.length === 0) return data;
+  /**
+   * Parse ONE packet starting at `start` in `data`. Returns the number of bytes
+   * consumed, or 0 if the buffer does not yet hold a complete packet (caller
+   * should wait for more bytes). Reads via `start + offset` and slices only the
+   * single packet's bytes — never the whole buffer — so repeated calls over a
+   * large buffer stay O(n) total, not O(n²).
+   */
+  private unpackOne(data: number[], start: number): number {
+    const available = data.length - start;
+    if (available <= 0) return 0;
 
-    const header = data[0];
+    const header = data[start];
     const packetType = header >> 4;
 
     // PONG is a single byte
     if (packetType === PacketType.PONG) {
       this.onPong();
-      return data.slice(1);
+      return 1;
     }
     // PING from server (shouldn't happen but handle gracefully)
     if (packetType === PacketType.PING) {
-      return data.slice(1);
+      return 1;
     }
 
-    const length = data.length;
     const fixedHeaderLength = 1;
-    let pos = fixedHeaderLength;
+    let pos = start + fixedHeaderLength;
     let remLength = 0;
     let multiplier = 1;
     let hasMore = false;
     let remLengthFull = true;
 
     do {
-      if (pos > length - 1) {
+      if (pos > data.length - 1) {
         remLengthFull = false;
         break;
       }
@@ -579,7 +594,7 @@ export class WKSocket extends EventEmitter {
       // this, a stream of 0x80 bytes would never terminate and would let
       // tempBuffer grow until handleRawData kills the connection — raise
       // earlier and more explicitly here.
-      if (pos - fixedHeaderLength >= MAX_VARLEN_BYTES) {
+      if (pos - (start + fixedHeaderLength) >= MAX_VARLEN_BYTES) {
         throw new Error(
           `[WKSocket] variable-length encoding exceeded ${MAX_VARLEN_BYTES} bytes — malformed packet`,
         );
@@ -590,17 +605,17 @@ export class WKSocket extends EventEmitter {
       hasMore = (digit & 0x80) !== 0;
     } while (hasMore);
 
-    if (!remLengthFull) return data; // Incomplete frame
+    if (!remLengthFull) return 0; // Incomplete frame — need more bytes
 
-    const remLengthLength = pos - fixedHeaderLength;
+    const remLengthLength = pos - (start + fixedHeaderLength);
     const totalLength = fixedHeaderLength + remLengthLength + remLength;
 
-    if (totalLength > length) return data; // Incomplete packet
+    if (totalLength > available) return 0; // Incomplete packet — need more bytes
 
-    // Extract one complete packet
-    const packetData = new Uint8Array(data.slice(0, totalLength));
+    // Extract exactly this one packet's bytes and dispatch.
+    const packetData = new Uint8Array(data.slice(start, start + totalLength));
     this.onPacket(packetData);
-    return data.slice(totalLength);
+    return totalLength;
   }
 
   // ─── Packet Handling ────────────────────────────────────────────────────

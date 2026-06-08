@@ -413,6 +413,50 @@ describe('WKSocket packet-level integration', () => {
     expect(newFrames.some((f) => (f[0] >> 4) === 6)).toBe(false);
   });
 
+  // ── Frame assembly (offset-cursor refactor) ────────────────────────────
+
+  it('parses MULTIPLE complete packets delivered in one chunk', () => {
+    const onMessage = vi.fn();
+    socket = makeSocket(onMessage, vi.fn());
+    socket.connect();
+    const ws = wsRef.current!;
+    ws.emit('open');
+    const { aesKey, aesIV } = doHandshake(ws, 1);
+
+    const mk = (seq: number, content: string) => buildRecvPacket({
+      serverVersion: 4, fromUID: 'u', channelID: 'c', channelType: 2,
+      messageID: BigInt(seq), messageSeq: seq, timestamp: 1,
+      payload: { type: 1, content }, aesKey, aesIV,
+    });
+    // Concatenate three RECV frames into a single inbound chunk.
+    const combined = Buffer.concat([Buffer.from(mk(1, 'one')), Buffer.from(mk(2, 'two')), Buffer.from(mk(3, 'three'))]);
+    ws.emit('message', combined);
+
+    expect(onMessage).toHaveBeenCalledTimes(3);
+    expect(onMessage.mock.calls.map((c) => c[0].payload.content)).toEqual(['one', 'two', 'three']);
+  });
+
+  it('reassembles a packet split across two chunks (partial frame buffering)', () => {
+    const onMessage = vi.fn();
+    socket = makeSocket(onMessage, vi.fn());
+    socket.connect();
+    const ws = wsRef.current!;
+    ws.emit('open');
+    const { aesKey, aesIV } = doHandshake(ws, 1);
+
+    const frame = Buffer.from(buildRecvPacket({
+      serverVersion: 4, fromUID: 'u', channelID: 'c', channelType: 2,
+      messageID: 9n, messageSeq: 9, timestamp: 1, payload: { type: 1, content: 'split' },
+      aesKey, aesIV,
+    }));
+    const cut = Math.floor(frame.length / 2);
+    ws.emit('message', frame.subarray(0, cut)); // first half — incomplete
+    expect(onMessage).not.toHaveBeenCalled();
+    ws.emit('message', frame.subarray(cut));     // second half — now complete
+    expect(onMessage).toHaveBeenCalledOnce();
+    expect(onMessage.mock.calls[0][0].payload.content).toBe('split');
+  });
+
   // ── Test 5: PONG resets ping counter without error ──────────────────────
 
   it('PONG packet after CONNACK → no crash, onMessage not called', () => {

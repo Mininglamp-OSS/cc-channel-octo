@@ -87,7 +87,9 @@ describe('Process lock', () => {
 
     const lockPath = join(tmpDir, 'gateway.lock');
     expect(existsSync(lockPath)).toBe(true);
-    expect(readFileSync(lockPath, 'utf-8').trim()).toBe(String(process.pid));
+    // Lock format is "<pid> <nonce>" — the first field is our PID.
+    const [pidField] = readFileSync(lockPath, 'utf-8').trim().split(/\s+/);
+    expect(pidField).toBe(String(process.pid));
 
     await gw.stop();
   });
@@ -108,7 +110,8 @@ describe('Process lock', () => {
     const gw = new OctoGateway(makeConfig());
     // Non-numeric PID should be treated as stale (kill would fail) and overwritten
     await gw.start();
-    expect(readFileSync(lockPath, 'utf-8').trim()).toBe(String(process.pid));
+    const [pidField] = readFileSync(lockPath, 'utf-8').trim().split(/\s+/);
+    expect(pidField).toBe(String(process.pid));
     await gw.stop();
   });
 
@@ -121,18 +124,39 @@ describe('Process lock', () => {
     // Should not throw — stale lock is detected and removed
     await gw.start();
 
-    expect(readFileSync(lockPath, 'utf-8').trim()).toBe(String(process.pid));
+    const [pidField] = readFileSync(lockPath, 'utf-8').trim().split(/\s+/);
+    expect(pidField).toBe(String(process.pid));
     await gw.stop();
   });
 
-  it('rejects when another live process holds the lock', async () => {
+  it('rejects when another live, signalable process holds the lock', async () => {
     const lockPath = join(tmpDir, 'gateway.lock');
-    // Write a lock with current process PID (which is alive)
-    // Use PID 1 (init/launchd) which is always alive
-    writeFileSync(lockPath, '1', { mode: 0o600 });
+    // Use OUR OWN pid: it is alive AND signalable by us (process.kill(pid,0) ok),
+    // so acquireLock must treat it as a live holder and refuse. (PID 1 would be
+    // EPERM on a non-root runner, which we now correctly reclaim as a reused PID.)
+    writeFileSync(lockPath, String(process.pid), { mode: 0o600 });
 
     const gw = new OctoGateway(makeConfig());
     await expect(gw.start()).rejects.toThrow(/Another instance is running/);
+  });
+
+  it('reclaims a lock whose PID exists but is not signalable (EPERM → reused PID)', async () => {
+    const lockPath = join(tmpDir, 'gateway.lock');
+    // PID 1 (init/launchd) is alive but owned by root — process.kill(1,0) throws
+    // EPERM for a normal user. Since our bot runs as one service user with its
+    // own dataDir, an unsignalable PID can't be our instance → reclaim as stale.
+    writeFileSync(lockPath, '1', { mode: 0o600 });
+
+    const gw = new OctoGateway(makeConfig());
+    // On a root CI runner kill(1,0) succeeds → would reject; skip that case.
+    if (process.getuid && process.getuid() === 0) {
+      await expect(gw.start()).rejects.toThrow(/Another instance is running/);
+    } else {
+      await gw.start();
+      const [pidField] = readFileSync(lockPath, 'utf-8').trim().split(/\s+/);
+      expect(pidField).toBe(String(process.pid));
+      await gw.stop();
+    }
   });
 });
 
@@ -337,6 +361,35 @@ describe('Heartbeat consecutive failures', () => {
 
     // Should NOT have triggered reconnect
     expect(vi.mocked(registerBot).mock.calls.length).toBe(initialRegCalls);
+
+    await gw.stop();
+  });
+
+  it('does not overlap heartbeats when one is slow to settle', async () => {
+    // A heartbeat that takes longer than the 30s interval must NOT pile up: the
+    // overlap guard skips ticks while one is in flight (no concurrent requests,
+    // no failCount race).
+    let resolveFirst!: () => void;
+    let calls = 0;
+    vi.mocked(sendHeartbeat).mockImplementation(() => {
+      calls++;
+      // Only the first call hangs; if the guard fails, a 2nd call would start.
+      return new Promise<void>((res) => { resolveFirst = res; });
+    });
+
+    const gw = new OctoGateway(makeConfig());
+    await gw.start();
+
+    await vi.advanceTimersByTimeAsync(30_000); // tick 1 → request starts, hangs
+    expect(calls).toBe(1);
+    await vi.advanceTimersByTimeAsync(30_000); // tick 2 → skipped (in flight)
+    await vi.advanceTimersByTimeAsync(30_000); // tick 3 → skipped (in flight)
+    expect(calls).toBe(1); // still only ONE in-flight request, no pile-up
+
+    resolveFirst(); // let it settle
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(30_000); // next tick can now issue
+    expect(calls).toBe(2);
 
     await gw.stop();
   });

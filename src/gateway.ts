@@ -9,6 +9,7 @@ import type { BotMessage } from './octo/types.js';
 import { existsSync, writeFileSync, unlinkSync, readFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
+import { randomUUID } from 'node:crypto';
 
 // Read version from package.json at load time (Q31: no hardcoded version).
 const _require = createRequire(import.meta.url);
@@ -28,6 +29,9 @@ export class OctoGateway {
   private _ownerUid = '';
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private lockFilePath: string;
+  /** Random per-process token written into the lock so ownership survives PID
+   *  reuse: release only removes a lock that still carries OUR nonce. */
+  private readonly lockNonce = randomUUID();
   private onMessage: MessageHandler | null = null;
 
   /** When true, new messages are silently dropped (shutdown draining). */
@@ -41,6 +45,11 @@ export class OctoGateway {
   // Heartbeat failure tracking
   private heartbeatFailCount = 0;
   private readonly MAX_HEARTBEAT_FAILURES = 3;
+  /** True while a heartbeat request is in flight — prevents overlapping ticks. */
+  private heartbeatInFlight = false;
+  /** Bumped on each startHeartbeat() so an orphaned tick from a prior run can't
+   *  mutate the new counter (see the generation guard in the tick). */
+  private heartbeatGen = 0;
 
   constructor(
     private readonly config: Config,
@@ -176,8 +185,10 @@ export class OctoGateway {
     mkdirSync(dir, { recursive: true });
 
     if (existsSync(this.lockFilePath)) {
+      // Lock format: "<pid> <nonce>" (nonce optional for forward-compat with
+      // older single-field locks).
       const content = readFileSync(this.lockFilePath, 'utf-8').trim();
-      const pid = parseInt(content, 10);
+      const pid = parseInt(content.split(/\s+/)[0], 10);
       if (pid && !isNaN(pid)) {
         try {
           process.kill(pid, 0); // signal 0 = check existence
@@ -191,21 +202,29 @@ export class OctoGateway {
           } else if (e.message?.includes('Another instance')) {
             throw err;
           } else if (e.code === 'EPERM') {
-            throw new Error(
-              `Another instance is running (PID ${pid}). Lock file: ${this.lockFilePath}`,
+            // The PID exists but is owned by ANOTHER user — it cannot be our bot
+            // (the gateway runs as one service user with its own dataDir), so it
+            // is almost certainly a recycled PID. Treat the lock as stale and
+            // reclaim it rather than refusing to start forever.
+            console.warn(
+              `Lock PID ${pid} exists but is not signalable (EPERM) — likely a reused ` +
+              `PID; reclaiming the stale lock at ${this.lockFilePath}`,
             );
           }
         }
       }
     }
-    writeFileSync(this.lockFilePath, String(process.pid), { mode: 0o600 });
+    writeFileSync(this.lockFilePath, `${process.pid} ${this.lockNonce}`, { mode: 0o600 });
   }
 
   private releaseLock(): void {
     try {
       if (existsSync(this.lockFilePath)) {
         const content = readFileSync(this.lockFilePath, 'utf-8').trim();
-        if (content === String(process.pid)) {
+        // Only remove the lock if it still carries OUR nonce — so a lock another
+        // instance acquired after a PID-reuse race is never deleted by us.
+        const [, nonce] = content.split(/\s+/);
+        if (nonce === this.lockNonce) {
           unlinkSync(this.lockFilePath);
         }
       }
@@ -307,25 +326,40 @@ export class OctoGateway {
   private startHeartbeat(): void {
     this.stopHeartbeat();
     this.heartbeatFailCount = 0;
-    this.heartbeatTimer = setInterval(async () => {
-      try {
-        await sendHeartbeat({
-          apiUrl: this.config.apiUrl,
-          botToken: this.config.botToken,
-        });
-        this.heartbeatFailCount = 0;
-      } catch (err) {
-        this.heartbeatFailCount++;
-        console.error(
-          `Heartbeat failed (${this.heartbeatFailCount}/${this.MAX_HEARTBEAT_FAILURES}):`,
-          String(err),
-        );
-        if (this.heartbeatFailCount >= this.MAX_HEARTBEAT_FAILURES) {
-          console.error('Max heartbeat failures reached, triggering reconnect...');
+    const gen = ++this.heartbeatGen;
+    this.heartbeatTimer = setInterval(() => {
+      // Overlap guard: if the previous heartbeat hasn't settled (degraded API
+      // where a request takes ~>= the 30s interval), skip this tick instead of
+      // piling up concurrent requests and racing heartbeatFailCount.
+      if (this.heartbeatInFlight) return;
+      this.heartbeatInFlight = true;
+      void (async () => {
+        try {
+          await sendHeartbeat({
+            apiUrl: this.config.apiUrl,
+            botToken: this.config.botToken,
+          });
+          // Generation guard: a tick from a superseded startHeartbeat() (e.g.
+          // after a token refresh re-armed the timer) must not touch the live
+          // counter or it could spuriously reset/trip the new one.
+          if (gen !== this.heartbeatGen) return;
           this.heartbeatFailCount = 0;
-          void this.attemptTokenRefresh();
+        } catch (err) {
+          if (gen !== this.heartbeatGen) return;
+          this.heartbeatFailCount++;
+          console.error(
+            `Heartbeat failed (${this.heartbeatFailCount}/${this.MAX_HEARTBEAT_FAILURES}):`,
+            String(err),
+          );
+          if (this.heartbeatFailCount >= this.MAX_HEARTBEAT_FAILURES) {
+            console.error('Max heartbeat failures reached, triggering reconnect...');
+            this.heartbeatFailCount = 0;
+            void this.attemptTokenRefresh();
+          }
+        } finally {
+          this.heartbeatInFlight = false;
         }
-      }
+      })();
     }, 30_000);
   }
 
@@ -334,6 +368,10 @@ export class OctoGateway {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
+    // Invalidate any in-flight tick so its result is ignored, and allow the next
+    // startHeartbeat to issue immediately.
+    this.heartbeatGen++;
+    this.heartbeatInFlight = false;
   }
 
   // --- Graceful shutdown ---

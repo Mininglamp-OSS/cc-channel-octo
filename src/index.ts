@@ -54,7 +54,24 @@ async function main(): Promise<void> {
   // ready: startBot() registers over REST (gets botId) and installs the message
   // handler, but does NOT open the socket. We then cross-register sibling bot
   // ids, and only AFTER that connect every socket.
-  const stacks = await Promise.all(botConfigs.map((c) => startBot(c, multi)));
+  // Start each bot's pipeline. startBot() acquires the gateway.lock, opens the
+  // SQLite store, and arms the cwd-cleanup interval BEFORE any socket connects —
+  // so if one bot's startBot() rejects (bad token, taken lock), the bots that
+  // already succeeded must be torn down, or their locks/stores/intervals leak.
+  // Promise.all would discard the resolved stacks on first rejection, so settle
+  // all and clean up the successful ones before rethrowing.
+  const startResults = await Promise.allSettled(botConfigs.map((c) => startBot(c, multi)));
+  const stacks: BotStack[] = [];
+  let startError: unknown;
+  for (const r of startResults) {
+    if (r.status === 'fulfilled') stacks.push(r.value);
+    else startError = startError ?? r.reason;
+  }
+  if (startError) {
+    console.error('[cc-channel-octo] Startup failed; cleaning up bots that did start...');
+    await Promise.allSettled(stacks.map((s) => s.shutdown()));
+    throw startError;
+  }
 
   // Multi-bot loop guard: make every router aware of ALL bot ids in this
   // process, so a mention-free group can't let one bot reply to another's
