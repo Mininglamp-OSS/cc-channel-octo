@@ -42,6 +42,17 @@ const MAX_TEMP_BUFFER_BYTES = 1 * 1024 * 1024;
  */
 const MAX_VARLEN_BYTES = 4;
 
+/**
+ * Per-message decrypt/parse failure cap. After this many failed attempts on the
+ * SAME messageID, ack-and-drop it so a single poison (corrupt / non-JSON)
+ * payload cannot wedge the stream via infinite server redelivery. A transient
+ * failure (< cap) is left un-acked so the server retries.
+ */
+const MAX_DECRYPT_RETRIES = 3;
+
+/** Cap on distinct messageIDs tracked for decrypt failures (memory bound). */
+const MAX_DECRYPT_FAIL_ENTRIES = 1000;
+
 // ─── Binary Encoder / Decoder ───────────────────────────────────────────────
 
 export class Encoder {
@@ -277,6 +288,12 @@ export class WKSocket extends EventEmitter {
 
   // Buffer for handling packet fragmentation (sticky packets)
   private tempBuffer: number[] = [];
+
+  // Per-message decrypt-failure counts (by messageID). After
+  // MAX_DECRYPT_RETRIES, a poison message is ack'd-and-dropped so the server
+  // stops redelivering it forever (a single corrupt/non-JSON payload must not
+  // wedge the stream). Bounded to avoid unbounded growth from many distinct ids.
+  private decryptFailCounts = new Map<string, number>();
 
   constructor(private opts: WKSocketOptions) {
     super();
@@ -682,10 +699,14 @@ export class WKSocket extends EventEmitter {
       // handshake instead so we reconnect and re-derive, rather than entering
       // that silent-drop state. (serverKey is validated the same way: a bad DH
       // key throws in sharedKey(), caught by handleRawData's try/catch.)
-      if (!salt || salt.length < 16) {
+      // The IV needs 16 BYTES, so validate by byte length, not char length: a
+      // 16-char salt with multibyte UTF-8 chars is <16 OR >16 bytes and would
+      // yield a wrong IV (the same silent-decrypt-failure this guard prevents).
+      const saltByteLen = salt ? Buffer.byteLength(salt, "utf8") : 0;
+      if (saltByteLen < 16) {
         this.connected = false;
         console.error(
-          `[WKSocket] CONNACK salt too short (got ${salt?.length ?? 0}, need >=16) — ` +
+          `[WKSocket] CONNACK salt too short (got ${saltByteLen} bytes, need >=16) — ` +
           `AES IV would be invalid and every message would silently fail to decrypt. ` +
           `Failing the connection to force a fresh handshake.`,
         );
@@ -699,7 +720,9 @@ export class WKSocket extends EventEmitter {
       const secretBase64 = Buffer.from(secret).toString("base64");
       const aesKeyFull = Md5.init(secretBase64);
       this.aesKey = aesKeyFull.substring(0, 16);
-      this.aesIV = salt.substring(0, 16);
+      // Take the first 16 BYTES of the salt as the IV (CryptoJS Utf8.parse(aesIV)
+      // re-encodes to bytes, so a 16-byte ASCII-equivalent slice is required).
+      this.aesIV = Buffer.from(salt, "utf8").subarray(0, 16).toString("latin1");
 
       this.connected = true;
       this.lastConnectTime = Date.now();
@@ -754,11 +777,33 @@ export class WKSocket extends EventEmitter {
       const payloadStr = uintToString(Array.from(decryptedBytes));
       payloadObj = JSON.parse(payloadStr);
     } catch (err) {
-      console.error("[WKSocket] payload decrypt/parse error — NOT acking so the server can redeliver:", err);
+      // Count failures per messageID. Below the cap, leave it un-acked so the
+      // server redelivers (handles a transient hiccup). At the cap, ack-and-drop
+      // this one poison message so it can't wedge the stream forever.
+      const fails = (this.decryptFailCounts.get(messageID) ?? 0) + 1;
+      if (fails >= MAX_DECRYPT_RETRIES) {
+        console.error(
+          `[WKSocket] payload decrypt/parse failed ${fails}x for message ${messageID} — ` +
+          `ack-and-drop (poison message) so it stops redelivering:`, err,
+        );
+        this.decryptFailCounts.delete(messageID);
+        this.sendRaw(encodeRecvackPacket(messageID, messageSeq));
+        return;
+      }
+      // Bound the map so a flood of distinct failing ids can't grow it forever.
+      if (this.decryptFailCounts.size >= MAX_DECRYPT_FAIL_ENTRIES) {
+        this.decryptFailCounts.clear();
+      }
+      this.decryptFailCounts.set(messageID, fails);
+      console.error(
+        `[WKSocket] payload decrypt/parse error (attempt ${fails}/${MAX_DECRYPT_RETRIES}) — ` +
+        `NOT acking so the server can redeliver:`, err,
+      );
       return;
     }
 
-    // Parse succeeded — now it is safe to ack.
+    // Parse succeeded — clear any prior failure count and ack.
+    this.decryptFailCounts.delete(messageID);
     this.sendRaw(encodeRecvackPacket(messageID, messageSeq));
 
     // Build MessagePayload (same shape as SDK's contentObj-based output)

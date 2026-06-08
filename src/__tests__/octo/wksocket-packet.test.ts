@@ -413,6 +413,32 @@ describe('WKSocket packet-level integration', () => {
     expect(newFrames.some((f) => (f[0] >> 4) === 6)).toBe(false);
   });
 
+  it('ack-and-drops a poison message after repeated decrypt failures (issue #82)', () => {
+    const onMessage = vi.fn();
+    socket = makeSocket(onMessage, vi.fn());
+    socket.connect();
+    const ws = wsRef.current!;
+    ws.emit('open');
+    doHandshake(ws, 1);
+
+    const poison = () => Buffer.from(buildRecvPacket({
+      serverVersion: 4, fromUID: 'u', channelID: 'c', channelType: 2,
+      messageID: 42n, messageSeq: 9, timestamp: 1, payload: { type: 1, content: 'x' },
+      aesKey: 'wrongkey00000000', aesIV: 'wrongiv000000000',
+    }));
+
+    const before = ws.sent.length;
+    const isAck = (f: Uint8Array) => (f[0] >> 4) === 6;
+    // Same messageID redelivered: attempts 1 & 2 are NOT acked (let it retry)...
+    ws.emit('message', poison());
+    ws.emit('message', poison());
+    expect(ws.sent.slice(before).some(isAck)).toBe(false);
+    // ...attempt 3 hits the cap → ack-and-drop so the server stops redelivering.
+    ws.emit('message', poison());
+    expect(ws.sent.slice(before).some(isAck)).toBe(true);
+    expect(onMessage).not.toHaveBeenCalled();
+  });
+
   // ── Frame assembly (offset-cursor refactor) ────────────────────────────
 
   it('parses MULTIPLE complete packets delivered in one chunk', () => {

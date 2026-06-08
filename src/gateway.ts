@@ -90,16 +90,26 @@ export class OctoGateway {
    */
   async register(): Promise<void> {
     this.acquireLock();
-    const reg = await registerBot({
-      apiUrl: this.config.apiUrl,
-      botToken: this.config.botToken,
-      agentPlatform: 'cc-channel-octo',
-      agentVersion: PKG_VERSION,
-    });
-    this.robotId = reg.robot_id;
-    this._ownerUid = reg.owner_uid;
-    this.registration = reg;
-    console.log(`Bot registered: robot_id=${reg.robot_id}`);
+    try {
+      const reg = await registerBot({
+        apiUrl: this.config.apiUrl,
+        botToken: this.config.botToken,
+        agentPlatform: 'cc-channel-octo',
+        agentVersion: PKG_VERSION,
+      });
+      this.robotId = reg.robot_id;
+      this._ownerUid = reg.owner_uid;
+      this.registration = reg;
+      console.log(`Bot registered: robot_id=${reg.robot_id}`);
+    } catch (err) {
+      // registerBot failed (bad token, network) AFTER we took the lock. Release
+      // it so a partial-startup failure doesn't leave a stale lock with this
+      // live PID — otherwise the next start refuses with "Another instance is
+      // running". The multi-bot startup cleanup only tears down bots that
+      // returned a BotStack, so this failed bot must clean up its own lock here.
+      this.releaseLock();
+      throw err;
+    }
   }
 
   /**
@@ -357,7 +367,12 @@ export class OctoGateway {
             void this.attemptTokenRefresh();
           }
         } finally {
-          this.heartbeatInFlight = false;
+          // Guard the flag reset by generation too: an orphaned tick from a
+          // superseded startHeartbeat() must NOT clear the live generation's
+          // in-flight flag, or the next live tick could start a 2nd concurrent
+          // request — exactly the overlap this guard prevents. stopHeartbeat()
+          // resets the flag when it abandons a generation.
+          if (gen === this.heartbeatGen) this.heartbeatInFlight = false;
         }
       })();
     }, 30_000);

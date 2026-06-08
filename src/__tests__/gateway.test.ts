@@ -158,6 +158,17 @@ describe('Process lock', () => {
       await gw.stop();
     }
   });
+
+  it('releases the lock when registerBot fails (no leaked lock, issue #82)', async () => {
+    const lockPath = join(tmpDir, 'gateway.lock');
+    vi.mocked(registerBot).mockRejectedValueOnce(new Error('bad token'));
+
+    const gw = new OctoGateway(makeConfig());
+    await expect(gw.register()).rejects.toThrow(/bad token/);
+    // The lock acquired before registerBot must be released on failure, so a
+    // partial-startup failure doesn't leave a stale lock with this live PID.
+    expect(existsSync(lockPath)).toBe(false);
+  });
 });
 
 // ─── 2. Bot Registration + Socket Creation ──────────────────────────────────

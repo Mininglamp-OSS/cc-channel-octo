@@ -30,9 +30,15 @@ export const MAX_DISPLAY_NAME_LEN = 128;
  * Section markers that delimit structural sections of the system prompt. If
  * these appear at the start of a line inside user-controlled text they are
  * escaped so a sender cannot inject a fake structural boundary (S3 fix).
+ *
+ * Covers EVERY structural marker any renderer emits \u2014 including the G10
+ * segmentation markers (`[answered history]`, `[new messages]`), the group
+ * context header (`[Recent group messages]`), the trusted-instructions header
+ * (`[Group instructions]`), and the truncation notices \u2014 so user content cannot
+ * forge a boundary the model treats as real structure.
  */
 const SECTION_MARKER_RE =
-  /^\[(Group context|Conversation history|Current message|Quoted message from [^\]]*)\]/gim;
+  /^\[(Group context|Conversation history|Current message|Quoted message from [^\]]*|answered history|new messages|Recent group messages|Group instructions|older messages dropped|older turns dropped)\]/gim;
 
 /**
  * Line-leading turn label (`[user ...]:` / `[assistant ...]:`),
@@ -40,12 +46,27 @@ const SECTION_MARKER_RE =
  * incidental mid-sentence `[assistant ...]` is left alone to minimize false
  * positives. The leading group `[^\S\r\n]*` matches in-line spaces/tabs (never
  * line breaks, which `^` already anchors) so an indented forged label is caught.
+ *
+ * NOTE: callers must normalizeLineBreaks() the text first \u2014 JS `^`(m) only
+ * anchors after LF/CR/LS/PS, NOT NEL(U+0085)/VT(U+000B)/FF(U+000C), which a
+ * model may still treat as a new line.
  */
 const ROLE_LABEL_RE =
   /^([^\S\r\n]*)(\[(?:user|assistant)\b[^\]\r\n]*\]:)/gim;
 
-/** Bracket delimiters + line terminators that could forge a label boundary. */
-const NAME_UNSAFE_RE = /[[\]\r\n\u0085\u2028\u2029]/g;
+/** Bracket delimiters + all line/para separators that could forge a boundary. */
+const NAME_UNSAFE_RE = /[[\]\r\n\v\f\u0085\u2028\u2029]/g;
+
+/**
+ * Unicode line/paragraph separators that JS regex `^`(m) does NOT anchor on but
+ * a model may render as a new line: NEL, VT, FF. Normalized to `\n` before
+ * label/section escaping so a forged marker after one of them is still caught.
+ */
+const EXTRA_LINE_BREAKS_RE = /[\v\f\u0085]/g;
+
+function normalizeLineBreaks(text: string): string {
+  return text.replace(EXTRA_LINE_BREAKS_RE, '\n');
+}
 
 /**
  * Sanitize a user-controlled display name for safe placement inside a prompt
@@ -67,7 +88,7 @@ export function sanitizeDisplayName(name: unknown, fallback = ''): string {
  * `[assistant bot]: x` -> `\[assistant bot]: x`.
  */
 export function escapeRoleLabels(content: string): string {
-  return content.replace(ROLE_LABEL_RE, (_m, ws: string, label: string) => `${ws}\\${label}`);
+  return normalizeLineBreaks(content).replace(ROLE_LABEL_RE, (_m, ws: string, label: string) => `${ws}\\${label}`);
 }
 
 /**
@@ -76,7 +97,7 @@ export function escapeRoleLabels(content: string): string {
  * `sanitizeForSystemPrompt` in agent-bridge.)
  */
 export function escapeSectionMarkers(text: string): string {
-  return text.replace(SECTION_MARKER_RE, (match) => `\\${match}`);
+  return normalizeLineBreaks(text).replace(SECTION_MARKER_RE, (match) => `\\${match}`);
 }
 
 /**
