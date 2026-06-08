@@ -368,6 +368,51 @@ describe('WKSocket packet-level integration', () => {
     expect(msg.payload.content).toBe('hello from test');
   });
 
+  // ── RECVACK ordering (issue: ack-before-decrypt → silent message loss) ──
+
+  it('sends RECVACK after a successful decrypt', () => {
+    const onMessage = vi.fn();
+    socket = makeSocket(onMessage, vi.fn());
+    socket.connect();
+    const ws = wsRef.current!;
+    ws.emit('open');
+    const { aesKey, aesIV } = doHandshake(ws, 1);
+
+    const before = ws.sent.length;
+    ws.emit('message', Buffer.from(buildRecvPacket({
+      serverVersion: 4, fromUID: 'u', channelID: 'c', channelType: 2,
+      messageID: 1n, messageSeq: 7, timestamp: 1, payload: { type: 1, content: 'hi' },
+      aesKey, aesIV,
+    })));
+
+    expect(onMessage).toHaveBeenCalledOnce();
+    // A RECVACK frame (first byte = RECVACK<<4 = 0x60) was sent.
+    const newFrames = ws.sent.slice(before);
+    expect(newFrames.some((f) => (f[0] >> 4) === 6)).toBe(true);
+  });
+
+  it('does NOT send RECVACK when decrypt fails (lets the server redeliver)', () => {
+    const onMessage = vi.fn();
+    socket = makeSocket(onMessage, vi.fn());
+    socket.connect();
+    const ws = wsRef.current!;
+    ws.emit('open');
+    doHandshake(ws, 1); // establishes the real aesKey/aesIV on the socket
+
+    const before = ws.sent.length;
+    // Encrypt with a WRONG key so the socket's decrypt throws.
+    ws.emit('message', Buffer.from(buildRecvPacket({
+      serverVersion: 4, fromUID: 'u', channelID: 'c', channelType: 2,
+      messageID: 2n, messageSeq: 8, timestamp: 1, payload: { type: 1, content: 'x' },
+      aesKey: 'wrongkey00000000', aesIV: 'wrongiv0000000000'.slice(0, 16),
+    })));
+
+    expect(onMessage).not.toHaveBeenCalled();
+    const newFrames = ws.sent.slice(before);
+    // No RECVACK → message stays un-acked → server will redeliver.
+    expect(newFrames.some((f) => (f[0] >> 4) === 6)).toBe(false);
+  });
+
   // ── Test 5: PONG resets ping counter without error ──────────────────────
 
   it('PONG packet after CONNACK → no crash, onMessage not called', () => {
@@ -418,7 +463,10 @@ describe('WKSocket packet-level integration', () => {
   // placeholder `expect(true).toBe(true)` test in q34-q37-q38.test.ts — now
   // exercised through real CONNACK with a short salt. This test guards the
   // warn-on-server-misbehavior contract added in PR#34 / Q38.
-  it('CONNACK with salt shorter than 16 bytes emits console.warn (Q38)', () => {
+  it('CONNACK with salt shorter than 16 bytes FAILS the connection (not silent-drop)', () => {
+    // A short salt yields an invalid AES-CBC IV → every later message would
+    // silently fail to decrypt. We now fail the handshake instead of warning
+    // and proceeding, so the connection reconnects/re-handshakes.
     const onConnected = vi.fn();
     const onError = vi.fn();
     const onDisconnected = vi.fn();
@@ -436,20 +484,23 @@ describe('WKSocket packet-level integration', () => {
     const ws = wsRef.current!;
     ws.emit('open');
 
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
-      // Short salt: 8 bytes < 16 → triggers warn.
+      // Short salt: 8 bytes < 16 → fail the connection.
       doHandshake(ws, 1, 'shortslt');
-      expect(onConnected).toHaveBeenCalledOnce();
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('CONNACK salt is shorter than 16 bytes'),
+      expect(onConnected).not.toHaveBeenCalled();
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({ message: expect.stringContaining('salt too short') }),
+      );
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining('CONNACK salt too short'),
       );
     } finally {
-      warnSpy.mockRestore();
+      errSpy.mockRestore();
     }
   });
 
-  it('CONNACK with salt >= 16 bytes does NOT warn (negative case)', () => {
+  it('CONNACK with salt >= 16 bytes connects normally (negative case)', () => {
     const onConnected = vi.fn();
     const onError = vi.fn();
     const onDisconnected = vi.fn();
@@ -467,15 +518,8 @@ describe('WKSocket packet-level integration', () => {
     const ws = wsRef.current!;
     ws.emit('open');
 
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    try {
-      doHandshake(ws, 1); // default TEST_SALT is 20 bytes
-      expect(onConnected).toHaveBeenCalledOnce();
-      expect(warnSpy).not.toHaveBeenCalledWith(
-        expect.stringContaining('CONNACK salt is shorter'),
-      );
-    } finally {
-      warnSpy.mockRestore();
-    }
+    doHandshake(ws, 1); // default TEST_SALT is 20 bytes
+    expect(onConnected).toHaveBeenCalledOnce();
+    expect(onError).not.toHaveBeenCalled();
   });
 });

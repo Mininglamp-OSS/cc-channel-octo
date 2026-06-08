@@ -660,19 +660,31 @@ export class WKSocket extends EventEmitter {
     }
 
     if (reasonCode === 1) {
-      // Success — derive AES key from DH shared secret
+      // Success — derive AES key from DH shared secret.
+      // A malformed/short salt yields a wrong AES-CBC IV (CryptoJS zero-pads it),
+      // which makes EVERY subsequent payload decrypt fail — i.e. a bot that looks
+      // connected (heartbeat fine) but silently drops every message. Fail the
+      // handshake instead so we reconnect and re-derive, rather than entering
+      // that silent-drop state. (serverKey is validated the same way: a bad DH
+      // key throws in sharedKey(), caught by handleRawData's try/catch.)
+      if (!salt || salt.length < 16) {
+        this.connected = false;
+        console.error(
+          `[WKSocket] CONNACK salt too short (got ${salt?.length ?? 0}, need >=16) — ` +
+          `AES IV would be invalid and every message would silently fail to decrypt. ` +
+          `Failing the connection to force a fresh handshake.`,
+        );
+        if (this.ws) { try { this.ws.close(); } catch { /* ignore */ } }
+        // needReconnect stays true (default) so the close handler reconnects.
+        this.opts.onError?.(new Error("CONNACK salt too short"));
+        return;
+      }
       const serverPubKey = Uint8Array.from(Buffer.from(serverKey, "base64"));
       const secret = sharedKey(this.dhPrivateKey!, serverPubKey);
       const secretBase64 = Buffer.from(secret).toString("base64");
       const aesKeyFull = Md5.init(secretBase64);
       this.aesKey = aesKeyFull.substring(0, 16);
-      this.aesIV = salt && salt.length > 16 ? salt.substring(0, 16) : salt;
-      if (!salt || salt.length < 16) {
-        console.warn(
-          `[WKSocket] CONNACK salt is shorter than 16 bytes (got ${salt?.length ?? 0}). ` +
-          `AES-CBC IV will be zero-padded by CryptoJS. This may indicate a server issue.`,
-        );
-      }
+      this.aesIV = salt.substring(0, 16);
 
       this.connected = true;
       this.lastConnectTime = Date.now();
@@ -714,19 +726,25 @@ export class WKSocket extends EventEmitter {
     }
     const encryptedPayload = dec.readRemaining();
 
-    // Send RECVACK immediately
-    this.sendRaw(encodeRecvackPacket(messageID, messageSeq));
-
-    // Decrypt payload
+    // Decrypt + parse BEFORE acking. RECVACK tells the server "delivered, don't
+    // resend" — if we ack first and decrypt then fails (transient key/IV issue),
+    // the message is lost forever with only a debug log. By acking only after a
+    // successful parse, a transient failure leaves the message un-acked so the
+    // server redelivers it. (A *permanent* decrypt failure means the AES key/IV
+    // from CONNACK is wrong — onConnack now fails the connection in that case,
+    // forcing a fresh handshake rather than a silent-drop or redelivery loop.)
     let payloadObj: Record<string, unknown> | undefined;
     try {
       const decryptedBytes = aesDecrypt(encryptedPayload, this.aesKey, this.aesIV);
       const payloadStr = uintToString(Array.from(decryptedBytes));
       payloadObj = JSON.parse(payloadStr);
     } catch (err) {
-      console.debug("[WKSocket] payload decrypt/parse error:", err);
+      console.error("[WKSocket] payload decrypt/parse error — NOT acking so the server can redeliver:", err);
       return;
     }
+
+    // Parse succeeded — now it is safe to ack.
+    this.sendRaw(encodeRecvackPacket(messageID, messageSeq));
 
     // Build MessagePayload (same shape as SDK's contentObj-based output)
     const payload: MessagePayload = {
