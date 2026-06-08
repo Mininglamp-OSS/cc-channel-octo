@@ -34,6 +34,13 @@ While the major version is `0`, minor releases may carry breaking changes.
 
 ### Added
 
+- **`sdk.env` config** (#107) — declare extra environment variables, injected
+  verbatim into the agent's tool subprocess. Generic (cc doesn't interpret them)
+  and per-bot. Primary use: give a multi-bot deploy's shared CLI its identity
+  selector, e.g. `{ "sdk": { "env": { "OCTO_BOT_ID": "<robotId>" } } }` so each
+  bot's `octo-cli` calls pick the right stored profile (a bare call errors "no
+  bot selected" once ≥2 profiles exist).
+
 - **Agent skills — generic external tooling** (#100) — external CLIs (octo-cli,
   gh, anything on `PATH`) are integrated as DATA, not code. Drop a standard Claude
   skill (`SKILL.md` + optional `references/`/`scripts/`) into

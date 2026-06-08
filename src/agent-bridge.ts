@@ -300,15 +300,24 @@ export async function* queryAgent(
     if (sources.length > 0) linkSkillsIntoSandbox(cwd, sources);
   }
 
-  // Q1: forward ANTHROPIC_BASE_URL to the SDK subprocess via the scoped `env`
-  // option instead of mutating the gateway's global process.env. The SDK's
-  // `env` REPLACES the subprocess environment entirely, so spread process.env
-  // first to preserve PATH/HOME/ANTHROPIC_API_KEY. Scoping it here means the
-  // override never leaks across requests and never persists after the field is
-  // cleared (no stale-global problem). When unset, omit `env` so the subprocess
-  // simply inherits process.env.
-  const env = config.sdk.anthropicBaseUrl
-    ? { ...process.env, ANTHROPIC_BASE_URL: config.sdk.anthropicBaseUrl }
+  // Q1: forward scoped env to the SDK subprocess via the `env` option instead
+  // of mutating the gateway's global process.env. The SDK's `env` REPLACES the
+  // subprocess environment entirely, so spread process.env first to preserve
+  // PATH/HOME/ANTHROPIC_API_KEY. Scoping here means overrides never leak across
+  // requests. When nothing needs adding, omit `env` so the subprocess simply
+  // inherits process.env.
+  //   - sdk.env (#107): operator-declared extra vars (e.g. OCTO_BOT_ID so a
+  //     multi-bot deploy's octo-cli picks the right profile). Generic — cc does
+  //     not interpret them.
+  //   - ANTHROPIC_BASE_URL: model-gateway routing (set last so it wins).
+  const extraEnv = config.sdk.env;
+  const hasExtraEnv = extraEnv !== undefined && Object.keys(extraEnv).length > 0;
+  const env = config.sdk.anthropicBaseUrl || hasExtraEnv
+    ? {
+        ...process.env,
+        ...(hasExtraEnv ? extraEnv : {}),
+        ...(config.sdk.anthropicBaseUrl ? { ANTHROPIC_BASE_URL: config.sdk.anthropicBaseUrl } : {}),
+      }
     : undefined;
 
   const stream = sdkQuery({
