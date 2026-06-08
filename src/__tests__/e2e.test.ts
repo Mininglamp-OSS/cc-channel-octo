@@ -199,8 +199,8 @@ describe('E2E smoke tests', () => {
 
     // Session history stored
     const history = store.buildHistoryPrefix(USER_UID, 40);
-    expect(history).toContain('[user]: Hi there');
-    expect(history).toContain('[assistant]: Hello from Claude');
+    expect(history).toContain('[user TestUser]: Hi there');
+    expect(history).toContain('[assistant bot-001]: Hello from Claude');
   });
 
   // --- 1b. v0.3 slash commands through the real pipeline ---
@@ -320,19 +320,21 @@ describe('E2E smoke tests', () => {
     expect(store.getSdkSessionId(USER_UID)).toBeUndefined();
   });
 
-  it('non-persistent (default) never sets sessionOpts / SDK session id', async () => {
-    let sawOpts: unknown = 'unset';
+  it('non-persistent (default) sets no resume/onSessionId and stores no SDK session id', async () => {
+    let sawOpts: { resume?: string; onSessionId?: unknown; memoryDir?: string } | undefined;
     (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
       async function* (
         _u: string, _h: string, _c: string, _cfg: Config, _ctx: unknown, _t: unknown,
-        opts?: unknown,
+        opts?: { resume?: string; onSessionId?: unknown; memoryDir?: string },
       ) {
         sawOpts = opts;
         yield 'ok';
       },
     );
     await simulateMessage(makeDmMsg('hi'), config, store, router, groupContext, streamRelay);
-    expect(sawOpts).toBeUndefined();
+    // memoryDir is always present; persistence-related fields must be absent.
+    expect(sawOpts?.resume).toBeUndefined();
+    expect(sawOpts?.onSessionId).toBeUndefined();
     expect(store.getSdkSessionId(USER_UID)).toBeUndefined();
   });
 
@@ -365,11 +367,11 @@ describe('E2E smoke tests', () => {
     writeFileSync(join(cfgDir, `${USER_UID}.md`), 'leak');
     const cfg = makeConfig({ groupConfigDir: cfgDir });
 
-    let sawOpts: unknown = 'unset';
+    let sawOpts: { groupInstructions?: string; memoryDir?: string } | undefined;
     (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
       async function* (
         _u: string, _h: string, _c: string, _cfg: Config, _ctx: unknown, _t: unknown,
-        opts?: unknown,
+        opts?: { groupInstructions?: string; memoryDir?: string },
       ) {
         sawOpts = opts;
         yield 'ok';
@@ -377,7 +379,8 @@ describe('E2E smoke tests', () => {
     );
 
     await simulateMessage(makeDmMsg('hi'), cfg, store, router, groupContext, streamRelay);
-    expect(sawOpts).toBeUndefined();
+    // memoryDir is always set now; what must be absent is groupInstructions.
+    expect(sawOpts?.groupInstructions).toBeUndefined();
     rmSync(cfgDir, { recursive: true, force: true });
   });
 
@@ -388,7 +391,7 @@ describe('E2E smoke tests', () => {
     // reset barrier must filter out messages at/before the reset seq.
     const CH = 'group-reset-test'; // unique channel → guarantees cold-start backfill
     const uid = USER_UID;
-    const sessionKey = `${CH}:${uid}`;
+    const sessionKey = CH; // group sessionKey is the channel id (shared per-channel)
     const g = (content: string, seq: number) =>
       makeGroupMsg(content, true, { channel_id: CH, message_seq: seq, from_uid: uid });
 
@@ -428,11 +431,11 @@ describe('E2E smoke tests', () => {
     // Output was sent to group channel
     expect(sendMessage).toHaveBeenCalled();
 
-    // Session history stored (group session key = channel_id:from_uid)
-    const sessionKey = `${GROUP_CHANNEL}:${USER_UID}`;
+    // Session history stored (group session key = channel_id, shared per-channel)
+    const sessionKey = GROUP_CHANNEL;
     const history = store.buildHistoryPrefix(sessionKey, 40);
-    expect(history).toContain('[user]: What is this code?');
-    expect(history).toContain('[assistant]: Hello from Claude');
+    expect(history).toContain('[user TestUser]: What is this code?');
+    expect(history).toContain('[assistant bot-001]: Hello from Claude');
   });
 
   // --- 2b. PR#51 per-session cwd wiring (regression: was uncovered) ---
@@ -445,15 +448,34 @@ describe('E2E smoke tests', () => {
     // bare-uid DM sessionKey.
     const ctx = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][4];
     expect(ctx).toEqual({ kind: 'dm', sessionKey: USER_UID });
+    // DM also gets a private memory dir (opts.memoryDir is always set).
+    const opts = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][6];
+    expect(typeof opts.memoryDir).toBe('string');
+    expect(opts.memoryDir.length).toBeGreaterThan(0);
   });
 
-  it('Group threads a per-member group SessionCtx into queryAgent', async () => {
+  it('DM and group get DIFFERENT memory dirs (private vs shared)', async () => {
+    await simulateMessage(makeDmMsg('hi'), config, store, router, groupContext, streamRelay);
     await simulateMessage(makeGroupMsg('hi', true), config, store, router, groupContext, streamRelay);
+    const dmDir = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][6].memoryDir;
+    const grpDir = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[1][6].memoryDir;
+    expect(dmDir).not.toBe(grpDir);
+  });
 
-    // Group sessionKey embeds from_uid (`channel_id:uid`), so each member gets
-    // their own cwd — the exact PR#51 behavior the old replica never exercised.
-    const ctx = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][4];
-    expect(ctx).toEqual({ kind: 'group', sessionKey: `${GROUP_CHANNEL}:${USER_UID}` });
+  it('Group threads a shared-per-channel SessionCtx into queryAgent', async () => {
+    // Two different members of the same channel must map to the SAME sessionCtx
+    // (group = shared workspace; reverses PR#51's per-member split).
+    await simulateMessage(makeGroupMsg('hi from A', true, { from_uid: 'member-A' }), config, store, router, groupContext, streamRelay);
+    await simulateMessage(makeGroupMsg('hi from B', true, { from_uid: 'member-B' }), config, store, router, groupContext, streamRelay);
+
+    const ctxA = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][4];
+    const ctxB = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[1][4];
+    expect(ctxA).toEqual({ kind: 'group', sessionKey: GROUP_CHANNEL });
+    expect(ctxB).toEqual({ kind: 'group', sessionKey: GROUP_CHANNEL });
+    // And the memory dir is the same for both members (shared memory).
+    const optsA = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][6];
+    const optsB = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[1][6];
+    expect(optsA.memoryDir).toBe(optsB.memoryDir);
   });
 
   // --- 3. Group non-@mention does NOT trigger ---
@@ -535,15 +557,15 @@ describe('E2E smoke tests', () => {
     const secondUserMsg = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[1][0] as string;
     expect(secondUserMsg).toBe('Follow up');
     const secondHistory = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[1][1] as string;
-    expect(secondHistory).toContain('[user]: Hello');
-    expect(secondHistory).toContain('[assistant]: First reply');
+    expect(secondHistory).toContain('[user TestUser]: Hello');
+    expect(secondHistory).toContain('[assistant bot-001]: First reply');
 
     // Full history stored
     const history = store.buildHistoryPrefix(USER_UID, 40);
-    expect(history).toContain('[user]: Hello');
-    expect(history).toContain('[assistant]: First reply');
-    expect(history).toContain('[user]: Follow up');
-    expect(history).toContain('[assistant]: Second reply');
+    expect(history).toContain('[user TestUser]: Hello');
+    expect(history).toContain('[assistant bot-001]: First reply');
+    expect(history).toContain('[user TestUser]: Follow up');
+    expect(history).toContain('[assistant bot-001]: Second reply');
   });
 
   // --- 7. Bot self-message is filtered ---
@@ -614,7 +636,7 @@ describe('E2E smoke tests', () => {
     await simulateMessage(msg, config, store, router, groupContext, streamRelay);
 
     const history = store.buildHistoryPrefix(USER_UID, 40);
-    expect(history).toContain('[user]: empty response');
+    expect(history).toContain('[user TestUser]: empty response');
     expect(history).not.toContain('[assistant]');
   });
 

@@ -14,7 +14,7 @@ import { SessionRouter } from './session-router.js';
 import { GroupContext } from './group-context.js';
 import { queryAgent, sanitizeForSystemPrompt } from './agent-bridge.js';
 import type { SessionCtx } from './cwd-resolver.js';
-import { cleanupExpiredCwds } from './cwd-resolver.js';
+import { cleanupExpiredCwds, resolveMemoryDir } from './cwd-resolver.js';
 import { StreamRelay } from './stream-relay.js';
 import { sendMessage, sendReadReceipt, getChannelMessages } from './octo/api.js';
 import type { HistoricalMessage } from './octo/api.js';
@@ -496,7 +496,7 @@ export async function handleMessage(
         }
       }
 
-      store.appendUser(sessionKey, userContent, msg.message_seq);
+      store.appendUser(sessionKey, userContent, msg.message_seq, msg.from_name ?? msg.from_uid);
 
       // --- Query agent with structural role separation (Q3 fix) ---
       // userContentForLLM → user role (prompt), history + context → system role (systemPrompt)
@@ -544,7 +544,7 @@ export async function handleMessage(
       // double-injecting history. We still persist to our own store (for the
       // non-persistent fallback, /reset, and group context), so this only
       // changes what the agent is *prompted* with, not what we record.
-      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string } | undefined;
+      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; memoryDir?: string } | undefined;
       let historyForQuery = historyPrefix;
       if (config.sdk.persistentSession) {
         const resume = store.getSdkSessionId(sessionKey);
@@ -553,6 +553,15 @@ export async function handleMessage(
           resume,
           onSessionId: (id: string) => store.setSdkSessionId(sessionKey, id),
         };
+      }
+
+      // v1.1: point the SDK auto-memory at a stable per-session dir under
+      // memoryBase (outside cwdBase, so it's never reclaimed by the cwd TTL).
+      // Same partitioning as the session: group=shared per channel, DM=per peer.
+      {
+        const memBase = config.memoryBase ?? join(config.dataDir, 'memory');
+        const memoryDir = resolveMemoryDir(memBase, sessionCtx);
+        sessionOpts = { ...(sessionOpts ?? {}), memoryDir };
       }
 
       // v1.0 GROUP.md: inject operator-provided per-group instructions (from
@@ -593,7 +602,7 @@ export async function handleMessage(
       // --- Store assistant response in history ---
       const fullResponse = collected.join('');
       if (fullResponse) {
-        store.appendAssistant(sessionKey, fullResponse, msg.message_seq);
+        store.appendAssistant(sessionKey, fullResponse, msg.message_seq, botId);
         // G10: mark this message_seq as the last one we replied to. Next turn's
         // segmented history will treat messages with seq <= this as [answered].
         store.setLastBotReplySeq(sessionKey, msg.message_seq);
@@ -710,9 +719,9 @@ function seedHistoryFromApi(
       : placeholder;
     if (!content) continue;
     if (botId && m.from_uid === botId) {
-      store.appendAssistant(sessionKey, content, m.message_seq);
+      store.appendAssistant(sessionKey, content, m.message_seq, botId);
     } else {
-      store.appendUser(sessionKey, content, m.message_seq);
+      store.appendUser(sessionKey, content, m.message_seq, m.from_name ?? m.from_uid);
     }
   }
 }

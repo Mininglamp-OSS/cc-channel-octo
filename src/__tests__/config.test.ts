@@ -12,9 +12,9 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { join } from 'node:path';
-import { mkdtempSync, writeFileSync, rmSync, chmodSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, chmodSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { loadConfig, resolveBotConfigs } from '../config.js';
+import { loadConfig, resolveBotConfigs, loadSoul } from '../config.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -76,7 +76,9 @@ describe('loadConfig defaults', () => {
     // Q2: default is the wildcard sentinel — no whitelist applied at the SDK layer.
     expect(cfg.sdk.allowedTools).toBe('*');
     expect(cfg.sdk.permissionMode).toBe('bypassPermissions');
-    expect(cfg.sdk.settingSources).toEqual(['user']);
+    // v1.1: SDK isolation mode by default — the bot must not read/write the
+    // operator's real ~/.claude config.
+    expect(cfg.sdk.settingSources).toEqual([]);
     expect(cfg.sdk.anthropicBaseUrl).toBeUndefined(); // Q1: unset by default
     expect(cfg.rateLimit.maxPerMinute).toBe(5);
     expect(cfg.context.maxContextChars).toBe(6000);
@@ -1063,5 +1065,107 @@ describe('v1.0: webhook path/port validation', () => {
       botToken: 'bf_t', apiUrl: 'https://a', transport: 'webhook',
       webhook: { secret: 's', path: '/in', port: 9000 },
     }))).not.toThrow();
+  });
+});
+
+// ─── v1.1: memoryBase ──────────────────────────────────────────────────
+
+describe('v1.1: memoryBase (auto-memory root)', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('defaults to <dataDir>/memory', () => {
+    const cfg = loadConfig(writeConfig({ botToken: 'bf_t', apiUrl: 'https://a', dataDir: '/data' }));
+    expect(cfg.memoryBase).toBe('/data/memory');
+  });
+
+  it('config file memoryBase overrides the default', () => {
+    const cfg = loadConfig(writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a', dataDir: '/data', memoryBase: '/mem',
+    }));
+    expect(cfg.memoryBase).toBe('/mem');
+  });
+
+  it('CC_OCTO_MEMORY_BASE env overrides', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a', dataDir: '/data' });
+    process.env.CC_OCTO_MEMORY_BASE = '/env-mem';
+    expect(loadConfig(path).memoryBase).toBe('/env-mem');
+  });
+
+  it('per-bot: memoryBase tracks the per-bot dataDir by default', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a', dataDir: '/data',
+      bots: [{ id: 'a', botToken: 'bf_1' }, { id: 'b', botToken: 'bf_2' }],
+    }));
+    const bots = resolveBotConfigs(cfg);
+    expect(bots[0].dataDir).toBe('/data/a');
+    expect(bots[0].memoryBase).toBe('/data/a/memory');
+    expect(bots[1].memoryBase).toBe('/data/b/memory');
+    // distinct per bot
+    expect(bots[0].memoryBase).not.toBe(bots[1].memoryBase);
+  });
+
+  it('per-bot: explicit memoryBase override wins', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a', dataDir: '/data',
+      bots: [{ id: 'a', botToken: 'bf_1', memoryBase: '/custom/mem' }],
+    }));
+    expect(resolveBotConfigs(cfg)[0].memoryBase).toBe('/custom/mem');
+  });
+});
+
+describe('v1.1: SOUL.md personality (openclaw-style)', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('loadSoul returns undefined when no SOUL.md exists', () => {
+    expect(loadSoul(tmpDir)).toBeUndefined();
+  });
+
+  it('loadSoul returns trimmed file contents when SOUL.md exists', () => {
+    writeFileSync(join(tmpDir, 'SOUL.md'), '\n# Voice\n\nBe concise.\n\n');
+    expect(loadSoul(tmpDir)).toBe('# Voice\n\nBe concise.');
+  });
+
+  it('loadSoul treats an empty/whitespace-only SOUL.md as absent', () => {
+    writeFileSync(join(tmpDir, 'SOUL.md'), '   \n\t\n');
+    expect(loadSoul(tmpDir)).toBeUndefined();
+  });
+
+  it('loadConfig: a SOUL.md in dataDir becomes sdk.systemPrompt', () => {
+    writeFileSync(join(tmpDir, 'SOUL.md'), 'You are Sparky. Be witty.');
+    const cfg = loadConfig(writeConfig({ botToken: 'bf_t', apiUrl: 'https://a', dataDir: tmpDir }));
+    expect(cfg.sdk.systemPrompt).toBe('You are Sparky. Be witty.');
+  });
+
+  it('loadConfig: SOUL.md takes precedence over the systemPrompt config string', () => {
+    writeFileSync(join(tmpDir, 'SOUL.md'), 'soul wins');
+    const cfg = loadConfig(writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a', dataDir: tmpDir,
+      sdk: { systemPrompt: 'config string' },
+    }));
+    expect(cfg.sdk.systemPrompt).toBe('soul wins');
+  });
+
+  it('loadConfig: falls back to the systemPrompt config string when no SOUL.md', () => {
+    const cfg = loadConfig(writeConfig({
+      botToken: 'bf_t', apiUrl: 'https://a', dataDir: tmpDir,
+      sdk: { systemPrompt: 'config string' },
+    }));
+    expect(cfg.sdk.systemPrompt).toBe('config string');
+  });
+
+  it('per-bot: SOUL.md in the bot dataDir overrides the bot systemPrompt', () => {
+    // Bot 'a' resolves its dataDir to <base>/a; a SOUL.md there wins over the
+    // bot's systemPrompt config string.
+    const botDir = join(tmpDir, 'a');
+    mkdirSync(botDir, { recursive: true });
+    writeFileSync(join(botDir, 'SOUL.md'), 'file soul wins');
+    const cfgPath = writeConfig({
+      apiUrl: 'https://a', dataDir: tmpDir,
+      bots: [{ id: 'a', botToken: 'bf_1', systemPrompt: 'bot config soul' }],
+    });
+    const bots = resolveBotConfigs(loadConfig(cfgPath));
+    expect(bots[0].sdk.systemPrompt).toBe('file soul wins');
   });
 });

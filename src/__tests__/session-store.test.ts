@@ -30,22 +30,34 @@ describe('SessionStore', () => {
     expect(s2.updatedAt).toBeGreaterThanOrEqual(s1.updatedAt);
   });
 
-  it('appendUser + appendAssistant + buildHistoryPrefix round-trip', () => {
+  it('appendUser + appendAssistant + buildHistoryPrefix round-trip (attributed)', () => {
     store.getOrCreate('s1', 'ch1', 1);
-    store.appendUser('s1', 'Hello');
-    store.appendAssistant('s1', 'Hi there');
-    store.appendUser('s1', 'Thanks');
+    store.appendUser('s1', 'Hello', undefined, 'Alice');
+    store.appendAssistant('s1', 'Hi there', undefined, 'OctoBot');
+    store.appendUser('s1', 'Thanks', undefined, 'Alice');
 
     const history = store.buildHistoryPrefix('s1', 10);
-    expect(history).toContain('[user]: Hello');
-    expect(history).toContain('[assistant]: Hi there');
-    expect(history).toContain('[user]: Thanks');
+    expect(history).toContain('[user Alice]: Hello');
+    expect(history).toContain('[assistant OctoBot]: Hi there');
+    expect(history).toContain('[user Alice]: Thanks');
     // Verify chronological order
-    const helloIdx = history.indexOf('[user]: Hello');
-    const hiIdx = history.indexOf('[assistant]: Hi there');
-    const thanksIdx = history.indexOf('[user]: Thanks');
+    const helloIdx = history.indexOf('Hello');
+    const hiIdx = history.indexOf('Hi there');
+    const thanksIdx = history.indexOf('Thanks');
     expect(helloIdx).toBeLessThan(hiIdx);
     expect(hiIdx).toBeLessThan(thanksIdx);
+  });
+
+  it('attributes each turn by its sender (shared group history)', () => {
+    store.getOrCreate('g1', 'ch1', 2);
+    store.appendUser('g1', 'hi from alice', 1, 'Alice');
+    store.appendAssistant('g1', 'hello Alice', 1, 'OctoBot');
+    store.appendUser('g1', 'and bob too', 2, 'Bob');
+
+    const history = store.buildHistoryPrefix('g1', 10);
+    expect(history).toContain('[user Alice]: hi from alice');
+    expect(history).toContain('[user Bob]: and bob too');
+    expect(history).toContain('[assistant OctoBot]: hello Alice');
   });
 
   it('buildHistoryPrefix respects limit', () => {
@@ -235,7 +247,7 @@ describe('SessionStore G10 message_seq migration (Q1-2)', () => {
     const store = new SessionStore(adapter);
     // Pre-Q1: this would silently console.warn and continue with a broken DB.
     // Post-Q1: must throw with a clear error mentioning G10 migration.
-    expect(() => store.init()).toThrow(/G10 message_seq migration failed/);
+    expect(() => store.init()).toThrow(/messages column migration failed/);
   });
 });
 

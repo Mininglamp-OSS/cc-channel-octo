@@ -10,7 +10,7 @@
  */
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
-import type { PermissionMode, SettingSource } from '@anthropic-ai/claude-agent-sdk';
+import type { PermissionMode, SettingSource, Settings } from '@anthropic-ai/claude-agent-sdk';
 import type { Config } from './config.js';
 import { resolveSessionCwd } from './cwd-resolver.js';
 import type { SessionCtx } from './cwd-resolver.js';
@@ -287,7 +287,7 @@ export async function* queryAgent(
   config: Config,
   sessionCtx?: SessionCtx,
   onToolUse?: (toolName: string) => void,
-  opts?: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string },
+  opts?: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; memoryDir?: string },
 ): AsyncIterable<string> {
   const permissionMode = toPermissionMode(config.sdk.permissionMode);
   const settingSources = toSettingSources(config.sdk.settingSources);
@@ -323,10 +323,32 @@ export async function* queryAgent(
     prompt: userMessage,
     options: {
       cwd,
-      systemPrompt,
+      // v1.1: the system prompt MUST be the `claude_code` preset (not a raw
+      // string). The SDK's auto-memory awareness/recall is a *dynamic section
+      // of the preset prompt* and "has no effect when a custom (non-preset)
+      // system prompt is in use" (sdk.d.ts). A raw string here silently
+      // disables memory — the agent has no idea it has a memory and, when told
+      // to "remember", falls back to writing whatever config file it can see.
+      // Our composed prompt (security prefix + SOUL + group + history) rides in
+      // `append`, below the preset's base. excludeDynamicSections is left unset
+      // so the memory-path section stays in the prompt.
+      systemPrompt: { type: 'preset', preset: 'claude_code', append: systemPrompt },
       ...(env ? { env } : {}),
       // v0.3: resume a prior SDK session to persist workspace state across turns.
       ...(opts?.resume ? { resume: opts.resume } : {}),
+      // v1.1: enable the SDK's built-in auto-memory, pointed at a stable per-
+      // session dir OUTSIDE cwdBase (so the 7-day cwd TTL never reclaims it).
+      // Inline `settings` is the flag tier — autoMemoryDirectory is honored here
+      // (it's only ignored when set via checked-in projectSettings). Orthogonal
+      // to settingSources, which is left untouched.
+      ...(opts?.memoryDir
+        ? {
+            settings: {
+              autoMemoryEnabled: true,
+              autoMemoryDirectory: opts.memoryDir,
+            } satisfies Settings,
+          }
+        : {}),
       // Q2: `"*"` means "no whitelist" — drop the option so the SDK falls back
       // to its built-in tool set. An explicit string[] is forwarded as-is.
       ...(config.sdk.allowedTools === '*'
@@ -380,6 +402,14 @@ export async function* queryAgent(
         if (message.subtype !== 'success') {
           yield `\n[Error: ${message.subtype}]`;
         }
+      } else if (
+        message.type === 'system' &&
+        (message as { subtype?: string }).subtype === 'memory_recall'
+      ) {
+        // v1.1: the SDK surfaced relevant long-term memories into this turn.
+        const recalled = (message as { memories?: unknown[] }).memories;
+        const n = Array.isArray(recalled) ? recalled.length : 0;
+        if (n > 0) console.log(`[cc-channel-octo] recalled ${n} memory item(s)`);
       }
     }
   } finally {

@@ -34,6 +34,15 @@ export interface Config {
   cwd: string;
   dataDir: string;
   /**
+   * v1.1: base directory for the SDK auto-memory store. Each session gets a
+   * hashed subdir under it (same partitioning as the cwd sandbox: group=shared
+   * per channel, DM=private per peer). MUST be outside `cwdBase` — auto-memory
+   * is permanent (no TTL), while cwd sandboxes are swept after 7 days; keeping
+   * it separate means memory is never reclaimed by the cwd cleaner. Defaults to
+   * `<dataDir>/memory`. Env: `CC_OCTO_MEMORY_BASE`.
+   */
+  memoryBase?: string;
+  /**
    * v1.0: directory of per-group instruction files (`<groupId>.md`). When set,
    * a matching file's contents are injected into the system prompt as trusted
    * custom instructions for that group. Operator-controlled — must NOT be the
@@ -76,6 +85,18 @@ export interface Config {
     permissionMode: string;
     maxTurns?: number;
     systemPrompt?: string;
+    /**
+     * Which filesystem settings sources the SDK loads (`user`/`project`/`local`).
+     * Default is `[]` — SDK isolation mode. The bot runs as a service and must
+     * NOT read or write the operator's real `~/.claude` config: with `["user"]`
+     * the agent loads the host's global `~/.claude/CLAUDE.md` into context and,
+     * when told to "remember" something, writes there instead of its scoped
+     * auto-memory dir (observed in live testing). Memory flows only through the
+     * dedicated auto-memory directory (see `memoryBase`). Operators who
+     * deliberately want host config can set `["user"]`/`["project"]`/etc.
+     * Note: this controls what is LOADED (read), not what tools may write —
+     * tool-write scope is governed by `permissionMode`/`allowedTools`.
+     */
     settingSources: string[];
     /**
      * v0.3: when true, the bot sends brief "🔧 Running <tool>…" progress
@@ -153,6 +174,7 @@ export interface BotOverride {
   botToken: string;
   apiUrl?: string;
   dataDir?: string;
+  memoryBase?: string;
   cwdBase?: string;
   model?: string;
   systemPrompt?: string;
@@ -182,6 +204,7 @@ type PartialConfig = {
   /** Q3 deprecated alias — maps to cwdBase with a warning. */
   cwd?: string;
   dataDir?: string;
+  memoryBase?: string;
   groupConfigDir?: string;
   transport?: 'websocket' | 'webhook';
   webhook?: Partial<Config['webhook']>;
@@ -206,7 +229,8 @@ function defaults(): Config {
       // Q2: default to wildcard — operators tighten only when they need to.
       allowedTools: '*',
       permissionMode: 'bypassPermissions',
-      settingSources: ['user'],
+      // v1.1: SDK isolation mode by default — never touch the host's ~/.claude.
+      settingSources: [],
     },
     rateLimit: {
       maxPerMinute: 5,
@@ -275,6 +299,7 @@ function mergeConfig(base: Config, override: PartialConfig): Config {
     // Keep deprecated `cwd` in sync so any legacy reader still sees a value.
     cwd: cwdBase ?? base.cwd,
     dataDir: override.dataDir ?? base.dataDir,
+    memoryBase: override.memoryBase ?? base.memoryBase,
     groupConfigDir: override.groupConfigDir ?? base.groupConfigDir,
     transport: override.transport ?? base.transport,
     webhook: (override.webhook || base.webhook)
@@ -351,6 +376,7 @@ function applyEnv(cfg: Config): Config {
     next.cwd = envCwd;
   }
   if (env.CC_OCTO_DATA_DIR) next.dataDir = env.CC_OCTO_DATA_DIR;
+  if (env.CC_OCTO_MEMORY_BASE) next.memoryBase = env.CC_OCTO_MEMORY_BASE;
   if (env.CC_OCTO_GROUP_CONFIG_DIR) next.groupConfigDir = env.CC_OCTO_GROUP_CONFIG_DIR;
   // v1.0 webhook transport env overrides.
   if (env.CC_OCTO_TRANSPORT) {
@@ -459,6 +485,20 @@ export function loadConfig(configPath?: string): Config {
   const fileCfg = readConfigFile(path);
   const merged = mergeConfig(defaults(), fileCfg);
   const final = applyEnv(merged);
+
+  // v1.1: default the auto-memory base to `<dataDir>/memory` (a stable,
+  // bot-owned dir OUTSIDE cwdBase, so the 7-day cwd TTL never reclaims memory).
+  if (!final.memoryBase) {
+    final.memoryBase = joinPath(final.dataDir, 'memory');
+  }
+
+  // v1.1: openclaw-style SOUL.md personality. A `<dataDir>/SOUL.md` file, if
+  // present, becomes the bot's system-prompt "soul" and takes precedence over
+  // the `sdk.systemPrompt` config string. Edit the file to change the voice.
+  const soul = loadSoul(final.dataDir);
+  if (soul) {
+    final.sdk.systemPrompt = soul;
+  }
 
   const hasBots = Array.isArray(final.bots) && final.bots.length > 0;
 
@@ -600,13 +640,23 @@ export function resolveBotConfigs(config: Config): Config[] {
     // Namespace data dir + cwd base by id so bots are isolated by default.
     const baseDataDir = config.dataDir;
     const baseCwd = config.cwdBase ?? config.cwd;
+    const botDataDir = bot.dataDir ?? joinPath(baseDataDir, id);
+    // v1.1: per-bot SOUL.md (in the bot's own dataDir) takes precedence over the
+    // bot's `systemPrompt` config string, which in turn overrides the shared
+    // `config.sdk.systemPrompt`. Mirrors the single-bot precedence in loadConfig.
+    const botSoul = loadSoul(botDataDir);
+    const botSystemPrompt = botSoul ?? bot.systemPrompt;
     const resolved: Config = {
       ...config,
       bots: undefined, // a per-bot config is single-bot
       botId: id,
       botToken: bot.botToken,
       apiUrl: bot.apiUrl ?? config.apiUrl,
-      dataDir: bot.dataDir ?? joinPath(baseDataDir, id),
+      dataDir: botDataDir,
+      // Memory tracks the per-bot dataDir (default `<dataDir>/memory`) so each
+      // bot's auto-memory is isolated, mirroring history/cwd. Explicit override
+      // wins. Computed from the already-namespaced dataDir to avoid double-id.
+      memoryBase: bot.memoryBase ?? joinPath(botDataDir, 'memory'),
       cwdBase: bot.cwdBase ?? joinPath(baseCwd, id),
       cwd: bot.cwdBase ?? joinPath(baseCwd, id),
       botBlocklist: bot.botBlocklist ?? config.botBlocklist,
@@ -619,7 +669,7 @@ export function resolveBotConfigs(config: Config): Config[] {
       sdk: {
         ...config.sdk,
         ...(bot.model !== undefined ? { model: bot.model } : {}),
-        ...(bot.systemPrompt !== undefined ? { systemPrompt: bot.systemPrompt } : {}),
+        ...(botSystemPrompt !== undefined ? { systemPrompt: botSystemPrompt } : {}),
       },
     };
     if (!isAllowedApiUrl(resolved.apiUrl)) {
@@ -667,4 +717,26 @@ export function resolveBotConfigs(config: Config): Config[] {
 /** Join two path segments without importing node:path into the type surface. */
 function joinPath(a: string, b: string): string {
   return a.replace(/\/+$/, '') + '/' + b;
+}
+
+/**
+ * v1.1: openclaw-style per-bot personality. Read `<dataDir>/SOUL.md` if it
+ * exists and return its trimmed contents as the bot's "soul" (voice/stance/
+ * boundaries), to be composed into the agent system prompt. Mirrors openclaw's
+ * SOUL.md: a file you edit, not a config string. When the file is absent or
+ * empty, returns undefined so the caller falls back to the `systemPrompt`
+ * config string. Best-effort — a read error never blocks startup.
+ */
+export function loadSoul(dataDir: string): string | undefined {
+  const path = joinPath(dataDir, 'SOUL.md');
+  if (!existsSync(path)) return undefined;
+  try {
+    const content = readFileSync(path, 'utf-8').trim();
+    return content.length > 0 ? content : undefined;
+  } catch (err) {
+    console.warn(
+      `[cc-channel-octo] WARNING: failed to read ${path}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return undefined;
+  }
 }

@@ -55,9 +55,21 @@ describe('SessionRouter', () => {
     expect(router.sessionKey(msg)).toBe('u1');
   });
 
-  it('Group session key = channel_id:from_uid', () => {
-    const msg = makeMsg({ channel_type: ChannelType.Group, channel_id: 'g1', from_uid: 'u1' });
-    expect(router.sessionKey(msg)).toBe('g1:u1');
+  it('Group session key = channel_id (shared per-channel, members share one session)', () => {
+    const a = makeMsg({ channel_type: ChannelType.Group, channel_id: 'g1', from_uid: 'u1' });
+    const b = makeMsg({ channel_type: ChannelType.Group, channel_id: 'g1', from_uid: 'u2' });
+    // Both members of g1 map to the same key — the group is a shared workspace.
+    expect(router.sessionKey(a)).toBe('g1');
+    expect(router.sessionKey(b)).toBe('g1');
+    // Different channels stay distinct.
+    const c = makeMsg({ channel_type: ChannelType.Group, channel_id: 'g2', from_uid: 'u1' });
+    expect(router.sessionKey(c)).toBe('g2');
+  });
+
+  it('DM stays per-user even with the same/other channel', () => {
+    const u1 = makeMsg({ channel_type: ChannelType.DM, from_uid: 'u1' });
+    const u2 = makeMsg({ channel_type: ChannelType.DM, from_uid: 'u2' });
+    expect(router.sessionKey(u1)).not.toBe(router.sessionKey(u2));
   });
 
   // --- Self-skip ---
