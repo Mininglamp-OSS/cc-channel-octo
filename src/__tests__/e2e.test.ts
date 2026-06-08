@@ -43,7 +43,6 @@ vi.mock('../agent-bridge.js', async (importOriginal) => {
     ...original,
     buildSystemPrompt: original.buildSystemPrompt,
     sanitizeForSystemPrompt: original.sanitizeForSystemPrompt,
-    buildPrompt: original.buildPrompt,
     queryAgent: vi.fn(),
   };
 });
