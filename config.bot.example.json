@@ -1,0 +1,14 @@
+{
+  "_comment": "PER-BOT config — install at ~/.cc-channel-octo/<id>/config.json (the <id> must match an entry in the global config's `bots` list; for a single bot use id 'default'). This file is the highest-priority layer: it overrides both the inline bots[] entry and the global shared fields. It holds the bot's REQUIRED botToken. The bot's directories are derived automatically as siblings of this file: ./data, ./workspace, ./memory. Drop a ./SOUL.md next to this file to give the bot a personality (it overrides sdk.systemPrompt).",
+  "botToken": "bf_YOUR_BOT_TOKEN",
+
+  "_comment_overrides": "Any of these optional fields override the global config for THIS bot only:",
+  "_comment_apiUrl": "apiUrl — override the Octo API base for this bot.",
+  "_comment_transport": "v1.0: 'websocket' (default) or 'webhook'. In webhook mode set webhook.secret (REQUIRED) and a distinct host:port per bot.",
+  "_comment_webhook": "webhook: { host, port, path, secret } — used when transport='webhook'.",
+
+  "sdk": {
+    "_comment_model": "Override the model for this bot, e.g. 'vertexai/claude-opus-4-8'.",
+    "_comment_systemPrompt": "Inline personality string. A ./SOUL.md file next to this config overrides it."
+  }
+}

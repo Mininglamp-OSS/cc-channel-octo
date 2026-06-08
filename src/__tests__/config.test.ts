@@ -54,21 +54,20 @@ function teardown() {
   rmSync(tmpDir, { recursive: true, force: true });
 }
 
-// cwdBase is a required config item (no process.cwd() inference). Inject a
-// default for fixtures that don't care about it, so each test doesn't have to
-// repeat it. Tests that exercise cwdBase/cwd behavior set their own value (or
-// pass `_omitCwdBase: true` to test the missing-required-field path), which
-// suppresses the injection.
+// Write a GLOBAL config.json into tmpDir. baseDir = tmpDir (the file's dir), so
+// resolved per-bot dirs are <tmpDir>/<botId>/{data,workspace,memory}. Dirs are
+// NOT config inputs — they're derived — so fixtures never set them.
 function writeConfig(obj: Record<string, unknown>, filename = 'config.json'): string {
   const path = join(tmpDir, filename);
-  const omit = obj._omitCwdBase === true;
-  const out: Record<string, unknown> = { ...obj };
-  delete out._omitCwdBase;
-  if (!omit && out.cwdBase === undefined && out.cwd === undefined) {
-    out.cwdBase = '/test/cwdbase';
-  }
-  writeFileSync(path, JSON.stringify(out));
+  writeFileSync(path, JSON.stringify(obj));
   return path;
+}
+
+// Write a per-bot <tmpDir>/<id>/config.json (the high-priority override layer).
+function writeBotConfig(id: string, obj: Record<string, unknown>): void {
+  const dir = join(tmpDir, id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'config.json'), JSON.stringify(obj));
 }
 
 // ─── 1. Defaults ────────────────────────────────────────────────────────────
@@ -77,16 +76,14 @@ describe('loadConfig defaults', () => {
   beforeEach(setup);
   afterEach(teardown);
 
-  it('returns correct defaults when only required fields are provided via file', () => {
+  it('returns correct shared defaults; baseDir = config dir; dirs derived per bot', () => {
     const path = writeConfig({ botToken: 'bf_test', apiUrl: 'https://api.test' });
     const cfg = loadConfig(path);
 
     expect(cfg.botToken).toBe('bf_test');
     expect(cfg.apiUrl).toBe('https://api.test');
-    // cwdBase is required and explicit (injected by writeConfig here); it is no
-    // longer inferred from process.cwd().
-    expect(cfg.cwdBase).toBe('/test/cwdbase');
-    expect(cfg.dataDir).toBe('./data');
+    // baseDir is the directory containing config.json.
+    expect(cfg.baseDir).toBe(tmpDir);
     // Q2: default is the wildcard sentinel — no whitelist applied at the SDK layer.
     expect(cfg.sdk.allowedTools).toBe('*');
     expect(cfg.sdk.permissionMode).toBe('bypassPermissions');
@@ -98,6 +95,13 @@ describe('loadConfig defaults', () => {
     expect(cfg.context.maxContextChars).toBe(6000);
     expect(cfg.context.historyLimit).toBe(40);
     expect(cfg.botBlocklist).toBeUndefined();
+
+    // Per-bot dirs are derived under <baseDir>/<botId>/… (single bot → default).
+    const [bot] = resolveBotConfigs(cfg);
+    expect(bot.botId).toBe('default');
+    expect(bot.dataDir).toBe(`${tmpDir}/default/data`);
+    expect(bot.cwdBase).toBe(`${tmpDir}/default/workspace`);
+    expect(bot.memoryBase).toBe(`${tmpDir}/default/memory`);
   });
 });
 
@@ -111,11 +115,10 @@ describe('three-level priority: env > file > defaults', () => {
     const path = writeConfig({
       botToken: 'bf_file',
       apiUrl: 'https://file.test',
-      dataDir: '/custom/data',
       rateLimit: { maxPerMinute: 10 },
     });
     const cfg = loadConfig(path);
-    expect(cfg.dataDir).toBe('/custom/data');
+    expect(cfg.apiUrl).toBe('https://file.test');
     expect(cfg.rateLimit.maxPerMinute).toBe(10);
   });
 
@@ -123,22 +126,20 @@ describe('three-level priority: env > file > defaults', () => {
     const path = writeConfig({
       botToken: 'bf_file',
       apiUrl: 'https://file.test',
-      dataDir: '/from-file',
     });
-    process.env.CC_OCTO_DATA_DIR = '/from-env';
+    process.env.CC_OCTO_API_URL = 'https://env.override';
     const cfg = loadConfig(path);
-    expect(cfg.dataDir).toBe('/from-env');
+    expect(cfg.apiUrl).toBe('https://env.override');
   });
 
   it('env overrides defaults when no config file', () => {
     process.env.CC_OCTO_BOT_TOKEN = 'bf_env';
     process.env.CC_OCTO_API_URL = 'https://env.test';
-    process.env.CC_OCTO_DATA_DIR = '/env-data';
-    process.env.CC_OCTO_CWDBASE = '/env-cwdbase'; // required
     const cfg = loadConfig(join(tmpDir, 'nonexistent.json'));
     expect(cfg.botToken).toBe('bf_env');
     expect(cfg.apiUrl).toBe('https://env.test');
-    expect(cfg.dataDir).toBe('/env-data');
+    // baseDir derives from the (nonexistent) config path's directory.
+    expect(cfg.baseDir).toBe(tmpDir);
   });
 });
 
@@ -148,9 +149,10 @@ describe('required field validation', () => {
   beforeEach(setup);
   afterEach(teardown);
 
-  it('throws when botToken is missing', () => {
+  it('loadConfig does NOT require botToken (it lives in the per-bot config)', () => {
+    // botToken is validated per-bot in resolveBotConfigs, not in loadConfig.
     const path = writeConfig({ apiUrl: 'https://api.test' });
-    expect(() => loadConfig(path)).toThrow(/botToken/);
+    expect(() => loadConfig(path)).not.toThrow();
   });
 
   it('throws when apiUrl is missing', () => {
@@ -158,19 +160,23 @@ describe('required field validation', () => {
     expect(() => loadConfig(path)).toThrow(/apiUrl/);
   });
 
-  it('throws when both are missing', () => {
-    const path = writeConfig({});
-    expect(() => loadConfig(path)).toThrow(/botToken/);
+  it('resolveBotConfigs throws when a bot has no token (single-bot)', () => {
+    const path = writeConfig({ apiUrl: 'https://api.test' });
+    expect(() => resolveBotConfigs(loadConfig(path))).toThrow(/missing botToken/);
   });
 
-  it('throws when cwdBase is missing (required, not inferred from process.cwd)', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://api.test', _omitCwdBase: true });
-    expect(() => loadConfig(path)).toThrow(/Missing required config: cwdBase/);
+  it('single-bot token can come from the global config', () => {
+    const path = writeConfig({ botToken: 'bf_global', apiUrl: 'https://api.test' });
+    const [bot] = resolveBotConfigs(loadConfig(path));
+    expect(bot.botToken).toBe('bf_global');
+    expect(bot.botId).toBe('default');
   });
 
-  it('accepts the deprecated cwd alias as satisfying the cwdBase requirement', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://api.test', cwd: '/legacy/base' });
-    expect(loadConfig(path).cwdBase).toBe('/legacy/base');
+  it('single-bot token can come from <baseDir>/default/config.json', () => {
+    const path = writeConfig({ apiUrl: 'https://api.test' });
+    writeBotConfig('default', { botToken: 'bf_perbot' });
+    const [bot] = resolveBotConfigs(loadConfig(path));
+    expect(bot.botToken).toBe('bf_perbot');
   });
 });
 
@@ -216,33 +222,9 @@ describe('CC_OCTO_* env override coverage', () => {
   it('CC_OCTO_BOT_TOKEN + CC_OCTO_API_URL', () => {
     process.env.CC_OCTO_BOT_TOKEN = 'bf_env_tok';
     process.env.CC_OCTO_API_URL = 'https://env-api';
-    process.env.CC_OCTO_CWDBASE = '/env-cwdbase'; // required
     const cfg = loadConfig(join(tmpDir, 'nope.json'));
     expect(cfg.botToken).toBe('bf_env_tok');
     expect(cfg.apiUrl).toBe('https://env-api');
-  });
-
-  it('CC_OCTO_CWDBASE', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_CWDBASE = '/env-cwdbase';
-    expect(loadConfig(path).cwdBase).toBe('/env-cwdbase');
-  });
-
-  it('CC_OCTO_CWD (legacy alias) still applies with a deprecation warning', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_CWD = '/env-cwd-legacy';
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const cfg = loadConfig(path);
-    expect(cfg.cwdBase).toBe('/env-cwd-legacy');
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('CC_OCTO_CWD is deprecated'));
-    warnSpy.mockRestore();
-  });
-
-  it('CC_OCTO_CWDBASE wins when both CC_OCTO_CWDBASE and CC_OCTO_CWD are set', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
-    process.env.CC_OCTO_CWDBASE = '/env-cwdbase-wins';
-    process.env.CC_OCTO_CWD = '/env-cwd-loses';
-    expect(loadConfig(path).cwdBase).toBe('/env-cwdbase-wins');
   });
 
   it('CC_OCTO_SDK_MODEL', () => {
@@ -576,71 +558,48 @@ describe('Q2: allowedTools wildcard', () => {
   });
 });
 
-// ─── Q3: cwdBase / cwd alias ───────────────────────────────────────────
+// ─── Derived per-bot directories (bot-first layout) ─────────────────────
 
-describe('Q3: cwdBase + deprecated cwd alias', () => {
+describe('derived per-bot directories', () => {
   beforeEach(setup);
   afterEach(teardown);
 
-  it('config.cwdBase is honored directly', () => {
-    const path = writeConfig({
-      botToken: 'bf_t',
-      apiUrl: 'https://a',
-      cwdBase: '/explicit/base',
-    });
-    expect(loadConfig(path).cwdBase).toBe('/explicit/base');
+  it('single bot derives <baseDir>/default/{data,workspace,memory}', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    const [bot] = resolveBotConfigs(loadConfig(path));
+    expect(bot.dataDir).toBe(`${tmpDir}/default/data`);
+    expect(bot.cwdBase).toBe(`${tmpDir}/default/workspace`);
+    expect(bot.memoryBase).toBe(`${tmpDir}/default/memory`);
+    // cwd alias stays in sync with cwdBase.
+    expect(bot.cwd).toBe(bot.cwdBase);
   });
 
-  it('legacy config.cwd still maps to cwdBase with a deprecation warning', () => {
+  it('dirs are NOT configurable — config-file cwdBase/dataDir/memoryBase are ignored', () => {
+    // These keys are no longer part of the input schema; they must not affect
+    // the derived per-bot paths.
     const path = writeConfig({
-      botToken: 'bf_t',
-      apiUrl: 'https://a',
-      cwd: '/legacy/dir',
+      botToken: 'bf_t', apiUrl: 'https://a',
+      cwdBase: '/hacker/escape', dataDir: '/hacker/data', memoryBase: '/hacker/mem',
     });
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const cfg = loadConfig(path);
-    expect(cfg.cwdBase).toBe('/legacy/dir');
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('config.cwd is deprecated'));
-    warnSpy.mockRestore();
+    const [bot] = resolveBotConfigs(loadConfig(path));
+    expect(bot.cwdBase).toBe(`${tmpDir}/default/workspace`);
+    expect(bot.dataDir).toBe(`${tmpDir}/default/data`);
+    expect(bot.memoryBase).toBe(`${tmpDir}/default/memory`);
   });
 
-  it('config.cwdBase wins over config.cwd when both are present', () => {
+  it('each bot gets its own subtree under baseDir', () => {
     const path = writeConfig({
-      botToken: 'bf_t',
       apiUrl: 'https://a',
-      cwdBase: '/wins',
-      cwd: '/loses',
+      bots: [{ id: 'support' }, { id: 'ops' }],
     });
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const cfg = loadConfig(path);
-    expect(cfg.cwdBase).toBe('/wins');
-    // cwdBase is defined → cwd alias must NOT trigger its deprecation warning.
-    const cwdWarnings = warnSpy.mock.calls.filter((c) =>
-      typeof c[0] === 'string' && c[0].includes('config.cwd is deprecated'),
-    );
-    expect(cwdWarnings).toHaveLength(0);
-    warnSpy.mockRestore();
-  });
-
-  it('blank config.cwdBase throws (required, not inferred)', () => {
-    // A `"cwdBase": ""`/whitespace typo must NOT silently fall back to a default;
-    // cwdBase is required, so a blank value is a hard error.
-    const path = writeConfig({
-      botToken: 'bf_t',
-      apiUrl: 'https://a',
-      cwdBase: '   ',
-    });
-    expect(() => loadConfig(path)).toThrow(/Missing required config: cwdBase/);
-  });
-
-  it('blank CC_OCTO_CWDBASE env is ignored (treated as unset)', () => {
-    const path = writeConfig({
-      botToken: 'bf_t',
-      apiUrl: 'https://a',
-      cwdBase: '/explicit/base',
-    });
-    process.env.CC_OCTO_CWDBASE = '  ';
-    expect(loadConfig(path).cwdBase).toBe('/explicit/base');
+    writeBotConfig('support', { botToken: 'bf_s' });
+    writeBotConfig('ops', { botToken: 'bf_o' });
+    const bots = resolveBotConfigs(loadConfig(path));
+    expect(bots[0].dataDir).toBe(`${tmpDir}/support/data`);
+    expect(bots[0].memoryBase).toBe(`${tmpDir}/support/memory`);
+    expect(bots[1].cwdBase).toBe(`${tmpDir}/ops/workspace`);
+    // fully disjoint subtrees
+    expect(bots[0].dataDir).not.toBe(bots[1].dataDir);
   });
 });
 
@@ -687,9 +646,9 @@ describe('v0.3: tool progress toggle', () => {
   );
 });
 
-// ─── v0.3: multi-bot (resolveBotConfigs) ───────────────────────────────
+// ─── Multi-bot (resolveBotConfigs, two-layer) ──────────────────────────
 
-describe('v0.3: resolveBotConfigs', () => {
+describe('resolveBotConfigs (two-layer)', () => {
   beforeEach(setup);
   afterEach(teardown);
 
@@ -701,44 +660,32 @@ describe('v0.3: resolveBotConfigs', () => {
     expect(bots[0].botToken).toBe('bf_t');
   });
 
-  it('expands a bots[] array into one config per entry', () => {
+  it('expands a bots[] list into one config per entry; tokens from per-bot files', () => {
     const cfg = loadConfig(writeConfig({
       apiUrl: 'https://a',
-      dataDir: '/data',
-      cwdBase: '/sand',
-      bots: [
-        { id: 'support', botToken: 'bf_1' },
-        { id: 'ops', botToken: 'bf_2' },
-      ],
+      bots: [{ id: 'support' }, { id: 'ops' }],
     }));
+    writeBotConfig('support', { botToken: 'bf_1' });
+    writeBotConfig('ops', { botToken: 'bf_2' });
     const bots = resolveBotConfigs(cfg);
     expect(bots.map((b) => b.botId)).toEqual(['support', 'ops']);
     expect(bots.map((b) => b.botToken)).toEqual(['bf_1', 'bf_2']);
   });
 
-  it('namespaces dataDir + cwdBase per bot id by default (isolation)', () => {
+  it('per-bot config.json overrides inline + global (token, model)', () => {
     const cfg = loadConfig(writeConfig({
       apiUrl: 'https://a',
-      dataDir: '/data',
-      cwdBase: '/sand',
-      bots: [{ id: 'support', botToken: 'bf_1' }],
+      sdk: { model: 'base-model' },
+      bots: [{ id: 'a', botToken: 'bf_inline', model: 'inline-model' }],
     }));
+    // per-bot file wins over the inline bots[] entry
+    writeBotConfig('a', { botToken: 'bf_file', sdk: { model: 'file-model' } });
     const [bot] = resolveBotConfigs(cfg);
-    expect(bot.dataDir).toBe('/data/support');
-    expect(bot.cwdBase).toBe('/sand/support');
+    expect(bot.botToken).toBe('bf_file');
+    expect(bot.sdk.model).toBe('file-model');
   });
 
-  it('honors explicit per-bot dataDir/cwdBase overrides', () => {
-    const cfg = loadConfig(writeConfig({
-      apiUrl: 'https://a',
-      bots: [{ id: 'x', botToken: 'bf_1', dataDir: '/custom/d', cwdBase: '/custom/c' }],
-    }));
-    const [bot] = resolveBotConfigs(cfg);
-    expect(bot.dataDir).toBe('/custom/d');
-    expect(bot.cwdBase).toBe('/custom/c');
-  });
-
-  it('applies per-bot model/systemPrompt overrides onto sdk', () => {
+  it('inline bots[] fields apply when no per-bot file overrides them', () => {
     const cfg = loadConfig(writeConfig({
       apiUrl: 'https://a',
       sdk: { model: 'base-model' },
@@ -760,12 +707,12 @@ describe('v0.3: resolveBotConfigs', () => {
     expect(resolveBotConfigs(cfg)[0].bots).toBeUndefined();
   });
 
-  it('throws on a missing per-bot token', () => {
+  it('throws on a bot with no token (neither inline nor per-bot file)', () => {
     const cfg = loadConfig(writeConfig({
       apiUrl: 'https://a',
-      bots: [{ id: 'a', botToken: '' }],
+      bots: [{ id: 'a' }],
     }));
-    expect(() => resolveBotConfigs(cfg)).toThrow(/missing required botToken/i);
+    expect(() => resolveBotConfigs(cfg)).toThrow(/missing botToken/i);
   });
 
   it('throws on duplicate bot ids', () => {
@@ -784,14 +731,6 @@ describe('v0.3: resolveBotConfigs', () => {
     expect(() => resolveBotConfigs(cfg)).toThrow(/duplicate botToken/i);
   });
 
-  it('loadConfig allows a missing top-level botToken when bots[] is present', () => {
-    // No top-level botToken, but bots provide their own.
-    expect(() => loadConfig(writeConfig({
-      apiUrl: 'https://a',
-      bots: [{ id: 'a', botToken: 'bf_1' }],
-    }))).not.toThrow();
-  });
-
   it('rejects an unsafe per-bot apiUrl override', () => {
     const cfg = loadConfig(writeConfig({
       apiUrl: 'https://a',
@@ -800,24 +739,22 @@ describe('v0.3: resolveBotConfigs', () => {
     expect(() => resolveBotConfigs(cfg)).toThrow(/unsafe apiUrl/i);
   });
 
-  it('re-checks the GROUP.md boundary against a per-bot cwdBase override', () => {
-    // Top-level passes (groups dir is outside top-level cwdBase), but the bot's
-    // own cwdBase override would swallow groupConfigDir — must be rejected.
+  it('rejects groupConfigDir nested under a bot derived cwdBase', () => {
+    // The bot's workspace is <baseDir>/a/workspace; a groupConfigDir inside it
+    // must be rejected (the agent could write its own future instructions).
     const cfg = loadConfig(writeConfig({
       apiUrl: 'https://a',
-      cwdBase: '/srv/sandboxes',
-      groupConfigDir: '/srv/octo/groups',
-      bots: [{ id: 'a', botToken: 'bf_1', cwdBase: '/srv/octo' }],
+      groupConfigDir: `${tmpDir}/a/workspace/groups`,
+      bots: [{ id: 'a', botToken: 'bf_1' }],
     }));
     expect(() => resolveBotConfigs(cfg)).toThrow(/Unsafe groupConfigDir/);
   });
 
-  it('allows a per-bot cwdBase that stays clear of groupConfigDir', () => {
+  it('allows a groupConfigDir clear of every bot workspace', () => {
     const cfg = loadConfig(writeConfig({
       apiUrl: 'https://a',
-      cwdBase: '/srv/sandboxes',
       groupConfigDir: '/srv/octo/groups',
-      bots: [{ id: 'a', botToken: 'bf_1', cwdBase: '/srv/other' }],
+      bots: [{ id: 'a', botToken: 'bf_1' }],
     }));
     expect(() => resolveBotConfigs(cfg)).not.toThrow();
   });
@@ -829,7 +766,7 @@ describe('v0.3: resolveBotConfigs', () => {
         apiUrl: 'https://a',
         bots: [{ id: badId, botToken: 'bf_1' }],
       }));
-      expect(() => resolveBotConfigs(cfg)).toThrow(/invalid bot id/i);
+      expect(() => resolveBotConfigs(cfg)).toThrow(/invalid id/i);
     },
   );
 
@@ -881,53 +818,52 @@ describe('v1.0: groupConfigDir must be outside cwdBase', () => {
   beforeEach(setup);
   afterEach(teardown);
 
-  it('accepts a groupConfigDir outside cwdBase', () => {
-    const path = writeConfig({
+  it('accepts a groupConfigDir outside every bot workspace', () => {
+    const cfg = loadConfig(writeConfig({
       botToken: 'bf_t', apiUrl: 'https://a',
-      cwdBase: '/srv/octo/sandboxes', groupConfigDir: '/srv/octo/groups',
-    });
-    expect(loadConfig(path).groupConfigDir).toBe('/srv/octo/groups');
+      groupConfigDir: '/srv/octo/groups',
+    }));
+    expect(cfg.groupConfigDir).toBe('/srv/octo/groups');
+    expect(() => resolveBotConfigs(cfg)).not.toThrow();
   });
 
-  it('rejects groupConfigDir equal to cwdBase', () => {
-    const path = writeConfig({
+  it('rejects groupConfigDir equal to the derived bot workspace', () => {
+    const cfg = loadConfig(writeConfig({
       botToken: 'bf_t', apiUrl: 'https://a',
-      cwdBase: '/srv/octo', groupConfigDir: '/srv/octo',
-    });
-    expect(() => loadConfig(path)).toThrow(/Unsafe groupConfigDir/);
+      groupConfigDir: `${tmpDir}/default/workspace`,
+    }));
+    expect(() => resolveBotConfigs(cfg)).toThrow(/Unsafe groupConfigDir/);
   });
 
-  it('rejects groupConfigDir nested under cwdBase (file config)', () => {
-    const path = writeConfig({
+  it('rejects groupConfigDir nested under the derived bot workspace', () => {
+    const cfg = loadConfig(writeConfig({
       botToken: 'bf_t', apiUrl: 'https://a',
-      cwdBase: '/srv/octo', groupConfigDir: '/srv/octo/groups',
-    });
-    expect(() => loadConfig(path)).toThrow(/Unsafe groupConfigDir/);
+      groupConfigDir: `${tmpDir}/default/workspace/groups`,
+    }));
+    expect(() => resolveBotConfigs(cfg)).toThrow(/Unsafe groupConfigDir/);
   });
 
   it('rejects nested groupConfigDir expressed with .. (resolved-path check)', () => {
-    const path = writeConfig({
+    const cfg = loadConfig(writeConfig({
       botToken: 'bf_t', apiUrl: 'https://a',
-      cwdBase: '/srv/octo', groupConfigDir: '/srv/octo/x/../groups',
-    });
-    expect(() => loadConfig(path)).toThrow(/Unsafe groupConfigDir/);
+      groupConfigDir: `${tmpDir}/default/workspace/x/../groups`,
+    }));
+    expect(() => resolveBotConfigs(cfg)).toThrow(/Unsafe groupConfigDir/);
   });
 
   it('rejects nested groupConfigDir set via env (CC_OCTO_GROUP_CONFIG_DIR)', () => {
-    const path = writeConfig({
-      botToken: 'bf_t', apiUrl: 'https://a', cwdBase: '/srv/octo',
-    });
-    process.env.CC_OCTO_GROUP_CONFIG_DIR = '/srv/octo/groups';
-    expect(() => loadConfig(path)).toThrow(/Unsafe groupConfigDir/);
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' });
+    process.env.CC_OCTO_GROUP_CONFIG_DIR = `${tmpDir}/default/workspace/groups`;
+    expect(() => resolveBotConfigs(loadConfig(path))).toThrow(/Unsafe groupConfigDir/);
   });
 
-  it('does not reject a sibling dir that shares a name prefix with cwdBase', () => {
-    // /srv/octo-groups is NOT inside /srv/octo — guard against naive prefix match.
-    const path = writeConfig({
+  it('does not reject a sibling dir that shares a name prefix with the workspace', () => {
+    // <tmpDir>/default/workspace-groups is NOT inside <tmpDir>/default/workspace.
+    const cfg = loadConfig(writeConfig({
       botToken: 'bf_t', apiUrl: 'https://a',
-      cwdBase: '/srv/octo', groupConfigDir: '/srv/octo-groups',
-    });
-    expect(loadConfig(path).groupConfigDir).toBe('/srv/octo-groups');
+      groupConfigDir: `${tmpDir}/default/workspace-groups`,
+    }));
+    expect(() => resolveBotConfigs(cfg)).not.toThrow();
   });
 });
 
@@ -953,16 +889,18 @@ describe('v1.0: webhook transport', () => {
   });
 
   it('throws when transport=webhook but no secret is set', () => {
-    expect(() => loadConfig(writeConfig({
+    const cfg = loadConfig(writeConfig({
       botToken: 'bf_t', apiUrl: 'https://a',
       transport: 'webhook', webhook: { port: 9000 },
-    }))).toThrow(/requires webhook.secret/);
+    }));
+    expect(() => resolveBotConfigs(cfg)).toThrow(/requires webhook.secret/);
   });
 
   it('does not require a secret for websocket transport', () => {
-    expect(() => loadConfig(writeConfig({
+    const cfg = loadConfig(writeConfig({
       botToken: 'bf_t', apiUrl: 'https://a', transport: 'websocket',
-    }))).not.toThrow();
+    }));
+    expect(() => resolveBotConfigs(cfg)).not.toThrow();
   });
 
   it('env overrides: CC_OCTO_TRANSPORT + CC_OCTO_WEBHOOK_*', () => {
@@ -1054,7 +992,7 @@ describe('v1.0: multi-bot webhook binds', () => {
       apiUrl: 'https://a',
       bots: [{ id: 'a', botToken: 'bf_1', transport: 'webhook', webhook: { port: 8000 } }],
     }));
-    expect(() => resolveBotConfigs(cfg)).toThrow(/no webhook.secret/i);
+    expect(() => resolveBotConfigs(cfg)).toThrow(/requires webhook.secret/i);
   });
 
   it('per-bot transport override: one websocket, one webhook', () => {
@@ -1076,81 +1014,58 @@ describe('v1.0: webhook path/port validation', () => {
   afterEach(teardown);
 
   it('rejects a webhook.path without a leading slash', () => {
-    expect(() => loadConfig(writeConfig({
+    const cfg = loadConfig(writeConfig({
       botToken: 'bf_t', apiUrl: 'https://a', transport: 'webhook',
       webhook: { secret: 's', path: 'foo' },
-    }))).toThrow(/Invalid webhook.path/);
+    }));
+    expect(() => resolveBotConfigs(cfg)).toThrow(/invalid webhook.path/i);
   });
 
   it('rejects an out-of-range webhook.port', () => {
-    expect(() => loadConfig(writeConfig({
+    const cfg = loadConfig(writeConfig({
       botToken: 'bf_t', apiUrl: 'https://a', transport: 'webhook',
       webhook: { secret: 's', port: 70000 },
-    }))).toThrow(/Invalid webhook.port/);
+    }));
+    expect(() => resolveBotConfigs(cfg)).toThrow(/invalid webhook.port/i);
   });
 
   it('accepts a valid path + port', () => {
-    expect(() => loadConfig(writeConfig({
+    const cfg = loadConfig(writeConfig({
       botToken: 'bf_t', apiUrl: 'https://a', transport: 'webhook',
       webhook: { secret: 's', path: '/in', port: 9000 },
-    }))).not.toThrow();
+    }));
+    expect(() => resolveBotConfigs(cfg)).not.toThrow();
   });
 });
 
-// ─── v1.1: memoryBase ──────────────────────────────────────────────────
+// ─── v1.1: memoryBase (derived) ────────────────────────────────────────
 
-describe('v1.1: memoryBase (auto-memory root)', () => {
+describe('v1.1: memoryBase (auto-memory root, derived)', () => {
   beforeEach(setup);
   afterEach(teardown);
 
-  it('defaults to <dataDir>/memory', () => {
-    const cfg = loadConfig(writeConfig({ botToken: 'bf_t', apiUrl: 'https://a', dataDir: '/data' }));
-    expect(cfg.memoryBase).toBe('/data/memory');
+  it('derives to <baseDir>/<botId>/memory for a single bot', () => {
+    const cfg = loadConfig(writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' }));
+    expect(resolveBotConfigs(cfg)[0].memoryBase).toBe(`${tmpDir}/default/memory`);
   });
 
-  it('config file memoryBase overrides the default', () => {
+  it('is a sibling of workspace/data (not nested), so the cwd TTL never sweeps it', () => {
+    const [bot] = resolveBotConfigs(loadConfig(writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' })));
+    expect(bot.memoryBase).toBe(`${tmpDir}/default/memory`);
+    expect(bot.cwdBase).toBe(`${tmpDir}/default/workspace`);
+    // memory is NOT under workspace
+    expect(bot.memoryBase!.startsWith(bot.cwdBase! + '/')).toBe(false);
+  });
+
+  it('per-bot: each bot gets its own <baseDir>/<id>/memory', () => {
     const cfg = loadConfig(writeConfig({
-      botToken: 'bf_t', apiUrl: 'https://a', dataDir: '/data', memoryBase: '/mem',
-    }));
-    expect(cfg.memoryBase).toBe('/mem');
-  });
-
-  it('CC_OCTO_MEMORY_BASE env overrides', () => {
-    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://a', dataDir: '/data' });
-    process.env.CC_OCTO_MEMORY_BASE = '/env-mem';
-    expect(loadConfig(path).memoryBase).toBe('/env-mem');
-  });
-
-  it('per-bot: memoryBase namespaces the top-level memory base by bot id', () => {
-    const cfg = loadConfig(writeConfig({
-      apiUrl: 'https://a', dataDir: '/data',
+      apiUrl: 'https://a',
       bots: [{ id: 'a', botToken: 'bf_1' }, { id: 'b', botToken: 'bf_2' }],
     }));
     const bots = resolveBotConfigs(cfg);
-    expect(bots[0].dataDir).toBe('/data/a');
-    // Top-level memoryBase defaults to <dataDir>/memory, namespaced by bot id.
-    expect(bots[0].memoryBase).toBe('/data/memory/a');
-    expect(bots[1].memoryBase).toBe('/data/memory/b');
-    // distinct per bot
+    expect(bots[0].memoryBase).toBe(`${tmpDir}/a/memory`);
+    expect(bots[1].memoryBase).toBe(`${tmpDir}/b/memory`);
     expect(bots[0].memoryBase).not.toBe(bots[1].memoryBase);
-  });
-
-  it('per-bot: a top-level memoryBase is honored (namespaced by bot id)', () => {
-    const cfg = loadConfig(writeConfig({
-      apiUrl: 'https://a', dataDir: '/data', memoryBase: '/mem',
-      bots: [{ id: 'a', botToken: 'bf_1' }, { id: 'b', botToken: 'bf_2' }],
-    }));
-    const bots = resolveBotConfigs(cfg);
-    expect(bots[0].memoryBase).toBe('/mem/a');
-    expect(bots[1].memoryBase).toBe('/mem/b');
-  });
-
-  it('per-bot: explicit memoryBase override wins', () => {
-    const cfg = loadConfig(writeConfig({
-      apiUrl: 'https://a', dataDir: '/data',
-      bots: [{ id: 'a', botToken: 'bf_1', memoryBase: '/custom/mem' }],
-    }));
-    expect(resolveBotConfigs(cfg)[0].memoryBase).toBe('/custom/mem');
   });
 });
 
@@ -1172,38 +1087,40 @@ describe('v1.1: SOUL.md personality (openclaw-style)', () => {
     expect(loadSoul(tmpDir)).toBeUndefined();
   });
 
-  it('loadConfig: a SOUL.md in dataDir becomes sdk.systemPrompt', () => {
-    writeFileSync(join(tmpDir, 'SOUL.md'), 'You are Sparky. Be witty.');
-    const cfg = loadConfig(writeConfig({ botToken: 'bf_t', apiUrl: 'https://a', dataDir: tmpDir }));
-    expect(cfg.sdk.systemPrompt).toBe('You are Sparky. Be witty.');
+  it('a SOUL.md in the bot subtree becomes the resolved sdk.systemPrompt', () => {
+    // Single bot → subtree <tmpDir>/default/SOUL.md.
+    mkdirSync(join(tmpDir, 'default'), { recursive: true });
+    writeFileSync(join(tmpDir, 'default', 'SOUL.md'), 'You are Sparky. Be witty.');
+    const [bot] = resolveBotConfigs(loadConfig(writeConfig({ botToken: 'bf_t', apiUrl: 'https://a' })));
+    expect(bot.sdk.systemPrompt).toBe('You are Sparky. Be witty.');
   });
 
-  it('loadConfig: SOUL.md takes precedence over the systemPrompt config string', () => {
-    writeFileSync(join(tmpDir, 'SOUL.md'), 'soul wins');
+  it('SOUL.md takes precedence over the systemPrompt config string', () => {
+    mkdirSync(join(tmpDir, 'default'), { recursive: true });
+    writeFileSync(join(tmpDir, 'default', 'SOUL.md'), 'soul wins');
     const cfg = loadConfig(writeConfig({
-      botToken: 'bf_t', apiUrl: 'https://a', dataDir: tmpDir,
+      botToken: 'bf_t', apiUrl: 'https://a',
       sdk: { systemPrompt: 'config string' },
     }));
-    expect(cfg.sdk.systemPrompt).toBe('soul wins');
+    expect(resolveBotConfigs(cfg)[0].sdk.systemPrompt).toBe('soul wins');
   });
 
-  it('loadConfig: falls back to the systemPrompt config string when no SOUL.md', () => {
+  it('falls back to the systemPrompt config string when no SOUL.md', () => {
     const cfg = loadConfig(writeConfig({
-      botToken: 'bf_t', apiUrl: 'https://a', dataDir: tmpDir,
+      botToken: 'bf_t', apiUrl: 'https://a',
       sdk: { systemPrompt: 'config string' },
     }));
-    expect(cfg.sdk.systemPrompt).toBe('config string');
+    expect(resolveBotConfigs(cfg)[0].sdk.systemPrompt).toBe('config string');
   });
 
-  it('per-bot: SOUL.md in the bot dataDir overrides the bot systemPrompt', () => {
-    // Bot 'a' resolves its dataDir to <base>/a; a SOUL.md there wins over the
-    // bot's systemPrompt config string.
-    const botDir = join(tmpDir, 'a');
-    mkdirSync(botDir, { recursive: true });
-    writeFileSync(join(botDir, 'SOUL.md'), 'file soul wins');
+  it('per-bot: SOUL.md in the bot subtree overrides the bot systemPrompt', () => {
+    // Bot 'a' subtree is <tmpDir>/a; a SOUL.md there wins over the inline
+    // systemPrompt config string.
+    writeBotConfig('a', { botToken: 'bf_1' });
+    writeFileSync(join(tmpDir, 'a', 'SOUL.md'), 'file soul wins');
     const cfgPath = writeConfig({
-      apiUrl: 'https://a', dataDir: tmpDir,
-      bots: [{ id: 'a', botToken: 'bf_1', systemPrompt: 'bot config soul' }],
+      apiUrl: 'https://a',
+      bots: [{ id: 'a', systemPrompt: 'bot config soul' }],
     });
     const bots = resolveBotConfigs(loadConfig(cfgPath));
     expect(bots[0].sdk.systemPrompt).toBe('file soul wins');

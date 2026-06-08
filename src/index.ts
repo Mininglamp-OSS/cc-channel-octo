@@ -556,8 +556,10 @@ export async function handleMessage(
       }
 
       // v1.1: point the SDK auto-memory at a stable per-session dir under
-      // memoryBase (outside cwdBase, so it's never reclaimed by the cwd TTL).
-      // Same partitioning as the session: group=shared per channel, DM=per peer.
+      // memoryBase (<baseDir>/<botId>/memory, outside cwdBase so it's never
+      // reclaimed by the cwd TTL). Same partitioning as the session: group=shared
+      // per channel, DM=per peer. memoryBase is always populated by
+      // resolveBotConfigs(); fall back defensively for hand-built configs/tests.
       {
         const memBase = config.memoryBase ?? join(config.dataDir, 'memory');
         const memoryDir = resolveMemoryDir(memBase, sessionCtx);

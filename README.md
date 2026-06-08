@@ -23,7 +23,7 @@ Users talk to a bot in Octo (DM or group @mention). The bot sends messages to Cl
 - **Session persistence** — SQLite-backed conversation history (40-message sliding window) with automatic 7-day expiry.
 - **In-chat commands** — `/reset` clears your own session's stored history (not the shared recent-group-context cache), `/config` shows the active settings, `/help` lists commands. Scoped per-user (even in groups); subject to the same per-session rate limit as normal messages.
 - **Rate limiting** — Per-session token bucket (default 5 req/min) with debounced rejection notices.
-- **Security by configuration** — `allowedTools` whitelist + per-session `cwdBase` isolation. No runtime permission prompts (headless mode).
+- **Security by configuration** — `allowedTools` whitelist + per-session workspace isolation. No runtime permission prompts (headless mode).
 - **Multi-bot** — Run several independent bots in one process via a `bots[]` config array; each gets its own token, data directory, and sandbox root (no shared history).
 - **Webhook mode** — Optional HTTP inbound transport (`transport: "webhook"`) as an alternative to the WuKongIM long connection; a shared-secret-authenticated endpoint feeds the same pipeline.
 - **Zero infrastructure** — Single process, single SQLite file, `npm start` and go.
@@ -46,19 +46,47 @@ npm install
 npm run build
 ```
 
-Create a config file:
+cc-channel-octo uses a fixed, bot-first directory layout under **`~/.cc-channel-octo/`**:
 
-```bash
-cp config.example.json config.json
+```
+~/.cc-channel-octo/
+├── config.json            ← GLOBAL: shared defaults + the list of bots (no token)
+└── <botId>/               ← one self-contained subtree per bot ("default" for a single bot)
+    ├── config.json        ← THIS bot: botToken (required) + per-bot overrides
+    ├── SOUL.md            ← optional personality (overrides sdk.systemPrompt)
+    ├── data/              ← SQLite history
+    ├── workspace/         ← per-session cwd sandboxes (auto-created)
+    └── memory/            ← long-term auto-memory (auto-created)
 ```
 
-Edit `config.json` with your credentials:
+The directory holding the global `config.json` is the **baseDir**; every bot's
+`data`/`workspace`/`memory` are **derived** from `<baseDir>/<id>/…` and are not
+configurable, so a bot can never escape its own subtree.
+
+Create the two config files:
+
+```bash
+mkdir -p ~/.cc-channel-octo/default
+cp config.example.json     ~/.cc-channel-octo/config.json        # global (shared + bots list)
+cp config.bot.example.json ~/.cc-channel-octo/default/config.json # the bot (token + overrides)
+chmod 600 ~/.cc-channel-octo/config.json ~/.cc-channel-octo/default/config.json
+```
+
+Global `~/.cc-channel-octo/config.json` (shared; **no token**):
+
+```jsonc
+{
+  "apiUrl": "https://your-octo-instance.com",
+  "bots": [{ "id": "default" }]
+}
+```
+
+Per-bot `~/.cc-channel-octo/default/config.json`:
 
 ```jsonc
 {
   "botToken": "bf_YOUR_BOT_TOKEN",
-  "apiUrl": "https://your-octo-instance.com",
-  "cwdBase": "/path/to/isolated/sandbox-root"  // ⚠️ parent dir for per-session sandboxes — must NOT contain config.json or secrets
+  "sdk": { "model": "vertexai/claude-opus-4-8" }
 }
 ```
 
@@ -72,25 +100,28 @@ The bot is now online. Send it a DM or @mention it in a group.
 
 ### Environment Variables
 
-Every config field can be overridden via environment variables (highest priority):
+Shared/global fields can be overridden via environment variables (highest priority):
 
 ```bash
-CC_OCTO_BOT_TOKEN=bf_xxx \
 CC_OCTO_API_URL=https://octo.example.com \
-CC_OCTO_CWDBASE=/home/deploy/sandbox-root \
 npm start
 ```
 
+> Per-bot tokens and the directory layout are NOT env-configurable — the token
+> lives in `<baseDir>/<id>/config.json` and all dirs derive from `baseDir`.
+
 ## Configuration
 
-Three-level priority: **environment variables** > **config.json** > **defaults**.
+Two layers: a **global** `~/.cc-channel-octo/config.json` (shared defaults + the
+`bots` list) and one **per-bot** `~/.cc-channel-octo/<id>/config.json` (its
+token + overrides). Per-bot fields win; env vars override the shared layer.
 
 | Field | Env Var | Default | Description |
 |-------|---------|---------|-------------|
-| `botToken` | `CC_OCTO_BOT_TOKEN` | *(required)* | Octo bot token (`bf_*`) |
-| `apiUrl` | `CC_OCTO_API_URL` | *(required)* | Octo API base URL |
-| `cwdBase` | `CC_OCTO_CWDBASE` | *(required)* | Base directory for per-session sandboxes — **must be set explicitly** (not inferred from the current directory). Each session gets its own SHA-256 hex subdirectory under it, matching how conversation history is partitioned — **per DM peer**, and **per group channel** (a whole group shares one sandbox). Subdirs idle >7d are auto-cleaned every 6h. Legacy `cwd` / `CC_OCTO_CWD` still accepted with a deprecation warning. |
-| `dataDir` | `CC_OCTO_DATA_DIR` | `./data` | SQLite database directory (created with `0700` permissions) |
+| `botToken` | — | *(required, per-bot)* | Octo bot token (`bf_*`). Lives in `<baseDir>/<id>/config.json`, not the global file. |
+| `apiUrl` | `CC_OCTO_API_URL` | *(required)* | Octo API base URL (shared; a bot may override). |
+| `bots` | — | `[{id:"default"}]` | Which bots to run; each `id` selects its subtree + per-bot config. |
+| *(dirs)* | — | *(derived)* | `data`/`workspace`/`memory` are always `<baseDir>/<id>/…` — not configurable. |
 | `sdk.model` | `CC_OCTO_SDK_MODEL` | *(SDK default)* | Claude model override |
 | `sdk.allowedTools` | `CC_OCTO_SDK_ALLOWED_TOOLS` | `"*"` | Either `"*"` (allow every tool the SDK exposes) or an explicit string array whitelist. Env accepts a value containing `*` (wildcard) or a CSV list. |
 | `sdk.permissionMode` | `CC_OCTO_SDK_PERMISSION_MODE` | `bypassPermissions` | SDK permission mode |
@@ -158,13 +189,13 @@ CC_OCTO_GROUP_CONFIG_DIR=/home/deploy/cc-octo-groups npm start
 
 > ⚠️ **Security — this is a trusted, unsanitized prompt-injection sink.** Its
 > safety depends entirely on the files being writable **only** by the operator.
-> Putting `groupConfigDir` outside `cwdBase` is required (the gateway refuses
-> otherwise) but **not sufficient**: under the shipped defaults (`allowedTools:
-> "*"` + `bypassPermissions`) the agent has `Bash`/`Write` and can write
-> **absolute** paths outside `cwdBase` — `cwdBase` is a starting dir, not a
-> chroot (see [Security Model](#security-model)). A malicious user could then
-> have the agent write `<groupConfigDir>/<otherGroup>.md` and inject persistent,
-> trusted instructions into another group. So you **must**:
+> Putting `groupConfigDir` outside every bot's `workspace/` is required (the
+> gateway refuses otherwise) but **not sufficient**: under the shipped defaults
+> (`allowedTools: "*"` + `bypassPermissions`) the agent has `Bash`/`Write` and
+> can write **absolute** paths outside its sandbox — the workspace is a starting
+> dir, not a chroot (see [Security Model](#security-model)). A malicious user
+> could then have the agent write `<groupConfigDir>/<otherGroup>.md` and inject
+> persistent, trusted instructions into another group. So you **must**:
 > - make `groupConfigDir` and its files **non-writable by the gateway process
 >   user** (e.g. root-owned, mode `0755`/`0644`), and/or
 > - harden the deployment (drop `Bash` from `allowedTools`, run unprivileged,
@@ -176,32 +207,36 @@ CC_OCTO_GROUP_CONFIG_DIR=/home/deploy/cc-octo-groups npm start
 
 ### Multi-bot
 
-To run several bots from one process, add a `bots` array instead of (or in
-addition to) the single top-level `botToken`. Each entry needs its own
-`botToken` and should set a stable `id` (slug: letters, digits, `.`, `_`, `-`).
-If `id` is omitted it falls back to the positional `bot0`, `bot1`, … — which
-works but produces index-dependent directory names, so prefer an explicit id.
-Each entry inherits every top-level field and may override `apiUrl`, `dataDir`,
-`cwdBase`, `model`, `systemPrompt`, `botBlocklist`, and the mention lists:
+To run several bots from one process, list them in the global config's `bots`
+array. Each `id` is a slug (letters, digits, `.`, `_`, `-`) that names the bot's
+subtree under `baseDir`; each bot's **token + overrides live in its own
+`<baseDir>/<id>/config.json`** (the highest-priority layer).
+
+Global `~/.cc-channel-octo/config.json`:
 
 ```jsonc
 {
   "apiUrl": "https://your-octo-instance.com",
-  "dataDir": "./data",
-  "cwdBase": "/home/deploy/cc-octo-sandboxes",
   "bots": [
-    { "id": "support", "botToken": "bf_AAA" },
-    { "id": "ops", "botToken": "bf_BBB", "model": "claude-opus-4-8" }
+    { "id": "support" },
+    { "id": "ops", "model": "vertexai/claude-opus-4-8" }
   ]
 }
 ```
 
-Each bot runs a fully independent stack (gateway, router, store). By default its
-`dataDir` and `cwdBase` are namespaced by `id` (`./data/support`,
-`/home/deploy/cc-octo-sandboxes/support`, …), so **bots never share
-conversation history or working directories**. Set `dataDir`/`cwdBase` on an
-entry to override that. When `bots` is absent, the process runs a single bot
-from the top-level fields exactly as before.
+Per-bot `~/.cc-channel-octo/support/config.json` and `~/.cc-channel-octo/ops/config.json`:
+
+```jsonc
+{ "botToken": "bf_AAA" }
+```
+
+Each bot runs a fully independent stack (gateway, router, store). Its
+`data`/`workspace`/`memory` are derived as `<baseDir>/<id>/…`, so **bots never
+share conversation history, working directories, or memory** — the isolation is
+structural and not overridable. A bot may override shared fields (`apiUrl`,
+`model`, `systemPrompt`, `transport`, `webhook`, `botBlocklist`, mention lists)
+in its inline `bots[]` entry or, with higher priority, its per-bot config.json.
+A single bot is just one entry (conventionally `id: "default"`).
 
 ### Webhook mode
 
@@ -248,42 +283,34 @@ the list to reduce risk:
 | **No shell** | `["Read", "Write", "Edit", "Glob", "Grep"]` | Medium — no arbitrary commands |
 | **Read-only** | `["Read", "Glob", "Grep"]` | Low — code reading only |
 
-### 2. `cwdBase` Isolation
+### 2. Workspace Isolation (derived `workspace/`)
 
-**`cwdBase` is the parent directory under which each session gets its own
-hashed sandbox.** A 16-hex SHA-256 subdirectory is derived from the same
-per-session key used for conversation history, so isolation matches the session
-granularity: **per DM peer**, and **per group channel** — a whole group shares
-one sandbox (all members work in the same tree, by design; a group is a shared
-workspace). Different DM peers, and different groups, cannot read or mutate each
-other's working trees. Subdirectories idle for more than 7 days (measured from
-the last inbound message) are cleaned up automatically every 6 hours.
+**Each bot's `workspace/` (`<baseDir>/<botId>/workspace`) is the parent under
+which each session gets its own hashed sandbox.** A 16-hex SHA-256 subdirectory
+is derived from the same per-session key used for conversation history, so
+isolation matches the session granularity: **per DM peer**, and **per group
+channel** — a whole group shares one sandbox (all members work in the same tree,
+by design; a group is a shared workspace). Different DM peers, and different
+groups, cannot read or mutate each other's working trees, and different **bots**
+are fully isolated by their separate subtrees. Subdirectories idle for more than
+7 days (from the last inbound message) are cleaned up automatically every 6 hours.
 
 **Limitation — cwd is a starting directory, not a chroot.** With `Bash`/`Read`
 in the tool set and `bypassPermissions`, the agent can still be instructed to
-read absolute paths outside the sandbox (e.g. `/etc/passwd`, or the gateway's
-own `config.json`). Per-session `cwdBase` partitions sessions from *each other*;
-it does not confine a single session to its directory. For a hard boundary, run
-the gateway as an unprivileged user in a container/VM and tighten `allowedTools`
-(drop `Bash`). Treat `cwdBase` itself as untrusted ground: any user who can
-message the bot can read files within their own session sandbox.
+read absolute paths outside the sandbox (e.g. `/etc/passwd`). Per-session
+sandboxing partitions sessions from *each other*; it does not confine a single
+session to its directory. For a hard boundary, run the gateway as an
+unprivileged user in a container/VM and tighten `allowedTools` (drop `Bash`).
 
-Do **NOT** put these in `cwdBase`:
-- `config.json` (contains your bot token)
-- Private keys, credentials, or `.env` files
-- Sensitive configuration outside the project scope
-
-```
-# ✅ Good — isolated sandbox root, no secrets inside
-"cwdBase": "/home/deploy/cc-octo-sandboxes"
-
-# ❌ Bad — config.json sits in the same directory
-"cwdBase": "."
-```
+Because the layout is fixed under `~/.cc-channel-octo/`, the bot's own
+`config.json` (with the token) lives in the bot subtree root, a **sibling** of
+`workspace/` — never inside it. Keep other secrets out of the bot subtree too;
+treat `workspace/` as untrusted ground that any user who can message the bot can
+read within their own session sandbox.
 
 ### Built-in System Prompt
 
-A default system prompt instructs Claude to treat input as untrusted and decline requests for sensitive file reads or credential exfiltration. This is a **soft constraint** (model-level guidance), not a security boundary. The `allowedTools` whitelist and per-session `cwdBase` isolation are the real security controls.
+A default system prompt instructs Claude to treat input as untrusted and decline requests for sensitive file reads or credential exfiltration. This is a **soft constraint** (model-level guidance), not a security boundary. The `allowedTools` whitelist and per-session workspace isolation are the real security controls.
 
 ### Bot Loop Prevention
 
@@ -378,9 +405,9 @@ src/
 
 ## Known Limitations (v0.2)
 
-- **Per-session `cwdBase` isolation** — Each session gets its own SHA-256 hex sandbox under `cwdBase`, partitioned by the same key as conversation history — **per DM peer** and **per group channel** (a whole group shares one sandbox by design). Idle sandboxes (>7d) are auto-cleaned every 6h. Note: `cwdBase` separates sessions from each other but does not confine a session to its directory (absolute-path reads via Bash/Read remain possible) — see the Security Model section.
+- **Per-session workspace isolation** — Each session gets its own SHA-256 hex sandbox under the bot's `workspace/` (`<baseDir>/<botId>/workspace`), partitioned by the same key as conversation history — **per DM peer** and **per group channel** (a whole group shares one sandbox by design). Idle sandboxes (>7d) are auto-cleaned every 6h. Note: it separates sessions from each other but does not confine a session to its directory (absolute-path reads via Bash/Read remain possible) — see the Security Model section.
 - **Groups are a shared workspace** — All members of a group share one history, one sandbox, and one auto-memory store (the session key is the channel id). There is **no member-to-member isolation within a group**; DM sessions remain private per peer.
-- **Auto-memory is not TTL-reclaimed** — Long-term memory lives under `memoryBase` (default `<dataDir>/memory`, outside `cwdBase`) and is never swept by the cwd janitor, so it persists across `/reset` and grows unbounded on long-lived deploys.
+- **Auto-memory is not TTL-reclaimed** — Long-term memory lives at `<baseDir>/<botId>/memory` (a sibling of `workspace/`) and is never swept by the cwd janitor, so it persists across `/reset` and grows unbounded on long-lived deploys.
 - **Stateless sessions by default** — Uses the v1 `query()` API; workspace state (open files, command history) does not persist across messages. Enable `sdk.persistentSession` to use the SDK v2 Session API, which resumes the prior agent session each turn so that state carries over.
 
 ## Roadmap

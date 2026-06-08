@@ -1,11 +1,30 @@
 /**
  * Configuration loading.
- * Three-level priority: env > config.json > defaults.
+ *
+ * Two-layer, bot-first model:
+ *  - GLOBAL `~/.cc-channel-octo/config.json` — shared defaults + a `bots` list.
+ *    Never holds a botToken.
+ *  - PER-BOT `~/.cc-channel-octo/<id>/config.json` — that bot's botToken + any
+ *    overrides. Each bot is a self-contained subtree:
+ *      <baseDir>/<id>/{config.json, SOUL.md, data/, workspace/, memory/}
+ *  - `baseDir` is the directory containing the global config.json. Per-bot dirs
+ *    are DERIVED from `<baseDir>/<id>/…` (not separately configurable) so a bot
+ *    can never point its data outside its own subtree.
+ *
+ * env overrides still apply to the shared/global layer.
  */
 
 import { readFileSync, existsSync, statSync, realpathSync } from 'node:fs';
-import { resolve as resolvePath, sep } from 'node:path';
+import { resolve as resolvePath, sep, dirname, join as pathJoin } from 'node:path';
+import { homedir } from 'node:os';
 import { isAllowedApiUrl } from './url-policy.js';
+
+/**
+ * Default global config path: `~/.cc-channel-octo/config.json`. This is the
+ * single, fixed production location (no env/CLI override). Tests pass an
+ * explicit path, which also sets `baseDir` to that file's directory.
+ */
+export const DEFAULT_CONFIG_PATH = pathJoin(homedir(), '.cc-channel-octo', 'config.json');
 
 /**
  * Q2: Wildcard form of `allowedTools` — `"*"` means "allow every tool the SDK
@@ -17,29 +36,35 @@ export interface Config {
   botToken: string;
   apiUrl: string;
   /**
-   * Q3: Base directory for per-session cwd isolation. Each (DM peer | group |
-   * thread) gets its own hashed subdirectory under this path. Resolved via
-   * `cwd-resolver.resolveSessionCwd()` before passing to the SDK.
-   *
-   * loadConfig() always populates this. Direct Config mocks (e.g. in tests)
-   * may rely on the deprecated `cwd` alias instead — call sites should read
-   * `config.cwdBase ?? config.cwd` to support both.
+   * Base directory containing the global config.json. Every bot's subtree lives
+   * at `<baseDir>/<botId>/…`. Defaults to `~/.cc-channel-octo` (the dir of
+   * DEFAULT_CONFIG_PATH); when an explicit config path is passed, it is that
+   * file's directory.
+   */
+  baseDir: string;
+  /**
+   * DERIVED (not user-configurable): per-session cwd sandbox base for THIS bot,
+   * `<baseDir>/<botId>/workspace`. Each (DM peer | group channel) gets its own
+   * hashed subdir under it via `cwd-resolver.resolveSessionCwd()`. Populated by
+   * `resolveBotConfigs()`.
    */
   cwdBase?: string;
   /**
-   * @deprecated Use `cwdBase`. Retained as a required compat alias for one
-   * release so existing tests and consumers that build Config objects by hand
-   * continue to compile. loadConfig() keeps this in sync with `cwdBase`.
+   * @deprecated Alias of `cwdBase`, kept in sync so hand-built Config objects
+   * (tests, legacy consumers reading `config.cwd`) still compile.
    */
   cwd: string;
+  /**
+   * DERIVED (not user-configurable): SQLite/data dir for THIS bot,
+   * `<baseDir>/<botId>/data`. Populated by `resolveBotConfigs()`.
+   */
   dataDir: string;
   /**
-   * v1.1: base directory for the SDK auto-memory store. Each session gets a
-   * hashed subdir under it (same partitioning as the cwd sandbox: group=shared
-   * per channel, DM=private per peer). MUST be outside `cwdBase` — auto-memory
-   * is permanent (no TTL), while cwd sandboxes are swept after 7 days; keeping
-   * it separate means memory is never reclaimed by the cwd cleaner. Defaults to
-   * `<dataDir>/memory`. Env: `CC_OCTO_MEMORY_BASE`.
+   * DERIVED (not user-configurable): SDK auto-memory base for THIS bot,
+   * `<baseDir>/<botId>/memory`. Each session gets a hashed subdir under it (same
+   * partitioning as the cwd sandbox: group=shared per channel, DM=private per
+   * peer). Separate from the cwd sandbox so the 7-day cwd TTL never reclaims
+   * memory. Populated by `resolveBotConfigs()`.
    */
   memoryBase?: string;
   /**
@@ -157,34 +182,37 @@ export interface Config {
 }
 
 /**
- * v0.3 multi-bot: one bot's overrides layered on the base config. Every field is
- * optional except `botToken` (each bot needs its own identity). An omitted field
- * inherits the top-level value.
+ * One bot's entry. In the two-layer model the global config's `bots` array
+ * lists which bots to run (by `id`); each bot's real settings — including its
+ * required `botToken` — live in `<baseDir>/<id>/config.json`, which is merged
+ * OVER both the global shared fields and any inline fields here (per-dir wins).
+ *
+ * Per-bot directories are NOT configurable here: they are always derived as
+ * `<baseDir>/<id>/{data,workspace,memory}` so a bot cannot escape its subtree.
  */
 export interface BotOverride {
   /**
-   * Stable id used to namespace this bot's data dir / sandbox (e.g. `support`,
-   * `ops`). RECOMMENDED — when omitted it defaults to the positional `bot<N>`
-   * (bot0, bot1, …), which works but produces less stable, index-dependent
-   * directory names (reordering the array changes them). Must be a conservative
-   * slug: letters, digits, dot, underscore, hyphen — no path separators.
+   * Stable id — also the bot's subtree name under `baseDir`. Required in the
+   * two-layer model (it selects `<baseDir>/<id>/config.json`). Must be a
+   * conservative slug: letters, digits, dot, underscore, hyphen — no path
+   * separators (it becomes a path segment).
    */
   id?: string;
-  /** Required — this bot's Octo bot token. */
-  botToken: string;
+  /**
+   * Optional here — normally provided by the per-bot `<id>/config.json`. If set
+   * inline it is used unless the per-bot file overrides it.
+   */
+  botToken?: string;
   apiUrl?: string;
-  dataDir?: string;
-  memoryBase?: string;
-  cwdBase?: string;
   model?: string;
   systemPrompt?: string;
   botBlocklist?: string[];
   allowedBotUids?: string[];
   mentionFreeGroups?: string[];
-  /** v1.0: per-bot inbound transport (defaults to the top-level `transport`). */
+  /** v1.0: per-bot inbound transport (defaults to the shared `transport`). */
   transport?: 'websocket' | 'webhook';
   /**
-   * v1.0: per-bot webhook server settings, merged over the top-level `webhook`.
+   * v1.0: per-bot webhook server settings, merged over the shared `webhook`.
    * In multi-bot webhook mode each bot MUST bind a distinct host:port (and may
    * use distinct paths/secrets); resolveBotConfigs() rejects colliding binds.
    */
@@ -199,12 +227,6 @@ export interface BotOverride {
 type PartialConfig = {
   botToken?: string;
   apiUrl?: string;
-  /** Q3: canonical field — base dir for per-session cwd isolation. */
-  cwdBase?: string;
-  /** Q3 deprecated alias — maps to cwdBase with a warning. */
-  cwd?: string;
-  dataDir?: string;
-  memoryBase?: string;
   groupConfigDir?: string;
   transport?: 'websocket' | 'webhook';
   webhook?: Partial<Config['webhook']>;
@@ -222,14 +244,14 @@ function defaults(): Config {
   return {
     botToken: '',
     apiUrl: '',
-    // cwdBase has NO default — it is a required config item. Inferring it from
-    // process.cwd() is dangerous: the agent's sandbox base would silently depend
-    // on the launch directory, so the same config could land sandboxes in
-    // different places (or inside the repo). Left empty here; loadConfig() throws
-    // if neither cwdBase nor the deprecated cwd is explicitly provided.
+    // baseDir is set by loadConfig() from the config path's directory; the
+    // per-bot dirs below are DERIVED in resolveBotConfigs() as
+    // <baseDir>/<botId>/{workspace,data,memory}. Left empty here.
+    baseDir: '',
     cwdBase: '',
     cwd: '',
-    dataDir: './data',
+    dataDir: '',
+    memoryBase: '',
     sdk: {
       // Q2: default to wildcard — operators tighten only when they need to.
       allowedTools: '*',
@@ -284,27 +306,16 @@ function readConfigFile(configFilePath: string): PartialConfig {
 }
 
 function mergeConfig(base: Config, override: PartialConfig): Config {
-  // Q3: accept legacy `cwd` as an alias for `cwdBase`. cwdBase wins if both
-  // are present; otherwise cwd warns and is used. Blank strings are treated as
-  // "not provided" so a `"cwdBase": ""` typo cannot slip past the nullish
-  // fallback and land sandboxes relative to process.cwd().
-  const overrideCwdBase = nonBlank(override.cwdBase);
-  const overrideCwd = nonBlank(override.cwd);
-  let cwdBase = overrideCwdBase ?? base.cwdBase ?? base.cwd;
-  if (overrideCwdBase === undefined && overrideCwd !== undefined) {
-    console.warn(
-      '[cc-channel-octo] WARNING: config.cwd is deprecated, use config.cwdBase instead',
-    );
-    cwdBase = overrideCwd;
-  }
   return {
     botToken: override.botToken ?? base.botToken,
     apiUrl: override.apiUrl ?? base.apiUrl,
-    cwdBase,
-    // Keep deprecated `cwd` in sync so any legacy reader still sees a value.
-    cwd: cwdBase ?? base.cwd,
-    dataDir: override.dataDir ?? base.dataDir,
-    memoryBase: override.memoryBase ?? base.memoryBase,
+    // baseDir + derived dirs are filled by loadConfig()/resolveBotConfigs(),
+    // not by config-file merge.
+    baseDir: base.baseDir,
+    cwdBase: base.cwdBase,
+    cwd: base.cwd,
+    dataDir: base.dataDir,
+    memoryBase: base.memoryBase,
     groupConfigDir: override.groupConfigDir ?? base.groupConfigDir,
     transport: override.transport ?? base.transport,
     webhook: (override.webhook || base.webhook)
@@ -337,13 +348,6 @@ function parseCsv(value: string): string[] {
     .filter((s) => s.length > 0);
 }
 
-/** Return the trimmed value, or undefined when it is missing/blank. */
-function nonBlank(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-}
-
 function parseIntStrict(value: string, name: string, minValue = 1): number {
   if (!/^\d+$/.test(value)) {
     throw new Error(`Invalid integer for ${name}: ${value}`);
@@ -366,22 +370,6 @@ function applyEnv(cfg: Config): Config {
 
   if (env.CC_OCTO_BOT_TOKEN) next.botToken = env.CC_OCTO_BOT_TOKEN;
   if (env.CC_OCTO_API_URL) next.apiUrl = env.CC_OCTO_API_URL;
-  // Q3: CC_OCTO_CWDBASE wins; CC_OCTO_CWD is accepted with a deprecation warning.
-  // Blank/whitespace-only values are ignored (treated as unset).
-  const envCwdBase = nonBlank(env.CC_OCTO_CWDBASE);
-  const envCwd = nonBlank(env.CC_OCTO_CWD);
-  if (envCwdBase) {
-    next.cwdBase = envCwdBase;
-    next.cwd = envCwdBase;
-  } else if (envCwd) {
-    console.warn(
-      '[cc-channel-octo] WARNING: CC_OCTO_CWD is deprecated, use CC_OCTO_CWDBASE instead',
-    );
-    next.cwdBase = envCwd;
-    next.cwd = envCwd;
-  }
-  if (env.CC_OCTO_DATA_DIR) next.dataDir = env.CC_OCTO_DATA_DIR;
-  if (env.CC_OCTO_MEMORY_BASE) next.memoryBase = env.CC_OCTO_MEMORY_BASE;
   if (env.CC_OCTO_GROUP_CONFIG_DIR) next.groupConfigDir = env.CC_OCTO_GROUP_CONFIG_DIR;
   // v1.0 webhook transport env overrides.
   if (env.CC_OCTO_TRANSPORT) {
@@ -486,44 +474,21 @@ function applyEnv(cfg: Config): Config {
  */
 
 export function loadConfig(configPath?: string): Config {
-  const path = configPath ?? './config.json';
+  const path = configPath ?? DEFAULT_CONFIG_PATH;
   const fileCfg = readConfigFile(path);
   const merged = mergeConfig(defaults(), fileCfg);
   const final = applyEnv(merged);
 
-  // v1.1: default the auto-memory base to `<dataDir>/memory` (a stable,
-  // bot-owned dir OUTSIDE cwdBase, so the 7-day cwd TTL never reclaims memory).
-  if (!final.memoryBase) {
-    final.memoryBase = joinPath(final.dataDir, 'memory');
-  }
+  // baseDir = the directory containing the global config.json. Every bot's
+  // subtree lives at <baseDir>/<botId>/…. resolveBotConfigs() derives the
+  // per-bot dirs from this.
+  final.baseDir = dirname(resolvePath(path));
 
-  // v1.1: openclaw-style SOUL.md personality. A `<dataDir>/SOUL.md` file, if
-  // present, becomes the bot's system-prompt "soul" and takes precedence over
-  // the `sdk.systemPrompt` config string. Edit the file to change the voice.
-  const soul = loadSoul(final.dataDir);
-  if (soul) {
-    final.sdk.systemPrompt = soul;
-  }
-
-  const hasBots = Array.isArray(final.bots) && final.bots.length > 0;
-
-  // In multi-bot mode the per-bot tokens live in `bots[]`, so the top-level
-  // botToken is optional; resolveBotConfigs() validates each entry's token.
-  if (!final.botToken && !hasBots) {
-    throw new Error('Missing required config: botToken (set CC_OCTO_BOT_TOKEN or config.json)');
-  }
+  // apiUrl is shared and required at the global layer (a per-bot config.json may
+  // still override it, re-checked per bot in resolveBotConfigs). botToken is NOT
+  // validated here — it lives in each bot's <id>/config.json.
   if (!final.apiUrl) {
     throw new Error('Missing required config: apiUrl (set CC_OCTO_API_URL or config.json)');
-  }
-  // cwdBase is a REQUIRED, explicit config item — never inferred from
-  // process.cwd(). Without it the agent's sandbox base would silently depend on
-  // the launch directory (and could land inside the repo). Accept the deprecated
-  // `cwd` alias, which mergeConfig already folds into cwdBase.
-  if (!final.cwdBase) {
-    throw new Error(
-      'Missing required config: cwdBase (set CC_OCTO_CWDBASE or config.json) — ' +
-      'it must be set explicitly; it is no longer inferred from the current directory',
-    );
   }
   if (!isAllowedApiUrl(final.apiUrl)) {
     throw new Error(
@@ -531,41 +496,12 @@ export function loadConfig(configPath?: string): Config {
     );
   }
   // Q1: the gateway endpoint receives the Anthropic API key and all prompt /
-  // response content, so it gets the same SSRF policy as apiUrl. Without this,
-  // a stray ANTHROPIC_BASE_URL (e.g. inherited from a shared shell profile or
-  // CI env) could silently redirect every model request — and the credential —
-  // to an attacker-controlled or private-network host.
+  // response content, so it gets the same SSRF policy as apiUrl.
   if (final.sdk.anthropicBaseUrl && !isAllowedApiUrl(final.sdk.anthropicBaseUrl)) {
     throw new Error(
       `Unsafe sdk.anthropicBaseUrl: ${final.sdk.anthropicBaseUrl} — must be https:// ` +
       `or http://localhost/http://127.0.0.1 (SSRF protection)`,
     );
-  }
-
-  // v1.0 GROUP.md trust boundary — checked here for the single-bot/top-level
-  // case; resolveBotConfigs() re-checks each bot AFTER applying per-bot cwdBase
-  // overrides (a per-bot cwdBase could otherwise swallow groupConfigDir).
-  assertGroupConfigDirOutsideCwd(final);
-
-  // v1.0 webhook transport: an unauthenticated inbound endpoint would let anyone
-  // inject messages into the agent, so a secret is mandatory in webhook mode.
-  if (final.transport === 'webhook' && !final.webhook?.secret) {
-    throw new Error(
-      'Webhook transport requires webhook.secret (or CC_OCTO_WEBHOOK_SECRET) — ' +
-      'an unauthenticated webhook endpoint would let anyone inject messages.',
-    );
-  }
-  // Validate webhook path/port early so a typo fails at boot, not silently at
-  // runtime (a path without a leading slash never matches; a bad port can't bind).
-  if (final.transport === 'webhook') {
-    const wpath = final.webhook?.path;
-    if (wpath !== undefined && !wpath.startsWith('/')) {
-      throw new Error(`Invalid webhook.path "${wpath}" — must start with "/"`);
-    }
-    const wport = final.webhook?.port;
-    if (wport !== undefined && (!Number.isInteger(wport) || wport < 1 || wport > 65535)) {
-      throw new Error(`Invalid webhook.port ${wport} — must be an integer in 1..65535`);
-    }
   }
 
   return final;
@@ -621,95 +557,135 @@ function isPathInside(child: string, parent: string): boolean {
  *
  * Throws on missing/duplicate bot tokens or duplicate ids (fail fast at boot).
  */
+/**
+ * Expand a loaded GLOBAL config into one concrete Config per bot.
+ *
+ * Two-layer, bot-first model:
+ * - Single-bot (no `bots`): one bot with id `default`. Its token/overrides come
+ *   from the global config and/or `<baseDir>/default/config.json`.
+ * - Multi-bot: one Config per `bots[]` entry (selected by `id`). For each, the
+ *   effective config is: global shared fields ⊕ inline `bots[]` fields ⊕
+ *   `<baseDir>/<id>/config.json` (per-dir file wins).
+ *
+ * Every bot's directories are DERIVED (never configurable):
+ *   data      = <baseDir>/<id>/data
+ *   workspace = <baseDir>/<id>/workspace   (cwdBase)
+ *   memory    = <baseDir>/<id>/memory
+ * and its personality from `<baseDir>/<id>/SOUL.md` (overrides systemPrompt).
+ *
+ * Throws on missing/duplicate tokens, duplicate ids, invalid id slugs, unsafe
+ * apiUrl, or webhook misconfig (fail fast at boot).
+ */
 export function resolveBotConfigs(config: Config): Config[] {
-  const bots = config.bots;
-  if (!bots || bots.length === 0) {
-    return [{ ...config, botId: config.botId ?? 'default' }];
-  }
+  // Single-bot: synthesize one entry with id "default".
+  const entries: BotOverride[] =
+    config.bots && config.bots.length > 0
+      ? config.bots
+      : [{ id: 'default', botToken: config.botToken || undefined }];
 
   const seenIds = new Set<string>();
   const seenTokens = new Set<string>();
-  const resolvedBots = bots.map((bot, i) => {
-    if (!bot.botToken) {
-      throw new Error(`Multi-bot: bots[${i}] is missing required botToken`);
-    }
+  const resolvedBots = entries.map((bot, i) => {
     const id = bot.id ?? `bot${i}`;
-    // The id becomes a path segment for the default dataDir/cwdBase namespace,
-    // so restrict it to a conservative slug — otherwise ids like "../ops" or
-    // "a/b" could escape or alias the intended per-bot directory, defeating the
-    // isolation the feature promises.
+    // The id becomes a path segment for the bot's subtree, so restrict it to a
+    // conservative slug — otherwise ids like "../ops" or "a/b" could escape or
+    // alias the intended directory, defeating isolation.
     if (!/^[a-zA-Z0-9._-]+$/.test(id) || id === '.' || id === '..') {
       throw new Error(
-        `Multi-bot: invalid bot id "${id}" — use only letters, digits, dot, underscore, hyphen (no path separators)`,
+        `Bot "${id}": invalid id — use only letters, digits, dot, underscore, hyphen (no path separators)`,
       );
     }
     if (seenIds.has(id)) {
-      throw new Error(`Multi-bot: duplicate bot id "${id}" — ids must be unique`);
+      throw new Error(`Duplicate bot id "${id}" — ids must be unique`);
     }
     seenIds.add(id);
-    if (seenTokens.has(bot.botToken)) {
-      throw new Error(`Multi-bot: duplicate botToken across bots — each bot needs a distinct token`);
-    }
-    seenTokens.add(bot.botToken);
 
-    // Namespace data dir + cwd base by id so bots are isolated by default.
-    const baseDataDir = config.dataDir;
-    const baseCwd = config.cwdBase ?? config.cwd;
-    const botDataDir = bot.dataDir ?? joinPath(baseDataDir, id);
-    // v1.1: per-bot SOUL.md (in the bot's own dataDir) takes precedence over the
-    // bot's `systemPrompt` config string, which in turn overrides the shared
-    // `config.sdk.systemPrompt`. Mirrors the single-bot precedence in loadConfig.
-    const botSoul = loadSoul(botDataDir);
-    const botSystemPrompt = botSoul ?? bot.systemPrompt;
+    // Derive the bot's self-contained subtree under baseDir.
+    const botRoot = joinPath(config.baseDir, id);
+    const botDataDir = joinPath(botRoot, 'data');
+    const botCwdBase = joinPath(botRoot, 'workspace');
+    const botMemoryBase = joinPath(botRoot, 'memory');
+
+    // Per-bot config.json (in the bot's own subtree) is the highest-priority
+    // layer: global shared ⊕ inline bots[] entry ⊕ <baseDir>/<id>/config.json.
+    const perBotFile = readConfigFile(joinPath(botRoot, 'config.json'));
+    const botToken = perBotFile.botToken ?? bot.botToken ?? '';
+    if (!botToken) {
+      throw new Error(
+        `Bot "${id}": missing botToken — set it in ${joinPath(botRoot, 'config.json')}`,
+      );
+    }
+    if (seenTokens.has(botToken)) {
+      throw new Error(`Duplicate botToken across bots — each bot needs a distinct token`);
+    }
+    seenTokens.add(botToken);
+
+    // openclaw-style SOUL.md in the bot's subtree overrides systemPrompt (which
+    // may come from the per-bot file, the inline entry, or the shared config).
+    const botSoul = loadSoul(botRoot);
+    const sharedSystemPrompt = config.sdk.systemPrompt;
+    const botSystemPrompt =
+      botSoul ?? perBotFile.sdk?.systemPrompt ?? bot.systemPrompt ?? sharedSystemPrompt;
+
+    const apiUrl = perBotFile.apiUrl ?? bot.apiUrl ?? config.apiUrl;
+    const transport = perBotFile.transport ?? bot.transport ?? config.transport;
+    const webhook = (perBotFile.webhook || bot.webhook || config.webhook)
+      ? { ...config.webhook, ...(bot.webhook ?? {}), ...(perBotFile.webhook ?? {}) }
+      : undefined;
+    const model = perBotFile.sdk?.model ?? bot.model ?? config.sdk.model;
+
     const resolved: Config = {
       ...config,
       bots: undefined, // a per-bot config is single-bot
       botId: id,
-      botToken: bot.botToken,
-      apiUrl: bot.apiUrl ?? config.apiUrl,
+      botToken,
+      apiUrl,
+      baseDir: config.baseDir,
       dataDir: botDataDir,
-      // Memory namespaces the TOP-LEVEL memoryBase by bot id (mirroring how
-      // cwdBase/dataDir namespace their bases), so a top-level config/env
-      // `memoryBase` is honored in multi-bot mode. Explicit per-bot override
-      // wins. Falls back to `<dataDir>/memory` when no base is set.
-      memoryBase: bot.memoryBase ?? joinPath(config.memoryBase ?? joinPath(config.dataDir, 'memory'), id),
-      cwdBase: bot.cwdBase ?? joinPath(baseCwd, id),
-      cwd: bot.cwdBase ?? joinPath(baseCwd, id),
-      botBlocklist: bot.botBlocklist ?? config.botBlocklist,
-      allowedBotUids: bot.allowedBotUids ?? config.allowedBotUids,
-      mentionFreeGroups: bot.mentionFreeGroups ?? config.mentionFreeGroups,
-      transport: bot.transport ?? config.transport,
-      webhook: (bot.webhook || config.webhook)
-        ? { ...config.webhook, ...(bot.webhook ?? {}) }
-        : undefined,
+      cwdBase: botCwdBase,
+      cwd: botCwdBase,
+      memoryBase: botMemoryBase,
+      botBlocklist: perBotFile.botBlocklist ?? bot.botBlocklist ?? config.botBlocklist,
+      allowedBotUids: perBotFile.allowedBotUids ?? bot.allowedBotUids ?? config.allowedBotUids,
+      mentionFreeGroups:
+        perBotFile.mentionFreeGroups ?? bot.mentionFreeGroups ?? config.mentionFreeGroups,
+      groupConfigDir: perBotFile.groupConfigDir ?? config.groupConfigDir,
+      transport,
+      webhook,
       sdk: {
         ...config.sdk,
-        ...(bot.model !== undefined ? { model: bot.model } : {}),
+        ...(perBotFile.sdk ?? {}),
+        ...(model !== undefined ? { model } : {}),
         ...(botSystemPrompt !== undefined ? { systemPrompt: botSystemPrompt } : {}),
       },
     };
     if (!isAllowedApiUrl(resolved.apiUrl)) {
-      throw new Error(
-        `Multi-bot: unsafe apiUrl for bot "${id}": ${resolved.apiUrl} (SSRF protection)`,
-      );
+      throw new Error(`Bot "${id}": unsafe apiUrl ${resolved.apiUrl} (SSRF protection)`);
     }
-    // Re-check the GROUP.md trust boundary against THIS bot's resolved cwdBase
-    // (a per-bot cwdBase override could place groupConfigDir inside the bot's
-    // own writable sandbox, which the top-level check in loadConfig can't see).
+    // GROUP.md trust boundary: groupConfigDir must not be the bot's writable cwd.
     assertGroupConfigDirOutsideCwd(resolved);
-    // Webhook mode needs a secret per bot (same rule as single-bot loadConfig).
-    if (resolved.transport === 'webhook' && !resolved.webhook?.secret) {
-      throw new Error(
-        `Multi-bot: bot "${id}" uses webhook transport but has no webhook.secret`,
-      );
+    // Webhook mode needs a secret + valid path/port per bot.
+    if (resolved.transport === 'webhook') {
+      if (!resolved.webhook?.secret) {
+        throw new Error(
+          `Bot "${id}": webhook transport requires webhook.secret — an unauthenticated ` +
+          `endpoint would let anyone inject messages.`,
+        );
+      }
+      const wpath = resolved.webhook?.path;
+      if (wpath !== undefined && !wpath.startsWith('/')) {
+        throw new Error(`Bot "${id}": invalid webhook.path "${wpath}" — must start with "/"`);
+      }
+      const wport = resolved.webhook?.port;
+      if (wport !== undefined && (!Number.isInteger(wport) || wport < 1 || wport > 65535)) {
+        throw new Error(`Bot "${id}": invalid webhook.port ${wport} — must be an integer in 1..65535`);
+      }
     }
     return resolved;
   });
 
   // Multi-bot webhook: each bot runs its own HTTP server, so the OS bind
-  // identity is host:port (NOT host:port:path — two servers can't share a port
-  // even with different paths). Require a distinct host:port per webhook bot and
-  // fail fast here instead of hitting EADDRINUSE at runtime.
+  // identity is host:port. Require a distinct host:port per webhook bot.
   const seenBinds = new Map<string, string>();
   for (const c of resolvedBots) {
     if (c.transport !== 'webhook') continue;
@@ -719,7 +695,7 @@ export function resolveBotConfigs(config: Config): Config[] {
     const prev = seenBinds.get(bind);
     if (prev) {
       throw new Error(
-        `Multi-bot: bots "${prev}" and "${c.botId}" both bind webhook ${bind}. ` +
+        `Bots "${prev}" and "${c.botId}" both bind webhook ${bind}. ` +
         `Each webhook bot needs a distinct host:port (a separate path is not enough — ` +
         `one HTTP server per bot binds the whole port).`,
       );
@@ -736,15 +712,15 @@ function joinPath(a: string, b: string): string {
 }
 
 /**
- * v1.1: openclaw-style per-bot personality. Read `<dataDir>/SOUL.md` if it
+ * v1.1: openclaw-style per-bot personality. Read `<botRoot>/SOUL.md` if it
  * exists and return its trimmed contents as the bot's "soul" (voice/stance/
  * boundaries), to be composed into the agent system prompt. Mirrors openclaw's
  * SOUL.md: a file you edit, not a config string. When the file is absent or
  * empty, returns undefined so the caller falls back to the `systemPrompt`
  * config string. Best-effort — a read error never blocks startup.
  */
-export function loadSoul(dataDir: string): string | undefined {
-  const path = joinPath(dataDir, 'SOUL.md');
+export function loadSoul(botRoot: string): string | undefined {
+  const path = joinPath(botRoot, 'SOUL.md');
   if (!existsSync(path)) return undefined;
   try {
     const content = readFileSync(path, 'utf-8').trim();

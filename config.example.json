@@ -1,23 +1,22 @@
 {
-  "_comment": "Default: allowedTools='*' (SDK full set) + bypassPermissions (headless automation). IMPORTANT: cwdBase is the parent dir for per-session sandboxes — each (DM peer | group | thread) gets its own hashed subdirectory under it. Do NOT point cwdBase at a directory containing config.json, tokens, or other secrets.",
-  "_comment_safe_mode": "Optional safe downgrade: set allowedTools to ['Read', 'Glob', 'Grep'] to restrict to read-only operations. Use '*' to allow every tool the SDK exposes.",
-  "botToken": "bf_YOUR_BOT_TOKEN",
+  "_comment": "GLOBAL config — install at ~/.cc-channel-octo/config.json. Holds SHARED defaults + the list of bots to run. It does NOT hold a botToken: each bot's token lives in ~/.cc-channel-octo/<id>/config.json (see config.bot.example.json). The directory containing THIS file is the baseDir; every bot is a self-contained subtree at <baseDir>/<id>/{config.json, SOUL.md, data/, workspace/, memory/}, all auto-created. Per-bot dirs are NOT configurable — they are always derived from baseDir + id, so a bot can never escape its subtree.",
   "apiUrl": "https://your-octo-instance.com",
-  "_comment_cwd_base": "REQUIRED: base directory for per-session cwd isolation — must be set explicitly (it is NOT inferred from the current working directory). Each session gets a 16-hex SHA-256 subdirectory under this path; subdirs idle for >7d are auto-cleaned every 6h. Env override: CC_OCTO_CWDBASE (legacy CC_OCTO_CWD still accepted with a deprecation warning).",
-  "cwdBase": "/path/to/isolated/sandbox-root",
-  "dataDir": "./data",
-  "_comment_group_config_dir": "v1.0: optional directory of per-group instruction files (<groupId>.md). A matching file's contents are injected into that group's system prompt as trusted custom instructions. Operator-controlled — keep it OUTSIDE cwdBase (the agent can write there) AND make it non-writable by the gateway user (OS perms). Env override: CC_OCTO_GROUP_CONFIG_DIR. Omit to disable.",
-  "_comment_transport": "v1.0: inbound transport. 'websocket' (default) holds the WuKongIM long connection. 'webhook' instead runs an HTTP server (see webhook block) fed by Octo message POSTs. Env override: CC_OCTO_TRANSPORT.",
-  "_comment_webhook": "v1.0: webhook-mode HTTP server. secret is REQUIRED when transport='webhook' (header x-webhook-secret or ?secret=, constant-time compared). host defaults to 127.0.0.1 (put a reverse proxy in front). Env: CC_OCTO_WEBHOOK_HOST/_PORT/_PATH/_SECRET. Example: \"transport\": \"webhook\", \"webhook\": { \"port\": 8787, \"secret\": \"<random>\" }",
+
+  "_comment_bots": "Which bots to run. Each entry's `id` selects its subtree <baseDir>/<id>/ and its per-bot config.json. A single bot is just one entry, conventionally id 'default'. Per-bot config.json overrides anything here (and these shared fields). You MAY put shared inline overrides on an entry (model, transport, etc.), but the token belongs in the per-bot file.",
+  "bots": [
+    { "id": "default" }
+  ],
+
+  "_comment_group_config_dir": "v1.0: optional directory of per-group instruction files (<groupId>.md), injected as trusted custom instructions. Operator-controlled — keep it OUTSIDE every bot's workspace (the agent can write there) AND non-writable by the gateway user. Env override: CC_OCTO_GROUP_CONFIG_DIR. Omit to disable.",
 
   "sdk": {
-    "_comment_anthropic_base_url": "Q1: Optional self-hosted Claude API gateway base URL. Forwarded to the SDK subprocess (scoped, not via global process.env). Must be https:// (or http://localhost for dev) — it is SSRF-validated at boot like apiUrl. To enable, add a real \"anthropicBaseUrl\": \"https://your-gateway.example.com\" key here, or set the ANTHROPIC_BASE_URL env var (highest priority, Anthropic SDK standard name, no CC_OCTO_ prefix). Leave it out entirely to use Anthropic's public endpoint.",
-    "_comment_allowed_tools": "Q2: either '*' (allow every tool the SDK exposes) or an explicit string[] whitelist, e.g. ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebFetch', 'WebSearch']. Env override CC_OCTO_SDK_ALLOWED_TOOLS accepts the same two shapes (a value containing '*' means wildcard; otherwise CSV).",
+    "_comment_anthropic_base_url": "Q1: Optional self-hosted Claude API gateway base URL. Forwarded to the SDK subprocess (scoped). Must be https:// (or http://localhost for dev) — SSRF-validated at boot. Or set ANTHROPIC_BASE_URL env (highest priority).",
+    "_comment_allowed_tools": "Q2: either '*' (allow every tool the SDK exposes) or an explicit string[] whitelist. Env override CC_OCTO_SDK_ALLOWED_TOOLS accepts the same two shapes.",
     "allowedTools": "*",
     "permissionMode": "bypassPermissions",
-    "_comment_tool_progress": "v0.3: set toolProgress=true to post '🔧 Running <tool>…' notices as the agent invokes tools (deduped, capped per turn). Env override: CC_OCTO_SDK_TOOL_PROGRESS=true. Off by default.",
-    "_comment_persistent_session": "v0.3: set persistentSession=true to keep agent workspace state across messages via the SDK v2 Session API (resumes the prior session each turn; /reset clears it). Env override: CC_OCTO_SDK_PERSISTENT_SESSION=true. Off by default.",
-    "_comment_setting_sources": "v1.1: which host filesystem settings the SDK loads (user=~/.claude, project=.claude, local=.claude/*.local). Default is [] (SDK isolation mode) so the bot NEVER reads or writes the operator's real ~/.claude config — important because the agent could otherwise write 'remembered' facts into your global CLAUDE.md instead of its scoped auto-memory dir. Set [\"user\"] only as an explicit opt-in if you deliberately want host config loaded.",
+    "_comment_tool_progress": "v0.3: set toolProgress=true to post '🔧 Running <tool>…' notices. Env: CC_OCTO_SDK_TOOL_PROGRESS=true. Off by default.",
+    "_comment_persistent_session": "v0.3: set persistentSession=true to keep agent workspace state across messages via the SDK v2 Session API. Env: CC_OCTO_SDK_PERSISTENT_SESSION=true. Off by default.",
+    "_comment_setting_sources": "v1.1: which host filesystem settings the SDK loads (user=~/.claude, project=.claude, local=.claude/*.local). Default [] (SDK isolation) so the bot NEVER reads/writes the operator's real ~/.claude — the agent could otherwise write 'remembered' facts into your global CLAUDE.md instead of its scoped auto-memory dir. Set [\"user\"] only as an explicit opt-in.",
     "settingSources": []
   },
 
@@ -30,10 +29,6 @@
     "historyLimit": 40
   },
 
-  "botBlocklist": [],
-
-  "_comment_multi_bot": "v0.3 multi-bot: to run several bots in one process, add a top-level \"bots\" array instead of (or alongside) the single botToken above. Each entry needs its own botToken and an id; it inherits all top-level fields and may override apiUrl/dataDir/cwdBase/model/systemPrompt/botBlocklist/etc. By default each bot's dataDir and cwdBase are namespaced by id so bots never share history or sandboxes. Example: \"bots\": [{ \"id\": \"support\", \"botToken\": \"bf_AAA\" }, { \"id\": \"ops\", \"botToken\": \"bf_BBB\", \"model\": \"claude-opus-4-8\" }]",
-
-  "_comment_mention_free": "G12: group_ids listed here process every text message without requiring an @bot mention. Use group channel IDs as strings. Env override: CC_OCTO_MENTION_FREE_GROUPS (csv).",
+  "_comment_mention_free": "G12: group_ids listed here process every text message without requiring an @bot mention. Env override: CC_OCTO_MENTION_FREE_GROUPS (csv).",
   "mentionFreeGroups": []
 }
