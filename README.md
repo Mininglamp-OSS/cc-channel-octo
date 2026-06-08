@@ -130,6 +130,7 @@ token + overrides). Per-bot fields win; env vars override the shared layer.
 | `sdk.settingSources` | `CC_OCTO_SDK_SETTING_SOURCES` | `[]` *(isolation)* | Host filesystem settings the SDK loads (`user,project,local`). Default `[]` — the bot does **not** read or write the operator's real `~/.claude` config. Set `user` only as an explicit opt-in. |
 | `sdk.toolProgress` | `CC_OCTO_SDK_TOOL_PROGRESS` | `false` | When true, post `🔧 Running <tool>…` notices as the agent invokes tools (deduped, capped per turn) |
 | `sdk.persistentSession` | `CC_OCTO_SDK_PERSISTENT_SESSION` | `false` | When true, persist agent workspace state across messages via the SDK v2 Session API (resume by stored session id). `/reset` clears it. |
+| `sdk.octoCli` | `CC_OCTO_SDK_OCTO_CLI` | `false` | When true, let the agent operate Octo (groups, members, messages, threads, files — read + write) by shelling out to the external [`octo-cli`](https://github.com/Mininglamp-OSS/octo-cli) binary via Bash. Requires `octo-cli` on PATH (`npm i -g @mininglamp-oss/octo-cli`). See [Octo CLI integration](#octo-cli-integration). |
 | `groupConfigDir` | `CC_OCTO_GROUP_CONFIG_DIR` | *(unset)* | Directory of per-group instruction files (`<groupId>.md`). A match is injected into the system prompt as trusted custom instructions for that group. See [Per-group instructions](#per-group-instructions). |
 | `sdk.anthropicBaseUrl` | `ANTHROPIC_BASE_URL` | *(unset)* | Override the upstream Claude API endpoint. See [Self-hosted gateway](#self-hosted-gateway) below. |
 | `rateLimit.maxPerMinute` | `CC_OCTO_RATE_LIMIT_MAX_PER_MINUTE` | `5` | Max requests per minute per session |
@@ -204,6 +205,40 @@ CC_OCTO_GROUP_CONFIG_DIR=/home/deploy/cc-octo-groups npm start
 > As defense-in-depth the gateway refuses to inject a group/world-writable file,
 > but that is a backstop, not the guarantee. Files larger than 16 KiB are
 > truncated; an unsafe group id (path separators, `..`) is ignored.
+
+### Octo CLI integration
+
+With `sdk.octoCli` enabled (`CC_OCTO_SDK_OCTO_CLI=true`), the agent can operate
+the Octo platform — list/get groups, list/search members, send/edit/sync
+messages, manage threads, upload/download files — by shelling out to the
+external [`octo-cli`](https://github.com/Mininglamp-OSS/octo-cli) binary through
+the built-in **Bash** tool. This is the full read + write surface; what a given
+bot may actually do is authorized **server-side** by its token kind (`bf_*` User
+Bots can write; `app_*` App Bots are DM-only).
+
+This replaces the earlier in-process MCP tool server (#87) — instead of
+re-implementing Octo operations as SDK tools, cc reuses octo-cli's 47 operations
+and JSON-envelope output directly.
+
+**Prerequisite:** `octo-cli` must be on the gateway's `PATH`:
+
+```bash
+npm install -g @mininglamp-oss/octo-cli
+```
+
+**Token safety.** The raw bot token **never reaches the model**. On startup cc
+seeds an encrypted, machine-bound octo-cli credential profile
+(`octo-cli auth login --bot-id <robotId> --with-token`, token piped via stdin —
+never argv, never a log line). At runtime the agent selects its identity by the
+**non-secret robot id** (exported as `OCTO_BOT_ID`); octo-cli masks the token in
+all its output. The agent is told (via a system-prompt guide) that auth is
+already handled and it should just run commands. `OCTO_API_BASE_URL` is exported
+too, so the agent never needs the endpoint either.
+
+The guide is delivered as trusted system-prompt text (not a filesystem skill),
+which keeps the default `settingSources: []` isolation — and therefore
+auto-memory containment — intact. The agent can pull deeper per-domain docs on
+demand with `octo-cli skills <name>`.
 
 ### Multi-bot
 

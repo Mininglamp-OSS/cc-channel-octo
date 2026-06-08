@@ -131,12 +131,17 @@ export interface Config {
      */
     toolProgress?: boolean;
     /**
-     * #87: when true, expose the read-only Octo management tool server to the
-     * agent (list_groups, group_info, group_members, search_members) so the
-     * model can answer questions about the bot's groups/members. Default false
-     * (opt-in — it widens the agent's reach). Env: `CC_OCTO_SDK_OCTO_TOOLS=true`.
+     * #94: when true, enable the external `octo-cli` integration — the agent
+     * shells out to the `octo-cli` binary (via the built-in Bash tool) to run
+     * Octo operations (groups, members, messages, threads, files; read + write).
+     * Enabling this (a) injects a trusted octo-cli usage guide into the system
+     * prompt, (b) sets `OCTO_API_BASE_URL` / `OCTO_BOT_ID` in the agent
+     * subprocess env, and (c) auto-seeds an encrypted octo-cli profile at
+     * startup so the raw token never reaches the model. Default false (opt-in —
+     * it widens the agent's reach and requires `octo-cli` on PATH). Env:
+     * `CC_OCTO_SDK_OCTO_CLI=true`. Replaces the removed in-process MCP (#87).
      */
-    octoTools?: boolean;
+    octoCli?: boolean;
     /**
      * v0.3: when true, use the SDK's v2 Session API to persist agent workspace
      * state across messages — each session's SDK session id is stored and
@@ -442,9 +447,9 @@ function applyEnv(cfg: Config): Config {
   if (env.CC_OCTO_SDK_TOOL_PROGRESS !== undefined) {
     next.sdk.toolProgress = /^(1|true|yes|on)$/i.test(env.CC_OCTO_SDK_TOOL_PROGRESS.trim());
   }
-  // #87: read-only Octo management tool server (opt-in).
-  if (env.CC_OCTO_SDK_OCTO_TOOLS !== undefined) {
-    next.sdk.octoTools = /^(1|true|yes|on)$/i.test(env.CC_OCTO_SDK_OCTO_TOOLS.trim());
+  // #94: external octo-cli integration (opt-in).
+  if (env.CC_OCTO_SDK_OCTO_CLI !== undefined) {
+    next.sdk.octoCli = /^(1|true|yes|on)$/i.test(env.CC_OCTO_SDK_OCTO_CLI.trim());
   }
   // v0.3: persistent (v2) sessions.
   if (env.CC_OCTO_SDK_PERSISTENT_SESSION !== undefined) {
