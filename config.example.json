@@ -3,7 +3,7 @@
   "_comment_safe_mode": "Optional safe downgrade: set allowedTools to ['Read', 'Glob', 'Grep'] to restrict to read-only operations. Use '*' to allow every tool the SDK exposes.",
   "botToken": "bf_YOUR_BOT_TOKEN",
   "apiUrl": "https://your-octo-instance.com",
-  "_comment_cwd_base": "Q3: base directory for per-session cwd isolation. Each session gets a 16-hex SHA-256 subdirectory under this path; subdirs idle for >7d are auto-cleaned every 6h. Env override: CC_OCTO_CWDBASE (legacy CC_OCTO_CWD still accepted with a deprecation warning).",
+  "_comment_cwd_base": "REQUIRED: base directory for per-session cwd isolation — must be set explicitly (it is NOT inferred from the current working directory). Each session gets a 16-hex SHA-256 subdirectory under this path; subdirs idle for >7d are auto-cleaned every 6h. Env override: CC_OCTO_CWDBASE (legacy CC_OCTO_CWD still accepted with a deprecation warning).",
   "cwdBase": "/path/to/isolated/sandbox-root",
   "dataDir": "./data",
   "_comment_group_config_dir": "v1.0: optional directory of per-group instruction files (<groupId>.md). A matching file's contents are injected into that group's system prompt as trusted custom instructions. Operator-controlled — keep it OUTSIDE cwdBase (the agent can write there) AND make it non-writable by the gateway user (OS perms). Env override: CC_OCTO_GROUP_CONFIG_DIR. Omit to disable.",
@@ -17,7 +17,8 @@
     "permissionMode": "bypassPermissions",
     "_comment_tool_progress": "v0.3: set toolProgress=true to post '🔧 Running <tool>…' notices as the agent invokes tools (deduped, capped per turn). Env override: CC_OCTO_SDK_TOOL_PROGRESS=true. Off by default.",
     "_comment_persistent_session": "v0.3: set persistentSession=true to keep agent workspace state across messages via the SDK v2 Session API (resumes the prior session each turn; /reset clears it). Env override: CC_OCTO_SDK_PERSISTENT_SESSION=true. Off by default.",
-    "settingSources": ["user"]
+    "_comment_setting_sources": "v1.1: which host filesystem settings the SDK loads (user=~/.claude, project=.claude, local=.claude/*.local). Default is [] (SDK isolation mode) so the bot NEVER reads or writes the operator's real ~/.claude config — important because the agent could otherwise write 'remembered' facts into your global CLAUDE.md instead of its scoped auto-memory dir. Set [\"user\"] only as an explicit opt-in if you deliberately want host config loaded.",
+    "settingSources": []
   },
 
   "rateLimit": {

@@ -89,14 +89,14 @@ Three-level priority: **environment variables** > **config.json** > **defaults**
 |-------|---------|---------|-------------|
 | `botToken` | `CC_OCTO_BOT_TOKEN` | *(required)* | Octo bot token (`bf_*`) |
 | `apiUrl` | `CC_OCTO_API_URL` | *(required)* | Octo API base URL |
-| `cwdBase` | `CC_OCTO_CWDBASE` | `process.cwd()` | Base directory for per-session sandboxes. Each session (DM peer, or individual group member) gets its own SHA-256 hex subdirectory under it, matching how conversation history is partitioned; subdirs idle >7d are auto-cleaned every 6h. Legacy `cwd` / `CC_OCTO_CWD` still accepted with a deprecation warning. |
+| `cwdBase` | `CC_OCTO_CWDBASE` | *(required)* | Base directory for per-session sandboxes — **must be set explicitly** (not inferred from the current directory). Each session gets its own SHA-256 hex subdirectory under it, matching how conversation history is partitioned — **per DM peer**, and **per group channel** (a whole group shares one sandbox). Subdirs idle >7d are auto-cleaned every 6h. Legacy `cwd` / `CC_OCTO_CWD` still accepted with a deprecation warning. |
 | `dataDir` | `CC_OCTO_DATA_DIR` | `./data` | SQLite database directory (created with `0700` permissions) |
 | `sdk.model` | `CC_OCTO_SDK_MODEL` | *(SDK default)* | Claude model override |
 | `sdk.allowedTools` | `CC_OCTO_SDK_ALLOWED_TOOLS` | `"*"` | Either `"*"` (allow every tool the SDK exposes) or an explicit string array whitelist. Env accepts a value containing `*` (wildcard) or a CSV list. |
 | `sdk.permissionMode` | `CC_OCTO_SDK_PERMISSION_MODE` | `bypassPermissions` | SDK permission mode |
 | `sdk.maxTurns` | `CC_OCTO_SDK_MAX_TURNS` | *(SDK default)* | Max agentic turns per query |
 | `sdk.systemPrompt` | `CC_OCTO_SDK_SYSTEM_PROMPT` | *(built-in)* | Custom system prompt |
-| `sdk.settingSources` | `CC_OCTO_SDK_SETTING_SOURCES` | `user` | Comma-separated setting sources (e.g. `user,project`) |
+| `sdk.settingSources` | `CC_OCTO_SDK_SETTING_SOURCES` | `[]` *(isolation)* | Host filesystem settings the SDK loads (`user,project,local`). Default `[]` — the bot does **not** read or write the operator's real `~/.claude` config. Set `user` only as an explicit opt-in. |
 | `sdk.toolProgress` | `CC_OCTO_SDK_TOOL_PROGRESS` | `false` | When true, post `🔧 Running <tool>…` notices as the agent invokes tools (deduped, capped per turn) |
 | `sdk.persistentSession` | `CC_OCTO_SDK_PERSISTENT_SESSION` | `false` | When true, persist agent workspace state across messages via the SDK v2 Session API (resume by stored session id). `/reset` clears it. |
 | `groupConfigDir` | `CC_OCTO_GROUP_CONFIG_DIR` | *(unset)* | Directory of per-group instruction files (`<groupId>.md`). A match is injected into the system prompt as trusted custom instructions for that group. See [Per-group instructions](#per-group-instructions). |
@@ -252,11 +252,12 @@ the list to reduce risk:
 
 **`cwdBase` is the parent directory under which each session gets its own
 hashed sandbox.** A 16-hex SHA-256 subdirectory is derived from the same
-per-session key used for conversation history, so isolation is **per user** —
-including inside groups, where each member's sessionKey embeds their uid. One
-user's Claude Code session cannot read or mutate another's working tree.
-Subdirectories idle for more than 7 days (measured from the last inbound
-message) are cleaned up automatically every 6 hours.
+per-session key used for conversation history, so isolation matches the session
+granularity: **per DM peer**, and **per group channel** — a whole group shares
+one sandbox (all members work in the same tree, by design; a group is a shared
+workspace). Different DM peers, and different groups, cannot read or mutate each
+other's working trees. Subdirectories idle for more than 7 days (measured from
+the last inbound message) are cleaned up automatically every 6 hours.
 
 **Limitation — cwd is a starting directory, not a chroot.** With `Bash`/`Read`
 in the tool set and `bypassPermissions`, the agent can still be instructed to
@@ -377,7 +378,9 @@ src/
 
 ## Known Limitations (v0.2)
 
-- **Per-session `cwdBase` isolation** — Each session (DM peer, or individual group member) gets its own SHA-256 hex sandbox under `cwdBase`, partitioned by the same key as conversation history; idle sandboxes (>7d) are auto-cleaned every 6h. Note: `cwdBase` separates sessions from each other but does not confine a session to its directory (absolute-path reads via Bash/Read remain possible) — see the Security Model section.
+- **Per-session `cwdBase` isolation** — Each session gets its own SHA-256 hex sandbox under `cwdBase`, partitioned by the same key as conversation history — **per DM peer** and **per group channel** (a whole group shares one sandbox by design). Idle sandboxes (>7d) are auto-cleaned every 6h. Note: `cwdBase` separates sessions from each other but does not confine a session to its directory (absolute-path reads via Bash/Read remain possible) — see the Security Model section.
+- **Groups are a shared workspace** — All members of a group share one history, one sandbox, and one auto-memory store (the session key is the channel id). There is **no member-to-member isolation within a group**; DM sessions remain private per peer.
+- **Auto-memory is not TTL-reclaimed** — Long-term memory lives under `memoryBase` (default `<dataDir>/memory`, outside `cwdBase`) and is never swept by the cwd janitor, so it persists across `/reset` and grows unbounded on long-lived deploys.
 - **Stateless sessions by default** — Uses the v1 `query()` API; workspace state (open files, command history) does not persist across messages. Enable `sdk.persistentSession` to use the SDK v2 Session API, which resumes the prior agent session each turn so that state carries over.
 
 ## Roadmap

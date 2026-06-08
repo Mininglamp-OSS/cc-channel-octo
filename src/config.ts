@@ -222,8 +222,13 @@ function defaults(): Config {
   return {
     botToken: '',
     apiUrl: '',
-    cwdBase: process.cwd(),
-    cwd: process.cwd(),
+    // cwdBase has NO default — it is a required config item. Inferring it from
+    // process.cwd() is dangerous: the agent's sandbox base would silently depend
+    // on the launch directory, so the same config could land sandboxes in
+    // different places (or inside the repo). Left empty here; loadConfig() throws
+    // if neither cwdBase nor the deprecated cwd is explicitly provided.
+    cwdBase: '',
+    cwd: '',
     dataDir: './data',
     sdk: {
       // Q2: default to wildcard — operators tighten only when they need to.
@@ -510,6 +515,16 @@ export function loadConfig(configPath?: string): Config {
   if (!final.apiUrl) {
     throw new Error('Missing required config: apiUrl (set CC_OCTO_API_URL or config.json)');
   }
+  // cwdBase is a REQUIRED, explicit config item — never inferred from
+  // process.cwd(). Without it the agent's sandbox base would silently depend on
+  // the launch directory (and could land inside the repo). Accept the deprecated
+  // `cwd` alias, which mergeConfig already folds into cwdBase.
+  if (!final.cwdBase) {
+    throw new Error(
+      'Missing required config: cwdBase (set CC_OCTO_CWDBASE or config.json) — ' +
+      'it must be set explicitly; it is no longer inferred from the current directory',
+    );
+  }
   if (!isAllowedApiUrl(final.apiUrl)) {
     throw new Error(
       `Unsafe apiUrl: ${final.apiUrl} — must be https:// or http://localhost/http://127.0.0.1 (SSRF protection)`,
@@ -653,10 +668,11 @@ export function resolveBotConfigs(config: Config): Config[] {
       botToken: bot.botToken,
       apiUrl: bot.apiUrl ?? config.apiUrl,
       dataDir: botDataDir,
-      // Memory tracks the per-bot dataDir (default `<dataDir>/memory`) so each
-      // bot's auto-memory is isolated, mirroring history/cwd. Explicit override
-      // wins. Computed from the already-namespaced dataDir to avoid double-id.
-      memoryBase: bot.memoryBase ?? joinPath(botDataDir, 'memory'),
+      // Memory namespaces the TOP-LEVEL memoryBase by bot id (mirroring how
+      // cwdBase/dataDir namespace their bases), so a top-level config/env
+      // `memoryBase` is honored in multi-bot mode. Explicit per-bot override
+      // wins. Falls back to `<dataDir>/memory` when no base is set.
+      memoryBase: bot.memoryBase ?? joinPath(config.memoryBase ?? joinPath(config.dataDir, 'memory'), id),
       cwdBase: bot.cwdBase ?? joinPath(baseCwd, id),
       cwd: bot.cwdBase ?? joinPath(baseCwd, id),
       botBlocklist: bot.botBlocklist ?? config.botBlocklist,

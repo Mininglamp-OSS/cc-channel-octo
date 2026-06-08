@@ -18,7 +18,7 @@ describe("apiUrl SSRF protection (Q34)", () => {
     const cfgPath = join(dir, "config.json");
     writeFileSync(
       cfgPath,
-      JSON.stringify({ botToken: "bf_test", apiUrl: "https://safe.example.com", ...overrides }),
+      JSON.stringify({ botToken: "bf_test", apiUrl: "https://safe.example.com", cwdBase: "/test/cwdbase", ...overrides }),
     );
     return cfgPath;
   }

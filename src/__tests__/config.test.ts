@@ -32,6 +32,7 @@ const CC_VARS = [
   'CC_OCTO_GROUP_CONFIG_DIR',
   'CC_OCTO_TRANSPORT', 'CC_OCTO_WEBHOOK_HOST', 'CC_OCTO_WEBHOOK_PORT',
   'CC_OCTO_WEBHOOK_PATH', 'CC_OCTO_WEBHOOK_SECRET',
+  'CC_OCTO_MEMORY_BASE',
 ];
 
 function setup() {
@@ -53,9 +54,20 @@ function teardown() {
   rmSync(tmpDir, { recursive: true, force: true });
 }
 
+// cwdBase is a required config item (no process.cwd() inference). Inject a
+// default for fixtures that don't care about it, so each test doesn't have to
+// repeat it. Tests that exercise cwdBase/cwd behavior set their own value (or
+// pass `_omitCwdBase: true` to test the missing-required-field path), which
+// suppresses the injection.
 function writeConfig(obj: Record<string, unknown>, filename = 'config.json'): string {
   const path = join(tmpDir, filename);
-  writeFileSync(path, JSON.stringify(obj));
+  const omit = obj._omitCwdBase === true;
+  const out: Record<string, unknown> = { ...obj };
+  delete out._omitCwdBase;
+  if (!omit && out.cwdBase === undefined && out.cwd === undefined) {
+    out.cwdBase = '/test/cwdbase';
+  }
+  writeFileSync(path, JSON.stringify(out));
   return path;
 }
 
@@ -71,7 +83,9 @@ describe('loadConfig defaults', () => {
 
     expect(cfg.botToken).toBe('bf_test');
     expect(cfg.apiUrl).toBe('https://api.test');
-    expect(cfg.cwdBase).toBe(process.cwd()); // Q3: cwdBase replaces cwd
+    // cwdBase is required and explicit (injected by writeConfig here); it is no
+    // longer inferred from process.cwd().
+    expect(cfg.cwdBase).toBe('/test/cwdbase');
     expect(cfg.dataDir).toBe('./data');
     // Q2: default is the wildcard sentinel — no whitelist applied at the SDK layer.
     expect(cfg.sdk.allowedTools).toBe('*');
@@ -120,6 +134,7 @@ describe('three-level priority: env > file > defaults', () => {
     process.env.CC_OCTO_BOT_TOKEN = 'bf_env';
     process.env.CC_OCTO_API_URL = 'https://env.test';
     process.env.CC_OCTO_DATA_DIR = '/env-data';
+    process.env.CC_OCTO_CWDBASE = '/env-cwdbase'; // required
     const cfg = loadConfig(join(tmpDir, 'nonexistent.json'));
     expect(cfg.botToken).toBe('bf_env');
     expect(cfg.apiUrl).toBe('https://env.test');
@@ -146,6 +161,16 @@ describe('required field validation', () => {
   it('throws when both are missing', () => {
     const path = writeConfig({});
     expect(() => loadConfig(path)).toThrow(/botToken/);
+  });
+
+  it('throws when cwdBase is missing (required, not inferred from process.cwd)', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://api.test', _omitCwdBase: true });
+    expect(() => loadConfig(path)).toThrow(/Missing required config: cwdBase/);
+  });
+
+  it('accepts the deprecated cwd alias as satisfying the cwdBase requirement', () => {
+    const path = writeConfig({ botToken: 'bf_t', apiUrl: 'https://api.test', cwd: '/legacy/base' });
+    expect(loadConfig(path).cwdBase).toBe('/legacy/base');
   });
 });
 
@@ -191,6 +216,7 @@ describe('CC_OCTO_* env override coverage', () => {
   it('CC_OCTO_BOT_TOKEN + CC_OCTO_API_URL', () => {
     process.env.CC_OCTO_BOT_TOKEN = 'bf_env_tok';
     process.env.CC_OCTO_API_URL = 'https://env-api';
+    process.env.CC_OCTO_CWDBASE = '/env-cwdbase'; // required
     const cfg = loadConfig(join(tmpDir, 'nope.json'));
     expect(cfg.botToken).toBe('bf_env_tok');
     expect(cfg.apiUrl).toBe('https://env-api');
@@ -378,6 +404,7 @@ describe('missing config file', () => {
   it('falls back to defaults + env when config file does not exist', () => {
     process.env.CC_OCTO_BOT_TOKEN = 'bf_env';
     process.env.CC_OCTO_API_URL = 'https://env-api';
+    process.env.CC_OCTO_CWDBASE = '/env-cwdbase'; // required
     const cfg = loadConfig(join(tmpDir, 'missing.json'));
     expect(cfg.botToken).toBe('bf_env');
     expect(cfg.sdk.permissionMode).toBe('bypassPermissions'); // default
@@ -394,11 +421,13 @@ describe('Config file permission warning (Q12)', () => {
     // Minimal env to pass required field validation
     process.env.CC_OCTO_BOT_TOKEN = 'test-token';
     process.env.CC_OCTO_API_URL = 'https://test-api';
+    process.env.CC_OCTO_CWDBASE = '/test/cwdbase'; // required
   });
 
   afterEach(() => {
     delete process.env.CC_OCTO_BOT_TOKEN;
     delete process.env.CC_OCTO_API_URL;
+    delete process.env.CC_OCTO_CWDBASE;
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -593,15 +622,15 @@ describe('Q3: cwdBase + deprecated cwd alias', () => {
     warnSpy.mockRestore();
   });
 
-  it('blank config.cwdBase falls back to the default (not "")', () => {
-    // A `"cwdBase": ""` typo must not slip past the nullish fallback and land
-    // sandboxes relative to process.cwd().
+  it('blank config.cwdBase throws (required, not inferred)', () => {
+    // A `"cwdBase": ""`/whitespace typo must NOT silently fall back to a default;
+    // cwdBase is required, so a blank value is a hard error.
     const path = writeConfig({
       botToken: 'bf_t',
       apiUrl: 'https://a',
       cwdBase: '   ',
     });
-    expect(loadConfig(path).cwdBase).toBe(process.cwd());
+    expect(() => loadConfig(path)).toThrow(/Missing required config: cwdBase/);
   });
 
   it('blank CC_OCTO_CWDBASE env is ignored (treated as unset)', () => {
@@ -1092,17 +1121,28 @@ describe('v1.1: memoryBase (auto-memory root)', () => {
     expect(loadConfig(path).memoryBase).toBe('/env-mem');
   });
 
-  it('per-bot: memoryBase tracks the per-bot dataDir by default', () => {
+  it('per-bot: memoryBase namespaces the top-level memory base by bot id', () => {
     const cfg = loadConfig(writeConfig({
       apiUrl: 'https://a', dataDir: '/data',
       bots: [{ id: 'a', botToken: 'bf_1' }, { id: 'b', botToken: 'bf_2' }],
     }));
     const bots = resolveBotConfigs(cfg);
     expect(bots[0].dataDir).toBe('/data/a');
-    expect(bots[0].memoryBase).toBe('/data/a/memory');
-    expect(bots[1].memoryBase).toBe('/data/b/memory');
+    // Top-level memoryBase defaults to <dataDir>/memory, namespaced by bot id.
+    expect(bots[0].memoryBase).toBe('/data/memory/a');
+    expect(bots[1].memoryBase).toBe('/data/memory/b');
     // distinct per bot
     expect(bots[0].memoryBase).not.toBe(bots[1].memoryBase);
+  });
+
+  it('per-bot: a top-level memoryBase is honored (namespaced by bot id)', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a', dataDir: '/data', memoryBase: '/mem',
+      bots: [{ id: 'a', botToken: 'bf_1' }, { id: 'b', botToken: 'bf_2' }],
+    }));
+    const bots = resolveBotConfigs(cfg);
+    expect(bots[0].memoryBase).toBe('/mem/a');
+    expect(bots[1].memoryBase).toBe('/mem/b');
   });
 
   it('per-bot: explicit memoryBase override wins', () => {
