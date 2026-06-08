@@ -6,7 +6,17 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: mockQuery,
 }));
 
+// Mock the skill linker (#100) so we can assert invocation without touching fs.
+vi.mock('../skill-linker.js', () => ({ linkSkillsIntoSandbox: vi.fn() }));
+
+// Mock cwd-resolver so resolveSessionCwd is deterministic + fs-free.
+vi.mock('../cwd-resolver.js', () => ({
+  resolveSessionCwd: (cwdBase: string, ctx: { kind: string; sessionKey: string }) =>
+    `${cwdBase}/${ctx.kind}-${ctx.sessionKey}`,
+}));
+
 import { queryAgent } from '../agent-bridge.js';
+import { linkSkillsIntoSandbox } from '../skill-linker.js';
 import type { Config } from '../config.js';
 
 function makeConfig(overrides?: Partial<Config>): Config {
@@ -369,77 +379,71 @@ describe('queryAgent', () => {
     expect(mockQuery.mock.calls[0][0].options).not.toHaveProperty('settings');
   });
 
-  // --- #94: external octo-cli integration (env injection + system-prompt guide) ---
+  // --- #100: generic skill loading (project-scope + symlink) ---
 
-  it('injects OCTO_API_BASE_URL + OCTO_BOT_ID into env when octoCli is on', async () => {
+  it('symlinks skill dirs into the sandbox when settingSources includes project', async () => {
     mockQuery.mockReturnValue(createMockStream([
       { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
     ]));
     const config = makeConfig({
-      apiUrl: 'https://octo.example.com/api',
-      sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: [], octoCli: true },
+      cwdBase: '/tmp/cwdbase',
+      skillsDir: '/base/default/skills',
+      globalSkillsDir: '/base/skills',
+      sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: ['project'] },
     });
-    for await (const _ of queryAgent('t', '', '', config, undefined, undefined, { botRobotId: 'cli_x' })) { void _; }
-    const options = mockQuery.mock.calls[0][0].options;
-    expect(options.env.OCTO_API_BASE_URL).toBe('https://octo.example.com/api');
-    expect(options.env.OCTO_BOT_ID).toBe('cli_x');
-    // process.env is preserved (SDK env REPLACES the subprocess env).
-    expect(options.env.PATH).toBe(process.env.PATH);
+    for await (const _ of queryAgent('t', '', '', config, { kind: 'dm', sessionKey: 'u1' })) { void _; }
+    expect(linkSkillsIntoSandbox).toHaveBeenCalledTimes(1);
+    const [sandboxDir, sources] = vi.mocked(linkSkillsIntoSandbox).mock.calls[0];
+    // sandbox is the resolved per-session cwd under cwdBase
+    expect(sandboxDir.startsWith('/tmp/cwdbase/')).toBe(true);
+    // global first, per-bot second (later wins on name collision)
+    expect(sources).toEqual(['/base/skills', '/base/default/skills']);
   });
 
-  it('omits OCTO_BOT_ID when octoCli is on but no robot id is available', async () => {
+  it('does NOT symlink skills when settingSources excludes project', async () => {
     mockQuery.mockReturnValue(createMockStream([
       { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
     ]));
-    const config = makeConfig({ sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: [], octoCli: true } });
+    const config = makeConfig({
+      skillsDir: '/base/default/skills',
+      globalSkillsDir: '/base/skills',
+      sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: [] },
+    });
+    for await (const _ of queryAgent('t', '', '', config, { kind: 'dm', sessionKey: 'u1' })) { void _; }
+    expect(linkSkillsIntoSandbox).not.toHaveBeenCalled();
+  });
+
+  it('does NOT symlink skills when no sessionCtx (no sandbox)', async () => {
+    mockQuery.mockReturnValue(createMockStream([
+      { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
+    ]));
+    const config = makeConfig({
+      skillsDir: '/base/default/skills',
+      sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: ['project'] },
+    });
     for await (const _ of queryAgent('t', '', '', config)) { void _; }
-    const options = mockQuery.mock.calls[0][0].options;
-    expect(options.env.OCTO_API_BASE_URL).toBe('https://test.example.com');
-    expect(options.env).not.toHaveProperty('OCTO_BOT_ID');
+    expect(linkSkillsIntoSandbox).not.toHaveBeenCalled();
   });
 
-  it('sets no OCTO_* env (and may omit env entirely) when octoCli is off', async () => {
-    mockQuery.mockReturnValue(createMockStream([
-      { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
-    ]));
-    for await (const _ of queryAgent('t', '', '', makeConfig(), undefined, undefined, { botRobotId: 'cli_x' })) { void _; }
-    const options = mockQuery.mock.calls[0][0].options;
-    // No anthropicBaseUrl and octoCli off → env omitted entirely.
-    expect(options).not.toHaveProperty('env');
-  });
-
-  it('coexists with anthropicBaseUrl (all three vars present)', async () => {
+  it('skips linking when project is set but no skill dirs are configured', async () => {
     mockQuery.mockReturnValue(createMockStream([
       { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
     ]));
     const config = makeConfig({
-      apiUrl: 'https://octo.example.com/api',
-      sdk: {
-        allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: [],
-        octoCli: true, anthropicBaseUrl: 'https://llm.example.com',
-      },
+      cwdBase: '/tmp/cwdbase',
+      sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: ['project'] },
     });
-    for await (const _ of queryAgent('t', '', '', config, undefined, undefined, { botRobotId: 'cli_x' })) { void _; }
-    const env = mockQuery.mock.calls[0][0].options.env;
-    expect(env.ANTHROPIC_BASE_URL).toBe('https://llm.example.com');
-    expect(env.OCTO_API_BASE_URL).toBe('https://octo.example.com/api');
-    expect(env.OCTO_BOT_ID).toBe('cli_x');
+    for await (const _ of queryAgent('t', '', '', config, { kind: 'dm', sessionKey: 'u1' })) { void _; }
+    expect(linkSkillsIntoSandbox).not.toHaveBeenCalled();
   });
 
-  it('appends the octo-cli guide to the system prompt only when octoCli is on', async () => {
+  it('forwards settingSources verbatim to the SDK', async () => {
     mockQuery.mockReturnValue(createMockStream([
       { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
     ]));
-    const on = makeConfig({ sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: [], octoCli: true } });
-    for await (const _ of queryAgent('t', '', '', on)) { void _; }
-    expect(mockQuery.mock.calls[0][0].options.systemPrompt.append).toContain('[Octo CLI');
-
-    mockQuery.mockClear();
-    mockQuery.mockReturnValue(createMockStream([
-      { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
-    ]));
-    for await (const _ of queryAgent('t', '', '', makeConfig())) { void _; }
-    expect(mockQuery.mock.calls[0][0].options.systemPrompt.append).not.toContain('[Octo CLI');
+    const config = makeConfig({ sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: ['project'] } });
+    for await (const _ of queryAgent('t', '', '', config)) { void _; }
+    expect(mockQuery.mock.calls[0][0].options.settingSources).toEqual(['project']);
   });
 
   it('reports the SDK session_id once via onSessionId', async () => {
