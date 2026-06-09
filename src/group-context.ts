@@ -145,9 +145,11 @@ export class GroupContext {
   ): void {
     // SECURITY: fromName is the user-controlled IM display name and is rendered
     // into the [Group context] block as `<name>：<content>`. Bound + strip it at
-    // the boundary (shared choke point) so it can't forge a label/line; fall
-    // back to the uid when nothing survives.
-    const safeName = sanitizeDisplayName(fromName, fromUid);
+    // the boundary (shared choke point) so it can't forge a label/line. fromUid
+    // is ALSO user-controlled, and sanitizeDisplayName returns its fallback
+    // verbatim — so sanitize the uid fallback too rather than passing it raw
+    // (PR #128 review: raw-uid-as-fallback re-introduces the injection).
+    const safeName = sanitizeDisplayName(fromName) || sanitizeDisplayName(fromUid) || 'unknown';
     let window = this.messageCache.get(channelId);
     if (!window) {
       window = [];

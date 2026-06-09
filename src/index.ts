@@ -470,7 +470,14 @@ export async function handleMessage(
         msg.payload.type === MessageType.File &&
         resolved.mediaUrl
       ) {
-        const filename = typeof msg.payload.name === 'string' ? msg.payload.name : '未知文件';
+        // SECURITY: payload.name is user-controlled and flows into multiple
+        // `[文件: …]` labels (history record, inline-wrap header, temp-path line,
+        // tryResolveFile descriptions). Sanitize once at the source so no
+        // downstream label can be used to forge a marker/role label (prompt
+        // injection — same neutralization the resolveContent path applies).
+        const filename = typeof msg.payload.name === 'string'
+          ? sanitizeDisplayName(msg.payload.name, '未知文件')
+          : '未知文件';
         const knownSize = typeof msg.payload.size === 'number' ? msg.payload.size : undefined;
         // Always store just the [文件: name] metadata in history — the
         // inlined contents go to the LLM for THIS turn only.
