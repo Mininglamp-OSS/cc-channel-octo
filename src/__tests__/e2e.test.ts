@@ -12,8 +12,6 @@ import { join } from 'node:path';
 
 vi.mock('../octo/api.js', () => ({
   sendMessage: vi.fn().mockResolvedValue(undefined),
-  sendMediaMessage: vi.fn().mockResolvedValue(undefined),
-  sendRichTextMessage: vi.fn().mockResolvedValue(undefined),
   sendTyping: vi.fn().mockResolvedValue(undefined),
   sendReadReceipt: vi.fn().mockResolvedValue(undefined),
   getGroupMembers: vi.fn().mockResolvedValue([]),

@@ -39,6 +39,17 @@ While the major version is `0`, minor releases may carry breaking changes.
 
 ### Removed
 
+- **Dead media-upload pipeline + `cos-nodejs-sdk-v5`** — removed `media-upload.ts`
+  (`uploadAndSendMedia` / `sendRichTextCombined` / `uploadFileToCOS`) and the
+  `sendMediaMessage` / `sendRichTextMessage` API functions. This outbound media /
+  rich-text pipeline had **zero production callers** (born-dead) — outbound media is
+  handled by the agent's octo-cli skill (`octo-cli file upload` + `message send`)
+  under the skill-as-data model. Dropping it removes the direct dependency on
+  `cos-nodejs-sdk-v5`, which transitively pulled in the deprecated `request@2.88.2`
+  chain and an old `fast-xml-parser` — clearing **11 Dependabot alerts** (2 critical,
+  2 high incl. an unpatchable `request` SSRF) with no runtime behavior change.
+  Inbound media (`media-inbound.ts`) and the startup CDN-host probe
+  (`getUploadCredentials` in `index.ts`) are unaffected.
 - **Webhook transport** (#105) — removed; the Octo server does not POST to the
   bot, so webhook mode was dead code. WebSocket is the only transport.
 
