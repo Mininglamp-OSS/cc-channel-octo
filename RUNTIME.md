@@ -37,8 +37,8 @@ skills, sessions) for free — at the cost of living within the SDK's model (see
 | Conversation continuity (sessions) | SDK session + `resume` | ◑ Partial (opt-in; see #2) |
 | Skills / external tools | SDK skills + Bash | ✅ Done |
 | Per-bot isolation & identity | cc config + dirs | ✅ Done |
-| Scheduled / autonomous tasks | — | ❌ Gap |
-| Self-bootstrapping | — | ❌ Gap |
+| Scheduled tasks | cc cron tool + gateway scheduler | ✅ Done |
+| Autonomous / self-bootstrapping | — | ◑ Partial (agent schedules its own crons; no free-running loop) |
 
 ---
 
@@ -129,40 +129,53 @@ stateful. Identity = SOUL.md + CLAUDE.md (per bot) + a shared baseline CLAUDE.md
 
 ---
 
-## Gaps vs a full openclaw runtime
+## Scheduled tasks ✅ & autonomy ◑
 
-### 7. Scheduled / autonomous tasks ❌
+### 7. Scheduled tasks ✅ (#115)
 
-openclaw has heartbeat/scheduling infra; cc has **none** at the business level.
-cc's only timers are mechanical (connection heartbeat, typing indicator, cwd
-cleanup) — not "wake the agent at 9am to triage issues". A bot acts only when an
-IM message arrives.
+Enable `sdk.cron` to give the agent a `cron` tool set (`cron_create` /
+`cron_list` / `cron_delete`). The agent registers recurring (5-field cron) or
+one-shot (ISO datetime) tasks; they persist to `<baseDir>/<botId>/cron.json` and
+survive restarts. A resident per-bot **scheduler** (`cron-scheduler.ts`, ~30s
+tick, `.unref()`) fires due tasks by synthesizing a `BotMessage` (the task's
+prompt, marked `payload._cronFire`) through the **normal `handleMessage`
+pipeline** — so a fired task runs exactly like an inbound message, bound to the
+session that created it, and the reply goes back to that channel.
 
-**How it could be added (SDK-native):** the SDK exposes cron/wakeup primitives
-(scheduled prompts) and the agent can self-schedule. A future `cc` feature would
-let a bot register scheduled prompts (per bot, in config or via a skill) that
-enqueue a synthetic inbound turn at a cron time — reusing the existing message
-pipeline. Not yet built.
+- **Security:** task creation/deletion is **owner-gated** (`fromUid ===
+  registerBot.owner_uid`), server-enforced in the tool handler — a prompt-injected
+  agent (driven by untrusted IM users) cannot register a malicious unattended
+  cron. Defense-in-depth: the security prompt also tells the agent to refuse
+  cron requests that come from chat content.
+- **Mention-gate bypass:** synthetic cron messages set `payload._cronFire` so a
+  group task fires without an @mention; rate limiting still applies. (Nonce
+  hardening against a group member forging `_cronFire` is a noted follow-up; the
+  owner gate is the primary control.)
+- **Missed tasks:** if the bot was down across a task's window, it fires once on
+  catch-up, then advances to the next future occurrence (no thundering herd).
 
-### 8. Self-bootstrapping ❌
+### 8. Self-bootstrapping ◑ (partial)
 
-openclaw bots can take initiative / self-restart / evolve their own config. cc
-bots are reactive. The pieces exist (the agent has Bash + memory + skills, so it
-*can* modify files in its workspace), but cc has no loop that lets a bot act
-without an inbound trigger. Depends on (7).
+The agent now has *some* initiative: via the cron tool it can schedule its own
+future runs (e.g. "remind me to check CI in an hour", or a recurring self-audit).
+What's still missing for full autonomy is a **free-running loop** — a bot still
+cannot act with no trigger at all; every action originates from either an inbound
+message or a cron fire it (or the owner) registered. A true always-on autonomous
+loop would build on #7.
 
 ---
 
 ## Summary
 
-cc replicates the **identity + memory + skills + (optional) session** parts of an
-openclaw-style runtime by configuring the Claude Agent SDK per bot — with little
-runtime code of its own. The **reactive-only** nature (no scheduled/autonomous
-tasks, no self-bootstrapping) is the main capability gap, and the **session
-layer** is mid-evolution (SQLite-history today → SDK-session-as-truth, with
-SQLite demoted to state/cursors). The deliberate trade for staying thin is living
-within the SDK's model — notably **lossy compaction**: on a long conversation the
-SDK summarizes older turns and *can drop early details, including a speaker's
-specific facts* (verified in the #2 spike). Business-critical facts that must
-survive compaction belong in auto-memory or SQLite, not only in the rolling
-session.
+cc replicates the **identity + memory + skills + (optional) session + scheduled
+tasks** parts of an openclaw-style runtime by configuring the Claude Agent SDK per
+bot — with little runtime code of its own. The remaining gap is **full autonomy**:
+the agent can schedule its own future runs (cron) but has no always-on
+free-running loop — every action still originates from an inbound message or a
+registered cron fire. The **session layer** is mid-evolution (SQLite-history today
+→ SDK-session-as-truth, with SQLite demoted to state/cursors). The deliberate
+trade for staying thin is living within the SDK's model — notably **lossy
+compaction**: on a long conversation the SDK summarizes older turns and *can drop
+early details, including a speaker's specific facts* (verified in the #2 spike).
+Business-critical facts that must survive compaction belong in auto-memory or
+SQLite, not only in the rolling session.

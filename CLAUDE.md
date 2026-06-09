@@ -81,3 +81,14 @@ cwd isolation), media-upload.ts / file-inline-wrap.ts (inbound media), db-adapte
   deploy `$HOME`/ancestors free of `CLAUDE.md`; `~/.cc-channel-octo/CLAUDE.md` is
   the all-bots baseline. Do NOT switch `settingSources` to `['user']` (would pull
   in the host's personal `~/.claude`).
+- **Scheduled tasks (cron, `sdk.cron`)** — agent registers tasks via a `cron`
+  in-process MCP tool (`createCronToolServer`, built per-turn with the message's
+  channel coords); persisted to `<baseDir>/<id>/cron.json`; fired by a per-bot
+  `CronScheduler` (~30s tick) that synthesizes a `BotMessage` with
+  `payload._cronFire:true` through the normal `handleMessage` pipeline. **Creation
+  is owner-gated** (`fromUid === router.getOwnerUid()`, from `registerBot.owner_uid`)
+  — the agent is untrusted-user-driven, so this server-side check (not the LLM) is
+  the control. `_cronFire` bypasses the group @mention gate in `session-router`
+  (`isCronFire`); a group member could in principle forge it (only escalates past
+  the @mention gate, not rate limiting) — nonce hardening is a deferred follow-up.
+  Self-contained 5-field cron evaluator in `cron-evaluator.ts` (no dep).

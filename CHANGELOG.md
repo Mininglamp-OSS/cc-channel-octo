@@ -34,6 +34,19 @@ While the major version is `0`, minor releases may carry breaking changes.
 
 ### Added
 
+- **Scheduled tasks (cron)** (#115) — set `sdk.cron: true` to give the agent a
+  `cron` tool set (`cron_create` / `cron_list` / `cron_delete`). Tasks (5-field
+  cron or one-shot ISO) persist to `<baseDir>/<id>/cron.json` and are fired by a
+  resident per-bot gateway scheduler through the normal `handleMessage` pipeline,
+  bound to the session that created them (reply posts back to that channel). Fills
+  RUNTIME.md's scheduled-tasks gap. **Security:** creation/deletion is owner-gated
+  (`registerBot.owner_uid`), server-enforced — a prompt-injected agent cannot
+  register a malicious unattended task; defense-in-depth line added to the
+  security prompt. Synthetic fires carry `payload._cronFire` to bypass the group
+  @mention gate (rate limiting still applies; nonce hardening is a noted
+  follow-up). New `src/cron-{evaluator,store,tool,scheduler}.ts`; no new
+  dependency (self-contained cron evaluator).
+
 - **`sdk.skills` per-bot skill selection** (#110) — a bot enables a subset of the
   centrally-maintained skill library via `sdk.skills: string[] | 'all'`
   (per-bot). Maintain skills once in `~/.cc-channel-octo/skills/`; each bot picks

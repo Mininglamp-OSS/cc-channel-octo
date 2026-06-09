@@ -243,6 +243,15 @@ export class SessionRouter {
     return false;
   }
 
+  /**
+   * #115: True for a cron-fired synthetic message (`payload._cronFire`). Such
+   * messages bypass the group @mention gate (they were owner-gated at creation
+   * and bound to this session). Real inbound messages never carry this marker.
+   */
+  private isCronFire(msg: BotMessage): boolean {
+    return msg.payload._cronFire === true;
+  }
+
   private async processMessage(msg: BotMessage, key: string): Promise<RouteResult | null> {
     // Skip messages from self.
     if (msg.from_uid === this.robotId) return null;
@@ -283,7 +292,10 @@ export class SessionRouter {
     // the blocklist (above) get hard-dropped without even checking mentions.
 
     // Group mention gate — skip unless mentioned OR in mention-free group (G12).
-    if (this.isGroupLike(msg.channel_type) && !this.isMentioned(msg)) {
+    // #115: cron-fired synthetic messages bypass the @mention requirement — they
+    // were created (owner-gated) and bound to this session; there's no human to
+    // @-mention the bot at fire time. Rate limiting below still applies.
+    if (this.isGroupLike(msg.channel_type) && !this.isMentioned(msg) && !this.isCronFire(msg)) {
       // G12: Check if this group is in the mention-free list
       const isMentionFree = this.config.mentionFreeGroups?.includes(msg.channel_id ?? '') ?? false;
       if (!isMentionFree) {

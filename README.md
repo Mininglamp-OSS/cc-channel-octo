@@ -126,6 +126,7 @@ configurable.
 | `sdk.anthropicBaseUrl` | *(unset)* | Override the upstream Claude API endpoint. See [Self-hosted gateway](#self-hosted-gateway) below. |
 | `sdk.env` | *(unset)* | Extra environment variables (`{ "KEY": "value" }`) injected verbatim into the agent's tool subprocess. Per-bot. Use to give a bot's skills what their CLIs need — e.g. `{ "OCTO_BOT_ID": "<robotId>" }` so a multi-bot deploy's `octo-cli` selects the right stored profile. See [Agent skills](#agent-skills). |
 | `sdk.skills` | *(SDK default)* | Which skills this bot enables: `'all'` or a `string[]` of skill names. Per-bot **selection** over the centrally-maintained skill library (maintain once, each bot picks its subset). Omit to use the SDK default. See [Agent skills](#agent-skills). |
+| `sdk.cron` | `false` | When true, give the agent a `cron` tool set to register per-bot scheduled tasks (persisted to `<baseDir>/<id>/cron.json`, fired through the normal pipeline). Creation is **owner-gated**. See [Scheduled tasks](#scheduled-tasks). |
 | `rateLimit.maxPerMinute` | `5` | Max requests per minute per session |
 | `context.maxContextChars` | `6000` | Max characters of group context injected into prompts |
 | `context.historyLimit` | `40` | Max messages in session history window |
@@ -258,6 +259,33 @@ store keys by identity (e.g. `octo-cli`, which needs `--bot-id`/`OCTO_BOT_ID` to
 pick among ≥2 stored profiles), give each bot its selector via `sdk.env` in its
 per-bot config.json — e.g. `{ "sdk": { "env": { "OCTO_BOT_ID": "<robotId>" } } }`.
 cc injects it into that bot's tool subprocess so the CLI acts as the right bot.
+
+### Scheduled tasks
+
+Enable `sdk.cron: true` to give the agent a `cron` tool set so it can schedule
+work — the missing "non-IM trigger" that makes a bot more than purely reactive.
+
+```jsonc
+// ~/.cc-channel-octo/<id>/config.json
+{ "sdk": { "cron": true } }
+```
+
+The agent calls:
+- `cron_create(schedule, prompt, recurring?)` — `schedule` is a 5-field cron
+  expression (`"0 9 * * 1-5"` = weekdays 9am) or a one-shot ISO datetime
+  (`"2026-06-09T09:00:00Z"`).
+- `cron_list` / `cron_delete(id)`.
+
+Tasks persist to `<baseDir>/<id>/cron.json` and survive restarts. When a task is
+due, the gateway scheduler re-runs its `prompt` **through the normal message
+pipeline, bound to the chat that created it** — so the result posts back in that
+same channel, exactly as if the prompt had arrived as a message.
+
+> **Security.** Task creation/deletion is **restricted to the bot owner**
+> (`registerBot.owner_uid`), enforced server-side in the tool — a prompt-injected
+> agent (driven by untrusted IM users) cannot register a malicious unattended
+> task. A fired task bypasses the group @mention gate (it has no human to @ it)
+> but is still rate-limited.
 
 ### Multi-bot
 

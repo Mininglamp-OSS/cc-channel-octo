@@ -164,6 +164,14 @@ export interface Config {
      * `<baseDir>/<id>/config.json`).
      */
     skills?: string[] | 'all';
+    /**
+     * #115: when true, give the agent a `cron` tool set (cron_create / cron_list
+     * / cron_delete) to register per-bot scheduled tasks, persisted to
+     * `<baseDir>/<botId>/cron.json` and fired by the gateway scheduler through
+     * the normal message pipeline (bound to the creating session). Task creation
+     * is gated to the bot owner uid (registerBot.owner_uid). Default off. Per-bot.
+     */
+    cron?: boolean;
   };
   rateLimit: {
     maxPerMinute: number;

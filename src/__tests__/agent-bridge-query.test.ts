@@ -563,3 +563,26 @@ describe('queryAgent — sdk.skills selection (#110)', () => {
     expect(mockQuery.mock.calls[0][0].options.skills).toEqual([]);
   });
 });
+
+describe('queryAgent — mcpServers forwarding (#115)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('forwards opts.mcpServers to the SDK options when provided', async () => {
+    mockQuery.mockReturnValue(createMockStream([
+      { type: 'assistant', session_id: 's', message: { content: [{ type: 'text', text: 'hi' }] } },
+    ]));
+    const fakeServer = { type: 'sdk', name: 'cron', instance: {} } as never;
+    for await (const _ of queryAgent('t', '', '', makeConfig(), undefined, undefined, { mcpServers: { cron: fakeServer } })) { void _; }
+    const options = mockQuery.mock.calls[0][0].options;
+    expect(options.mcpServers).toBeDefined();
+    expect(options.mcpServers.cron).toBe(fakeServer);
+  });
+
+  it('omits mcpServers when not provided', async () => {
+    mockQuery.mockReturnValue(createMockStream([
+      { type: 'assistant', session_id: 's', message: { content: [{ type: 'text', text: 'hi' }] } },
+    ]));
+    for await (const _ of queryAgent('t', '', '', makeConfig())) { void _; }
+    expect(mockQuery.mock.calls[0][0].options).not.toHaveProperty('mcpServers');
+  });
+});
