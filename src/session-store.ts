@@ -104,6 +104,7 @@ export class SessionStore {
   private upsertSdkSession!: PreparedStatement;
   private selectSdkSession!: PreparedStatement;
   private deleteSdkSession!: PreparedStatement;
+  private deleteExpiredSdkSessions!: PreparedStatement;
 
   /** Tracks the last message_seq at which the bot replied, per group session key. */
   private lastBotReplySeq = new Map<string, number>();
@@ -168,6 +169,9 @@ export class SessionStore {
     );
     this.deleteSdkSession = this.adapter.prepare(
       'DELETE FROM sdk_sessions WHERE session_id = ?',
+    );
+    this.deleteExpiredSdkSessions = this.adapter.prepare(
+      'DELETE FROM sdk_sessions WHERE updated_at < ?',
     );
   }
 
@@ -249,6 +253,14 @@ export class SessionStore {
   cleanExpired(): number {
     const cutoff = Date.now() - SEVEN_DAYS_MS;
     const result = this.deleteExpired.run(cutoff);
+    // Expire the SDK-session mapping on the same 7-day TTL. sdk_sessions is a
+    // separate table (no FK cascade to sessions), so without this a stale mapping
+    // would survive the sessions/messages cleanup — and since SDK sessions are
+    // always on, the next message would recreate the session and `resume` the
+    // expired SDK conversation, silently resurrecting history past the TTL
+    // (PR #120 review). updated_at is bumped every turn (setSdkSessionId), so it
+    // tracks activity exactly like sessions.updated_at.
+    this.deleteExpiredSdkSessions.run(cutoff);
     return result.changes;
   }
 

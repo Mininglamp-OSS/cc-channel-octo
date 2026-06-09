@@ -40,6 +40,10 @@ export class GroupContext {
   private insertMessage!: PreparedStatement;
   private selectRecentMessages!: PreparedStatement;
   private deleteOldMessages!: PreparedStatement;
+  private selectMessagesSince!: PreparedStatement;
+  private selectMaxId!: PreparedStatement;
+  private upsertCursor!: PreparedStatement;
+  private selectCursor!: PreparedStatement;
 
   constructor(adapter: DbAdapter, maxContextChars: number) {
     this.adapter = adapter;
@@ -63,6 +67,19 @@ export class GroupContext {
       CREATE INDEX IF NOT EXISTS idx_group_messages_channel
       ON group_messages (channel_id, id DESC)
     `);
+    // Per-channel consumption cursor: the highest group_messages.id that has
+    // already been injected into a turn for this channel. Only group messages
+    // NEWER than this are injected next turn (the bot's standing context lives in
+    // the SDK session, so re-injecting the whole window every turn would be both
+    // redundant and a frozen-prompt violation). Mirrors the reset_barriers /
+    // sdk_sessions single-row-per-key pattern.
+    this.adapter.exec(`
+      CREATE TABLE IF NOT EXISTS group_context_cursors (
+        channel_id TEXT PRIMARY KEY,
+        last_id INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `);
 
     this.upsertMember = this.adapter.prepare(
       'INSERT INTO group_members (group_id, uid, name, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(group_id, uid) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at',
@@ -78,6 +95,22 @@ export class GroupContext {
     );
     this.deleteOldMessages = this.adapter.prepare(
       'DELETE FROM group_messages WHERE channel_id = ? AND id NOT IN (SELECT id FROM group_messages WHERE channel_id = ? ORDER BY id DESC LIMIT ?)',
+    );
+    // Cursor delta: messages strictly newer than the cursor, oldest-first, with
+    // their rowid so the caller can advance the cursor to the last included id.
+    this.selectMessagesSince = this.adapter.prepare(
+      'SELECT id, from_name, content FROM group_messages WHERE channel_id = ? AND id > ? ORDER BY id ASC LIMIT ?',
+    );
+    this.selectMaxId = this.adapter.prepare(
+      'SELECT MAX(id) AS maxId FROM group_messages WHERE channel_id = ?',
+    );
+    this.upsertCursor = this.adapter.prepare(
+      'INSERT INTO group_context_cursors (channel_id, last_id, updated_at) VALUES (?, ?, ?) ' +
+        'ON CONFLICT(channel_id) DO UPDATE SET last_id = excluded.last_id, updated_at = excluded.updated_at ' +
+        'WHERE excluded.last_id > group_context_cursors.last_id',
+    );
+    this.selectCursor = this.adapter.prepare(
+      'SELECT last_id FROM group_context_cursors WHERE channel_id = ?',
     );
   }
 
@@ -235,6 +268,83 @@ export class GroupContext {
     if (selected.length === 0) return '';
     selected.reverse();
     return `${header}${selected.join('\n')}${trailer}`;
+  }
+
+  /** Read the per-channel consumption cursor (highest already-injected id), or 0. */
+  getContextCursor(channelId: string): number {
+    try {
+      const row = this.selectCursor.get(channelId) as { last_id: number } | undefined;
+      return row?.last_id ?? 0;
+    } catch (err) {
+      console.error(`group-context: getContextCursor(${channelId}) failed: ${String(err)}`);
+      return 0;
+    }
+  }
+
+  /** Advance the per-channel cursor to `lastId` (monotonic — never moves backward). */
+  setContextCursor(channelId: string, lastId: number): void {
+    try {
+      this.upsertCursor.run(channelId, lastId, Date.now());
+    } catch (err) {
+      console.error(`group-context: setContextCursor(${channelId}) failed: ${String(err)}`);
+    }
+  }
+
+  /** The highest group_messages.id for a channel (for cursor priming), or 0. */
+  getMaxMessageId(channelId: string): number {
+    try {
+      const row = this.selectMaxId.get(channelId) as { maxId: number | null } | undefined;
+      return row?.maxId ?? 0;
+    } catch (err) {
+      console.error(`group-context: getMaxMessageId(${channelId}) failed: ${String(err)}`);
+      return 0;
+    }
+  }
+
+  /**
+   * Build a group-context block from messages NEWER than `sinceId` (the delta the
+   * model hasn't seen yet), oldest-first, within `maxContextChars`. Returns the
+   * block text (same `[Recent group messages]` format as buildContext) and the
+   * highest id included so the caller can advance the cursor. Empty text + the
+   * unchanged cursor when there's nothing new.
+   *
+   * Unlike buildContext (in-memory rolling window), this reads from the DB so the
+   * cursor delta is exact even across restarts / window eviction.
+   */
+  buildContextSince(channelId: string, sinceId: number): { text: string; lastId: number } {
+    let rows: Array<{ id: number; from_name: string; content: string }>;
+    try {
+      rows = this.selectMessagesSince.all(channelId, sinceId, this.maxWindowSize) as Array<{
+        id: number;
+        from_name: string;
+        content: string;
+      }>;
+    } catch (err) {
+      console.error(`group-context: buildContextSince(${channelId}) failed: ${String(err)}`);
+      return { text: '', lastId: sinceId };
+    }
+    if (rows.length === 0) return { text: '', lastId: sinceId };
+
+    const header = '[Recent group messages]\n';
+    const trailer = '\n';
+    const budget = this.maxContextChars - header.length - trailer.length;
+    if (budget <= 0) return { text: '', lastId: sinceId };
+
+    // Keep the NEWEST messages within budget (walk newest→oldest), but advance
+    // the cursor to the newest included id regardless so we never re-show a line.
+    const lastId = rows[rows.length - 1].id;
+    const selected: string[] = [];
+    let used = 0;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const line = `${rows[i].from_name}：${rows[i].content}`;
+      const cost = line.length + (selected.length > 0 ? 1 : 0);
+      if (used + cost > budget) break;
+      selected.push(line);
+      used += cost;
+    }
+    if (selected.length === 0) return { text: '', lastId };
+    selected.reverse();
+    return { text: `${header}${selected.join('\n')}${trailer}`, lastId };
   }
 
   resolveMentions(text: string, channelId: string): string[] {

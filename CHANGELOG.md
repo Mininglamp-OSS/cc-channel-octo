@@ -8,6 +8,35 @@ While the major version is `0`, minor releases may carry breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **Frozen system prompt + SDK-session-owned history** — the bot's
+  `systemPrompt.append` now carries ONLY stable, operator-controlled content
+  (security prefix + SOUL + group instructions). Per-turn-variable content —
+  conversation history (B5) and group context (B4) — no longer sits inside the
+  SDK's cached system block, so the prompt-caching prefix is byte-identical
+  turn-to-turn and actually hits (previously every turn was a cache-write with zero
+  reads, because the changing history/context lived inside the `cache_control`
+  block). Follows Anthropic's own guidance ("keep the system prompt frozen; inject
+  dynamic context in a user message"). **Conversation history is now owned by the
+  SDK session:** cc always `resume`s the stored session id; only a session's FIRST
+  turn (or a migration from existing SQLite history) injects prior history ONCE as
+  a `[Prior conversation history]` block in the user message. **Group context** is
+  injected as a delta — only messages new since a per-channel consumption cursor
+  (`group_context_cursors`), not the whole window every turn. **`sdk.cron`-style
+  flag removed:** `sdk.persistentSession` is gone — SDK sessions are always on (with
+  the flag off and history out of the prompt, "off" would mean no memory at all).
+  **Stale-resume recovery:** an expired/invalid session id (the SDK throws "No
+  conversation found with session ID …") is caught, the bad id cleared, and the turn
+  retried once without resume — re-injecting history from SQLite so a conversation is
+  never silently lost. SQLite's role is now state/cursors/mappings + a durable record
+  (migration & recovery substrate), not live prompt-history reconstruction.
+  `buildSystemPrompt(customPrompt?, groupInstructions?)` and `queryAgent(userMessage,
+  config, sessionCtx?, onToolUse?, opts?)` lost their history/context params.
+  **Migration:** drop any `sdk.persistentSession` / `CC_OCTO_SDK_PERSISTENT_SESSION`
+  from config — it's ignored now; existing SQLite history is injected once on each
+  session's next turn, then carried by the SDK session.
+
 ### Removed
 
 - **Webhook transport** (#105) — removed; the Octo server does not POST to the

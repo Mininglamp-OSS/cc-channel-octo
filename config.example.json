@@ -15,7 +15,6 @@
     "allowedTools": "*",
     "permissionMode": "bypassPermissions",
     "_comment_tool_progress": "v0.3: set toolProgress=true to post '🔧 Running <tool>(<params>)…' notices (params truncated). Off by default.",
-    "_comment_persistent_session": "v0.3: set persistentSession=true to keep agent workspace state across messages via the SDK v2 Session API. Off by default.",
     "_comment_setting_sources": "#100: which host filesystem settings the SDK loads (user=~/.claude, project=.claude, local=.claude/*.local). Default [\"project\"] so the SDK discovers skills symlinked into each session sandbox's .claude/skills/. Memory stays isolated regardless (the auto-memory dir is pinned via inline settings, ranked above projectSettings). Add \"user\" only to deliberately load the operator's real ~/.claude.",
     "settingSources": ["project"]
   },

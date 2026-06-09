@@ -114,7 +114,7 @@ describe('cron integration (#115)', () => {
   it('the agent turn is offered the cron MCP tool (mcpServers.cron present)', async () => {
     let captured: Record<string, unknown> | undefined;
     (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
-      async function* (_u: string, _h: string, _c: string, _cfg: unknown, _ctx: unknown, _t: unknown, opts: { mcpServers?: Record<string, unknown> }) {
+      async function* (_u: string, _cfg: unknown, _ctx: unknown, _t: unknown, opts: { mcpServers?: Record<string, unknown> }) {
         captured = opts?.mcpServers;
         yield 'ok';
       },

@@ -76,7 +76,7 @@ Forked from [openclaw-channel-octo](https://github.com/Mininglamp-OSS/openclaw-c
 |---|---|
 | `session-router.ts` | Message routing pipeline: self-message filter → bot blocklist → group mention gate (`uids` or `ais`, NOT `all`) → rate limiting (token bucket, per-session, debounced notification) → non-text rejection. **Critical design: `routeAndHandle` holds a per-session lock across both routing and handler execution** — this eliminates the TOCTOU gap between "should I process this?" and "processing it". |
 | `group-context.ts` | Group chat context management: in-memory message window (100 messages per channel, budget-capped to `maxContextChars`), member name cache (SQLite-backed, hourly API refresh), bidirectional uid↔name mapping, `@name` mention resolution via regex. Context string is built BEFORE the current message is cached to avoid duplication. |
-| `agent-bridge.ts` | Claude Agent SDK integration. Builds a structured prompt (`[Group context]` + `[Conversation history]` + `[Current message]`), calls `query()` with configured permissions/tools/model, yields text chunks as `AsyncIterable<string>`. Includes a hardcoded system prompt that instructs the agent to reject credential exfiltration attempts. **Knows nothing about Octo.** |
+| `agent-bridge.ts` | Claude Agent SDK integration. Builds a **frozen** system prompt (security prefix + SOUL + group instructions only — no per-turn history/context, so the SDK's cached system block hits) and always `resume`s the SDK session (the source of truth for conversation history). Calls `query()` with configured permissions/tools/model, yields text chunks as `AsyncIterable<string>`. Recovers from a stale/expired resume by clearing the id + retrying once with an injected history fallback. **Knows nothing about Octo.** |
 | `stream-relay.ts` | Output delivery. Typing indicator heartbeat (5s). Delivers agent output via plain `sendMessage` with intelligent splitting (paragraph > newline > space > hard cut, 3500 char segments). |
 | `index.ts` | Entry point orchestrator. Wires all modules in sequence: config → adapter → store → cleanup → group-context → stream-relay → gateway → router → message handler. The `handleMessage` function coordinates the full pipeline under the router's session lock. |
 
@@ -103,7 +103,7 @@ Forked from [openclaw-channel-octo](https://github.com/Mininglamp-OSS/openclaw-c
 Same as DM, with two additions:
 
 - **Mention gate** (step 5): message must contain bot's UID in `mention.uids` or have `mention.ais` set. `mention.all` (humans-only `@所有人`) does NOT trigger the bot.
-- **Group context** (step 6a): `refreshMembers` (hourly), `buildContext` (recent messages within char budget), then cache current message AFTER context is built to prevent duplication. The prompt becomes `[Group context]` + `[Conversation history]` + `[Current message]`.
+- **Group context** (step 6a): `refreshMembers` (hourly), then `buildContextSince` (only group messages newer than the per-channel cursor, within char budget), advance the cursor, then cache the current message AFTER reading the delta to prevent duplication. The group-context delta + any first-turn history block are prepended to the **user message** (not the system prompt, which is frozen); conversation continuity otherwise comes from the resumed SDK session.
 
 Non-mentioned group messages are still cached in `group-context` for future context windows but do not trigger agent invocation.
 
@@ -217,8 +217,12 @@ All persistent state lives in a single SQLite database (`data/cc-octo.db`):
 | Table | Purpose | Lifecycle |
 |---|---|---|
 | `sessions` | Session metadata (channel, timestamps) | 7-day TTL, cleaned on startup |
-| `messages` | Conversation history (user + assistant turns) | Cascade-deleted with session |
+| `messages` | Durable conversation record — NOT live prompt history. Used for first-turn/migration injection + stale-resume recovery. Live history lives in the SDK session (resumed each turn). | Cascade-deleted with session |
 | `group_members` | Cached group member uid↔name mappings | Refreshed hourly via API |
+| `group_messages` | Rolling group chat window (per channel) | Trimmed to ~2× window |
+| `group_context_cursors` | Per-channel consumption cursor — highest `group_messages.id` already injected, so only NEW group messages are added to the user message each turn | One row per channel |
+| `sdk_sessions` | Maps `sessionKey` → SDK session id for `resume` (the SDK session owns conversation history) | Cleared by `/reset` |
+| `reset_barriers` | `/reset` watermark so cold-start backfill can't resurrect cleared history | One row per session |
 
 SQLite is configured with WAL journal mode for concurrent read performance and `foreign_keys = ON` for referential integrity. The `db-adapter.ts` abstraction keeps the door open for `node:sqlite` migration.
 

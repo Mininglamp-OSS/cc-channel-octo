@@ -2,76 +2,41 @@
  * D1 (Wave 2) tests:
  *  - S6 socket.ts tempBuffer OOM guard + variable-length 4-byte cap
  *  - S7 api.ts getChannelMessages base64 payload size + array length caps
- *  - P1-3 agent-bridge.ts buildSystemPrompt 100 KiB cap with truncation
+ *  - P1-3 agent-bridge.ts buildSystemPrompt flat cap (frozen prompt)
  *  - P1-4 agent-bridge.ts SDK output null-safety guard
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { buildSystemPrompt } from '../agent-bridge.js';
 
-// ─── P1-3: buildSystemPrompt length cap ───────────────────────────────────────
+// ─── P1-3: buildSystemPrompt length cap (frozen: operator content only) ───────
 
 describe('buildSystemPrompt MAX_SYSTEM_PROMPT_CHARS (D1/P1-3)', () => {
   it('returns assembled prompt unchanged when under cap', () => {
-    const out = buildSystemPrompt('history line', 'group chat', 'custom prompt');
-    // S2 (stage 6) added FILE ATTACHMENTS section to SECURITY_PROMPT_PREFIX,
-    // which pushed the minimum assembled prompt to ~2.1KiB. The point of this
-    // test is to verify the under-cap path returns the expected sections —
-    // a loose ceiling well under MAX_SYSTEM_PROMPT_CHARS (100KiB) is enough.
+    const out = buildSystemPrompt('custom prompt', 'group rules');
+    // The frozen prompt is just security prefix + custom + group instructions —
+    // a few KiB, well under the 100 KiB safety cap.
     expect(out.length).toBeLessThan(5_000);
     expect(out).toContain('custom prompt');
-    expect(out).toContain('[Group context]\ngroup chat');
-    expect(out).toContain('[Conversation history]\nhistory line');
+    expect(out).toContain('[Group instructions]\ngroup rules');
+    // Frozen: history/group context are NOT here anymore.
+    expect(out).not.toContain('\n[Group context]\n');
+    expect(out).not.toContain('\n[Conversation history]\n');
   });
 
-  it('caps total length at 100 KiB when history is huge', () => {
-    // 40 turns × 4 KiB each = 160 KiB worth of history.
-    const turns: string[] = [];
-    for (let i = 0; i < 40; i++) {
-      turns.push(`[user]: turn ${i} ${'x'.repeat(4_000)}`);
-    }
-    const huge = turns.join('\n');
-    const out = buildSystemPrompt(huge, '', '');
-    // 100 KiB hard ceiling plus a small slack for headers/labels.
-    expect(out.length).toBeLessThanOrEqual(110 * 1024);
-    expect(out).toContain('[older turns dropped]');
-    // Tail must be preserved (most recent turn = turn 39).
-    expect(out).toContain('turn 39');
-    // Oldest turn should be dropped.
-    expect(out).not.toContain('turn 0 ');
+  it('flat-caps at 100 KiB when an operator config (SOUL/GROUP.md) is pathologically large', () => {
+    const giantCustom = 'OP_'.repeat(60_000); // ~180 KB custom prompt
+    const out = buildSystemPrompt(giantCustom);
+    expect(out.length).toBeLessThanOrEqual(100 * 1024);
+    // Security prefix is first and survives (it leads the assembled string).
+    expect(out).toContain('coding assistant');
   });
 
-  it('preserves security prefix and custom prompt verbatim when truncating', () => {
-    const huge = '[user]: ' + 'a'.repeat(120 * 1024);
-    const out = buildSystemPrompt(huge, '', 'OPERATOR_DIRECTIVE_42');
-    // The non-truncatable sections must survive.
+  it('preserves security prefix verbatim under the cap', () => {
+    const out = buildSystemPrompt('OPERATOR_DIRECTIVE_42', 'rules');
     expect(out).toContain('OPERATOR_DIRECTIVE_42');
     expect(out).toContain('coding assistant'); // security prefix excerpt
-  });
-
-  it('caps group context separately when total exceeds the budget', () => {
-    // Push total over 100 KiB so the cap kicks in.
-    const giantGroup = 'msg\n'.repeat(8_000);  // ~32 KB — group is big
-    const giantHistory = '[user]: x'.repeat(20_000); // ~200 KB — forces truncation
-    const out = buildSystemPrompt(giantHistory, giantGroup, '');
-    expect(out.length).toBeLessThanOrEqual(110 * 1024);
-    // Group context budget is 20 KiB — should still appear, but drop oldest.
-    expect(out).toContain('[Group context]');
-    expect(out).toContain('[older messages dropped]');
-  });
-
-  it('drops history entirely if security + custom + group already saturate budget', () => {
-    const giantCustom = 'OP_'.repeat(40_000); // 120 KB custom prompt
-    const out = buildSystemPrompt('history line', 'group chat', giantCustom);
-    // Custom prompt is non-truncatable; we still produce a result.
-    expect(out).toContain(giantCustom);
-    expect(out.length).toBeGreaterThan(115 * 1024); // custom dominates
-    // The trailing [Conversation history] section (the appended one, not the
-    // literal mention inside the security prefix) should be truncated to a
-    // tiny tail since budget is exhausted.
-    const lastHistIdx = out.lastIndexOf('[Conversation history]');
-    const histTail = out.substring(lastHistIdx);
-    expect(histTail.length).toBeLessThan(5 * 1024);
+    expect(out).toContain('rules');
   });
 });
 
@@ -93,7 +58,7 @@ describe('queryAgent assistant.message null-safety (D1/P1-4)', () => {
     }));
     const { queryAgent } = await import('../agent-bridge.js');
     const out: string[] = [];
-    for await (const chunk of queryAgent('hi', '', '', {
+    for await (const chunk of queryAgent('hi', {
       cwd: '/tmp',
       sdk: {
         permissionMode: 'bypassPermissions',
@@ -119,7 +84,7 @@ describe('queryAgent assistant.message null-safety (D1/P1-4)', () => {
     }));
     const { queryAgent } = await import('../agent-bridge.js');
     const out: string[] = [];
-    for await (const chunk of queryAgent('hi', '', '', {
+    for await (const chunk of queryAgent('hi', {
       cwd: '/tmp',
       sdk: {
         permissionMode: 'bypassPermissions',

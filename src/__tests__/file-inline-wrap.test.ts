@@ -15,6 +15,7 @@ import {
   wrapInlinedFileContent,
   buildInlinedFileBody,
   truncateUtf8ByBytes,
+  assembleUserMessage,
   _internal,
 } from '../file-inline-wrap.js';
 
@@ -270,3 +271,45 @@ describe('truncateUtf8ByBytes (PR#40 review nit fix — byte-safe truncation)', 
   });
 });
 
+
+// ─── assembleUserMessage — body always survives (PR #120 review) ─────────────
+
+describe('assembleUserMessage (PR #120: current message must always reach the model)', () => {
+  it('returns context + body unchanged when under budget', () => {
+    const out = assembleUserMessage('[ctx]\nold\n', 'new request', 1000);
+    expect(out).toBe('[ctx]\nold\nnew request');
+  });
+
+  it('preserves the body WHOLE and front-truncates oversized context', () => {
+    // Context far exceeds budget; body is small and must survive in full.
+    const bigContext = '[Prior conversation history]\n' + 'x'.repeat(200_000) + '\n';
+    const body = 'THE ACTUAL NEW QUESTION';
+    const out = assembleUserMessage(bigContext, body, 98_304);
+    // Body present, whole, at the END.
+    expect(out.endsWith(body)).toBe(true);
+    // Context was front-truncated with a marker.
+    expect(out).toContain('[… earlier context truncated]');
+    // Within budget (+ small marker slack).
+    expect(Buffer.byteLength(out, 'utf-8')).toBeLessThanOrEqual(98_304 + 64);
+  });
+
+  it('drops context entirely when the body alone meets/exceeds the budget', () => {
+    const body = 'y'.repeat(50);
+    const out = assembleUserMessage('[ctx]\nlots\n', body, 40);
+    expect(out).not.toContain('[ctx]');
+    // The body is byte-capped but present (no context eviction of the request).
+    expect(out.startsWith('y')).toBe(true);
+  });
+
+  it('with no context, just (defensively) caps the body', () => {
+    expect(assembleUserMessage('', 'short body', 1000)).toBe('short body');
+  });
+
+  it('never emits a U+FFFD replacement char at the front-truncation boundary', () => {
+    // Multi-byte CJK context truncated mid-character — leading partial stripped.
+    const ctx = '历史记录'.repeat(20_000) + '\n';
+    const out = assembleUserMessage(ctx, 'body', 4096);
+    expect(out).not.toMatch(/�/);
+    expect(out.endsWith('body')).toBe(true);
+  });
+});

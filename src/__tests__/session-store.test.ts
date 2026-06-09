@@ -166,6 +166,34 @@ describe('SessionStore', () => {
     store.getOrCreate('s1', 'ch1', 1);
     expect(store.cleanExpired()).toBe(0);
   });
+
+  it('cleanExpired also expires the SDK session mapping (no resurrecting history past TTL)', () => {
+    // Regression for PR #120 review: sdk_sessions has no FK cascade to sessions,
+    // so an expired session must also drop its SDK mapping — otherwise the next
+    // message recreates the session and resumes the expired SDK conversation,
+    // silently resurrecting history past the 7-day TTL (sessions are always-on now).
+    store.getOrCreate('old-session', 'ch1', 1);
+    store.appendUser('old-session', 'old message');
+    store.setSdkSessionId('old-session', 'sdk-old');
+    expect(store.getSdkSessionId('old-session')).toBe('sdk-old');
+
+    const eightDaysAgo = Date.now() - 8 * 24 * 60 * 60 * 1000;
+    adapter.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(eightDaysAgo, 'old-session');
+    adapter.prepare('UPDATE sdk_sessions SET updated_at = ? WHERE session_id = ?').run(eightDaysAgo, 'old-session');
+
+    // A fresh session with a fresh SDK mapping must survive.
+    store.getOrCreate('new-session', 'ch1', 1);
+    store.setSdkSessionId('new-session', 'sdk-new');
+
+    store.cleanExpired();
+
+    // Expired: both the history AND the SDK mapping are gone → next turn is a
+    // clean first turn, not a resume of expired history.
+    expect(store.buildHistoryPrefix('old-session', 10)).toBe('');
+    expect(store.getSdkSessionId('old-session')).toBeUndefined();
+    // Fresh mapping untouched.
+    expect(store.getSdkSessionId('new-session')).toBe('sdk-new');
+  });
 });
 
 // Q1-2: Migration tests for the G10 message_seq column.
