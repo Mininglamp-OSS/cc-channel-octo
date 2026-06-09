@@ -200,6 +200,20 @@ describe('resolveMentions', () => {
     expect(result.mentionAll).toBe(true);
   });
 
+  it('does NOT treat @all-foo / @all.x as a broadcast (boundary fix)', () => {
+    // Hyphen/dot are name-continuation chars; `@all-members` is a literal name,
+    // not the broadcast token. Previously `[^\w]` matched and spammed everyone.
+    expect(resolveMentions('notify @all-members now').mentionAll).toBe(false);
+    expect(resolveMentions('see @all.hands doc').mentionAll).toBe(false);
+    expect(resolveMentions('@allen replied').mentionAll).toBe(false);
+  });
+
+  it('still detects @all followed by non-name punctuation (incl. CJK)', () => {
+    expect(resolveMentions('@all, please review').mentionAll).toBe(true);
+    expect(resolveMentions('@所有人，注意').mentionAll).toBe(true);
+    expect(resolveMentions('@all').mentionAll).toBe(true);
+  });
+
   it('returns empty entities when no memberMap and no structured', () => {
     const result = resolveMentions('@Alice hi');
     expect(result.mentionUids).toEqual([]);

@@ -269,7 +269,7 @@ describe("StreamRelay", () => {
     }
   });
 
-  it("cleans up typing timer when source iterable throws", async () => {
+  it("flushes partial output and re-throws when the source iterable throws mid-stream", async () => {
     async function* throwingChunks(): AsyncIterable<string> {
       yield "partial";
       throw new Error("source exploded");
@@ -281,11 +281,14 @@ describe("StreamRelay", () => {
     await vi.runAllTimersAsync();
     await guarded;
 
+    // The error still propagates so the caller's error path runs…
     await expect(promise).rejects.toThrow("source exploded");
 
-    // No sendMessage should have been called (source threw before accumulation completed).
+    // …but the partial output accumulated before the throw is NOT dropped — it is
+    // flushed to the channel (PR review: previously a real partial reply was lost).
     const sendCalls = mockState.calls.filter((c) => c.fn === "sendMessage");
-    expect(sendCalls.length).toBe(0);
+    expect(sendCalls.length).toBe(1);
+    expect(sendCalls[0].args.content).toBe("partial");
 
     // Typing timer should be cleaned up.
     const countAfter = mockState.calls.filter((c) => c.fn === "sendTyping").length;

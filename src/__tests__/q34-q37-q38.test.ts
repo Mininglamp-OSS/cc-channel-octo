@@ -117,6 +117,57 @@ describe("encodeVariableLength(0) (Q37)", () => {
   });
 });
 
+// Decoder bounds checks (PR review — protocol hardening):
+// a truncated/malformed packet must THROW (RangeError) instead of silently
+// reading `undefined` (→ 0/NaN coercion → corrupt parses, wrong messageID/seq).
+describe("Decoder bounds guards", () => {
+  it("readByte throws past the end", async () => {
+    const { Decoder } = await import("../octo/socket.js");
+    const dec = new Decoder(new Uint8Array([]));
+    expect(() => dec.readByte()).toThrow(RangeError);
+  });
+
+  it("readInt16 throws on a 1-byte buffer", async () => {
+    const { Decoder } = await import("../octo/socket.js");
+    const dec = new Decoder(new Uint8Array([0x01]));
+    expect(() => dec.readInt16()).toThrow(/out-of-bounds/);
+  });
+
+  it("readInt32 throws on a 2-byte buffer", async () => {
+    const { Decoder } = await import("../octo/socket.js");
+    const dec = new Decoder(new Uint8Array([0x01, 0x02]));
+    expect(() => dec.readInt32()).toThrow(/out-of-bounds/);
+  });
+
+  it("readInt64String throws on a 4-byte buffer", async () => {
+    const { Decoder } = await import("../octo/socket.js");
+    const dec = new Decoder(new Uint8Array([0x01, 0x02, 0x03, 0x04]));
+    expect(() => dec.readInt64String()).toThrow(/out-of-bounds/);
+  });
+
+  it("readString throws when the declared length exceeds the remaining buffer", async () => {
+    const { Decoder } = await import("../octo/socket.js");
+    // length prefix 0xFFFF (65535) but only 2 bytes of body follow → over-read.
+    const dec = new Decoder(new Uint8Array([0xFF, 0xFF, 0x61, 0x62]));
+    expect(() => dec.readString()).toThrow(/out-of-bounds/);
+  });
+
+  it("readString still returns a correctly-sized string", async () => {
+    const { Decoder } = await import("../octo/socket.js");
+    // length 2 + "hi"
+    const dec = new Decoder(new Uint8Array([0x00, 0x02, 0x68, 0x69]));
+    expect(dec.readString()).toBe("hi");
+  });
+
+  it("readByte/readInt16/readInt32 read correctly within bounds", async () => {
+    const { Decoder } = await import("../octo/socket.js");
+    const dec = new Decoder(new Uint8Array([0x07, 0x01, 0x02, 0x00, 0x00, 0x01, 0x00]));
+    expect(dec.readByte()).toBe(0x07);
+    expect(dec.readInt16()).toBe(0x0102);
+    expect(dec.readInt32()).toBe(0x00000100);
+  });
+});
+
 // Q38 aesIV salt length warning:
 // Q1 cleanup — the placeholder `expect(true).toBe(true)` test that previously
 // lived here is removed. The warning is now exercised by

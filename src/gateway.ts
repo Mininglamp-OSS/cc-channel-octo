@@ -4,6 +4,7 @@
 
 import { WKSocket } from './octo/socket.js';
 import { registerBot, sendHeartbeat } from './octo/api.js';
+import { isAllowedWsUrl } from './url-policy.js';
 import type { Config } from './config.js';
 import type { BotMessage } from './octo/types.js';
 import { existsSync, writeFileSync, unlinkSync, readFileSync, mkdirSync } from 'node:fs';
@@ -119,6 +120,17 @@ export class OctoGateway {
       throw new Error('OctoGateway.connect() called before register()');
     }
     const reg = this.registration;
+    // SECURITY: the AES-CBC payload layer is unauthenticated, so transport
+    // integrity is the only tamper guarantee. Refuse a plaintext ws:// endpoint
+    // for any non-loopback host (a MITM could bit-flip ciphertext undetected).
+    // wss:// is required in production; ws://localhost is allowed for local dev.
+    if (!isAllowedWsUrl(reg.ws_url)) {
+      throw new Error(
+        `OctoGateway.connect(): refusing insecure WebSocket URL "${reg.ws_url}" — ` +
+        `wss:// is required (ws:// permitted only for localhost). The message layer ` +
+        `is unauthenticated, so an unencrypted transport allows undetected tampering.`,
+      );
+    }
     this.socket = this.createSocket(reg.ws_url, reg.robot_id, reg.im_token);
     this.socket.connect();
     this.startServices();

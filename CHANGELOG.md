@@ -8,6 +8,28 @@ While the major version is `0`, minor releases may carry breaking changes.
 
 ## [Unreleased]
 
+### Security
+
+- **WebSocket transport must be `wss://`** — the WuKongIM payload layer is
+  AES-CBC without an auth tag, so transport integrity is the only tamper guarantee.
+  `gateway.connect()` now refuses a plaintext `ws://` endpoint for any non-loopback
+  host (`isAllowedWsUrl` in `url-policy.ts`); `ws://localhost` stays allowed for
+  local dev / a co-located TLS-terminating proxy.
+- **Binary protocol decoder bounds-checked** — `Decoder` (`octo/socket.ts`) now
+  throws `RangeError` on any over-read (truncated packet, or a string length field
+  exceeding the remaining buffer) instead of silently reading `undefined`
+  (→ 0/NaN coercion → corrupt parses, wrong messageID/seq → ack mismatch). The
+  packet-decode loop already catches and reconnects, so a malformed packet now
+  fails cleanly.
+- **Partial agent output no longer lost on stream error** — if the agent stream
+  throws mid-delivery, `StreamRelay.deliver` now flushes the already-accumulated
+  text to the channel before re-throwing, instead of dropping a real partial reply.
+- **`@all` / `@所有人` broadcast detection tightened** — the trailing-boundary
+  check used `[^\w]`, so `@all-members` / `@all.foo` wrongly triggered a
+  broadcast-to-everyone. It now excludes name-continuation chars (`-`, `.`, CJK),
+  while still matching a standalone token followed by space, CJK punctuation, or
+  end-of-string.
+
 ### Changed
 
 - **Frozen system prompt + SDK-session-owned history** — the bot's

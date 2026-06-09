@@ -83,15 +83,32 @@ export class Decoder {
   private offset = 0;
   constructor(private data: Uint8Array) {}
 
-  readByte(): number { return this.data[this.offset++]; }
+  /**
+   * Bounds guard: every reader calls this before touching the buffer so a
+   * truncated/malformed packet throws a typed error instead of silently reading
+   * `undefined` (which coerces to 0/NaN and produces corrupt parses — wrong
+   * messageID/seq → ack mismatch, message loss/dup). The packet-decode caller
+   * wraps decode in try/catch, so a throw cleanly rejects the bad packet.
+   */
+  private require(n: number): void {
+    if (this.offset + n > this.data.length) {
+      throw new RangeError(
+        `WKDecoder: out-of-bounds read (need ${n} byte(s) at offset ${this.offset}, have ${this.data.length})`,
+      );
+    }
+  }
+
+  readByte(): number { this.require(1); return this.data[this.offset++]; }
 
   readInt16(): number {
+    this.require(2);
     const v = (this.data[this.offset] << 8) | this.data[this.offset + 1];
     this.offset += 2;
     return v;
   }
 
   readInt32(): number {
+    this.require(4);
     const v =
       (this.data[this.offset] << 24) |
       (this.data[this.offset + 1] << 16) |
@@ -103,6 +120,7 @@ export class Decoder {
 
   readInt64String(): string {
     // Read 8 bytes as a big-endian unsigned integer string
+    this.require(8);
     let n = BigInt(0);
     for (let i = 0; i < 8; i++) {
       n = (n << 8n) | BigInt(this.data[this.offset + i]);
@@ -112,6 +130,7 @@ export class Decoder {
   }
 
   readInt64BigInt(): bigint {
+    this.require(8);
     let n = BigInt(0);
     for (let i = 0; i < 8; i++) {
       n = (n << 8n) | BigInt(this.data[this.offset + i]);
@@ -123,6 +142,10 @@ export class Decoder {
   readString(): string {
     const len = this.readInt16();
     if (len <= 0) return "";
+    // Guard the declared length against the remaining buffer so an oversized
+    // length field can't over-read (slice() would silently short-return and
+    // leave the offset past the end, corrupting every subsequent field).
+    this.require(len);
     const slice = this.data.slice(this.offset, this.offset + len);
     this.offset += len;
     return uintToString(Array.from(slice));

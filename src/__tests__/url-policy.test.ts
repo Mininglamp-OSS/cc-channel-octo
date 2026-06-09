@@ -7,6 +7,7 @@ import {
   isPrivateOrLocalAddress,
   assertPublicUrl,
   isAllowedApiUrl,
+  isAllowedWsUrl,
 } from '../url-policy.js';
 
 describe('isPrivateOrLocalAddress (S5 hex v4-mapped fix)', () => {
@@ -162,5 +163,36 @@ describe('isAllowedApiUrl (S6)', () => {
     ['not-a-url', false],
   ])('%s → %s', (url, expected) => {
     expect(isAllowedApiUrl(url)).toBe(expected);
+  });
+});
+
+describe('isAllowedWsUrl (unauthenticated-payload transport guard)', () => {
+  it.each([
+    // wss to public hosts — allowed
+    ['wss://im.example.com', true],
+    ['wss://im.example.com:443/ws', true],
+    ['wss://8.8.8.8/', true],
+    // ws to localhost — allowed for local dev / co-located TLS proxy
+    ['ws://localhost', true],
+    ['ws://127.0.0.1', true],
+    ['ws://[::1]', true],
+    ['ws://localhost:5200/ws', true],
+    // ws to any other host — rejected (plaintext + unauthenticated payload = MITM)
+    ['ws://im.example.com', false],
+    ['ws://8.8.8.8/', false],
+    // wss to a PRIVATE IP — rejected (suspicious, mirrors isAllowedApiUrl)
+    ['wss://127.0.0.1/', false],
+    ['wss://10.0.0.1/', false],
+    ['wss://169.254.169.254/', false],
+    ['wss://[::1]/', false],
+    // http(s)/ftp/file — rejected (not a ws scheme)
+    ['https://im.example.com/', false],
+    ['http://localhost/', false],
+    ['ftp://example.com/', false],
+    // malformed — rejected
+    ['', false],
+    ['not-a-url', false],
+  ])('%s → %s', (url, expected) => {
+    expect(isAllowedWsUrl(url)).toBe(expected);
   });
 });
