@@ -151,6 +151,19 @@ export interface Config {
      * Per-bot (set in `<baseDir>/<id>/config.json`).
      */
     env?: Record<string, string>;
+    /**
+     * #110: which skills this bot enables, selecting a subset of the skills
+     * discovered in its session sandbox's `.claude/skills/` (the shared library
+     * `<baseDir>/skills` + per-bot `<baseDir>/<id>/skills`, symlinked in by the
+     * skill-linker). Names match each SKILL.md `name` / directory name.
+     *   - omitted: SDK default (no explicit selection).
+     *   - `'all'`: enable every discovered skill.
+     *   - `string[]`: enable only the listed skills.
+     * This is the per-bot SELECTION layer over the centrally-maintained library:
+     * maintain skills once, each bot picks its own subset. Per-bot (set in
+     * `<baseDir>/<id>/config.json`).
+     */
+    skills?: string[] | 'all';
   };
   rateLimit: {
     maxPerMinute: number;

@@ -125,6 +125,7 @@ configurable.
 | `groupConfigDir` | *(unset)* | Directory of per-group instruction files (`<groupId>.md`). A match is injected into the system prompt as trusted custom instructions for that group. See [Per-group instructions](#per-group-instructions). |
 | `sdk.anthropicBaseUrl` | *(unset)* | Override the upstream Claude API endpoint. See [Self-hosted gateway](#self-hosted-gateway) below. |
 | `sdk.env` | *(unset)* | Extra environment variables (`{ "KEY": "value" }`) injected verbatim into the agent's tool subprocess. Per-bot. Use to give a bot's skills what their CLIs need — e.g. `{ "OCTO_BOT_ID": "<robotId>" }` so a multi-bot deploy's `octo-cli` selects the right stored profile. See [Agent skills](#agent-skills). |
+| `sdk.skills` | *(SDK default)* | Which skills this bot enables: `'all'` or a `string[]` of skill names. Per-bot **selection** over the centrally-maintained skill library (maintain once, each bot picks its subset). Omit to use the SDK default. See [Agent skills](#agent-skills). |
 | `rateLimit.maxPerMinute` | `5` | Max requests per minute per session |
 | `context.maxContextChars` | `6000` | Max characters of group context injected into prompts |
 | `context.historyLimit` | `40` | Max messages in session history window |
@@ -216,6 +217,34 @@ folder. For octo operations, octo-cli ships ready-made skills:
 mkdir -p ~/.cc-channel-octo/skills
 octo-cli skills --install ~/.cc-channel-octo/skills   # octo-shared, octo-messaging, …
 ```
+
+**Per-bot skill selection.** The library is maintained once; each bot picks its
+subset via `sdk.skills` in its per-bot config.json — `'all'`, or a list of skill
+names:
+
+```jsonc
+// ~/.cc-channel-octo/issue-triage/config.json
+{ "sdk": { "skills": ["octo-messaging", "github-issue-triage"] } }
+```
+
+Omit it for the SDK default. So a `triage` bot can enable the triage + messaging
+skills while another bot enables only messaging — from the same shared library.
+
+**Per-bot identity.** Each bot's persona/rules are independent:
+
+- `<id>/SOUL.md` — persona (overrides `sdk.systemPrompt`).
+- `<id>/CLAUDE.md` — behavior rules. Discovered because the `project` source
+  walks up from the session sandbox to the bot subtree.
+- `~/.cc-channel-octo/CLAUDE.md` (optional) — an all-bots baseline (the same
+  upward walk reaches it).
+
+> ⚠️ **CLAUDE.md upward-walk has no project boundary.** The walk continues past
+> the bot subtree all the way up the filesystem — so a `CLAUDE.md` in the host
+> HOME or any ancestor directory **leaks into every bot's context**. Keep the
+> deploy machine's `$HOME` (and ancestors) free of `CLAUDE.md`; put bot rules in
+> `<id>/CLAUDE.md` and shared rules in `~/.cc-channel-octo/CLAUDE.md`. (This is
+> also why `settingSources` stays `['project']`, not `['user']` — `user` would
+> additionally pull in the host's personal `~/.claude` config/skills.)
 
 **Prerequisites are the operator's responsibility, out-of-band:** install the
 CLI a skill needs (`npm i -g @mininglamp-oss/octo-cli`, etc.) and authenticate it
