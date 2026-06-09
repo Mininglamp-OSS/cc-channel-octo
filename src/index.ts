@@ -739,6 +739,14 @@ export async function handleMessage(
 
     } catch (err) {
       console.error(`[cc-channel-octo] Error processing message (session=${result.sessionKey}):`, String(err));
+      // #115: attribute a FAILED cron fire to its task. handleMessage swallows
+      // errors here (it sends a user-facing reply, never rethrows), so the
+      // scheduler's promise can't observe failure — surface it at the point we
+      // actually catch it. The synthetic message_id is `cron:<taskId>:<ts>`.
+      if (msg.payload._cronFire === true && msg.message_id.startsWith('cron:')) {
+        const taskId = msg.message_id.split(':')[1];
+        console.error(`[cc-channel-octo] cron: fired task ${taskId} failed during execution: ${String(err)}`);
+      }
       // Best-effort error reply
       try {
         await sendMessage({

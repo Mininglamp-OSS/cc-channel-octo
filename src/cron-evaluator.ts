@@ -124,9 +124,9 @@ export function isOneShotSchedule(schedule: string): boolean {
  *
  * `new Date()` alone is too lenient (e.g. it rolls "2026-13-13T…" into a real
  * but wrong instant instead of rejecting it). We additionally require the
- * canonical shape via regex AND verify the parsed Date round-trips its UTC
- * fields, so an out-of-range month/day/hour can't sneak through as a silently
- * shifted time.
+ * canonical shape via regex AND verify the authored wall-clock fields name a
+ * real calendar instant, so an out-of-range month/day/hour can't sneak through
+ * as a silently shifted time — for ALL zone forms (Z, ±hh:mm, or none).
  */
 export function parseOneShot(schedule: string): number | null {
   const s = schedule.trim();
@@ -135,19 +135,28 @@ export function parseOneShot(schedule: string): number | null {
   if (!m) return null;
   const t = new Date(s).getTime();
   if (Number.isNaN(t)) return null;
-  // Reject lenient rollover: re-render the instant and confirm the calendar
-  // fields the user wrote actually match. Compare in UTC when an explicit
-  // Z/offset was given; otherwise the string is local wall-clock, so compare
-  // local fields.
-  const d = new Date(t);
-  const hasZone = m[7] !== undefined;
-  const yr = hasZone ? d.getUTCFullYear() : d.getFullYear();
-  const mo = (hasZone ? d.getUTCMonth() : d.getMonth()) + 1;
-  const day = hasZone ? d.getUTCDate() : d.getDate();
-  // With a numeric offset (not Z) the wall-clock is shifted, so only validate
-  // the calendar for Z / no-zone; an offset is already unambiguous via Date.
-  if (m[7] === undefined || m[7] === 'Z') {
-    if (yr !== Number(m[1]) || mo !== Number(m[2]) || day !== Number(m[3])) return null;
+  // Reject lenient rollover. Calendar validity (is "Feb 31" a real date? is hour
+  // 25 valid?) is INDEPENDENT of the timezone, so validate the authored
+  // wall-clock fields with a zone-free UTC round-trip probe: if Date.UTC had to
+  // roll any field over, the rendered field won't match what the user wrote.
+  // This catches offset rollover (e.g. 2026-02-31T00:00:00+08:00) too — the old
+  // code skipped the check for numeric offsets and let it roll into March.
+  const yr = Number(m[1]);
+  const mo = Number(m[2]);
+  const day = Number(m[3]);
+  const hh = Number(m[4]);
+  const mm = Number(m[5]);
+  const ss = m[6] !== undefined ? Number(m[6]) : 0;
+  const probe = new Date(Date.UTC(yr, mo - 1, day, hh, mm, ss));
+  if (
+    probe.getUTCFullYear() !== yr ||
+    probe.getUTCMonth() !== mo - 1 ||
+    probe.getUTCDate() !== day ||
+    probe.getUTCHours() !== hh ||
+    probe.getUTCMinutes() !== mm ||
+    probe.getUTCSeconds() !== ss
+  ) {
+    return null;
   }
   return t;
 }

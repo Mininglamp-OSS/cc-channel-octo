@@ -25,13 +25,13 @@ export const CRON_TICK_MS = 30_000;
 export interface CronSchedulerOptions {
   cronStore: CronStore;
   /**
-   * Invoked with a synthetic BotMessage when a task is due (= onInbound). May
-   * return a promise that resolves when the fired turn finishes; the scheduler
-   * attaches a per-task failure logger to it (attribution) but does NOT await it
-   * — firing stays non-blocking and nextRun advances regardless (a failed fire
-   * is logged, not retried, to avoid an error loop hammering the channel).
+   * Invoked with a synthetic BotMessage when a task is due (= onInbound). Fire
+   * is non-blocking; the scheduler does not await it and nextRun advances
+   * regardless (a failed fire is logged at the handler's own catch site —
+   * attributed to the task via the `cron:<id>:<ts>` message_id — not retried, to
+   * avoid an error loop hammering the channel).
    */
-  onFire: (msg: BotMessage) => void | Promise<void>;
+  onFire: (msg: BotMessage) => void;
   /** Log prefix, e.g. "[bot-id] " in multi-bot mode. */
   label?: string;
 }
@@ -108,19 +108,12 @@ export class CronScheduler {
             );
           }
           try {
-            const r = this.opts.onFire(synthesizeCronMessage(task));
-            // Attribute an async delivery failure to THIS task (the pipeline's
-            // own .catch logs it unattributed). Not awaited — fire stays
-            // non-blocking and nextRun advances regardless.
-            if (r && typeof (r as Promise<void>).catch === 'function') {
-              const taskId = task.id;
-              const label = this.opts.label ?? '';
-              (r as Promise<void>).catch((err) => {
-                console.error(
-                  `[cc-channel-octo] ${label}cron: fired task ${taskId} failed during execution: ${String(err)}`,
-                );
-              });
-            }
+            // Fire-and-forget: onFire (= onInbound) drives the full pipeline,
+            // which swallows its own errors and posts a user-facing reply. A
+            // FAILED fire is attributed to this task at handleMessage's catch
+            // site (via the `cron:<id>:<ts>` message_id) — not here, because the
+            // returned value is void and never rejects.
+            this.opts.onFire(synthesizeCronMessage(task));
           } catch (err) {
             console.error(
               `[cc-channel-octo] ${this.opts.label ?? ''}cron: onFire threw for ${task.id}: ${String(err)}`,

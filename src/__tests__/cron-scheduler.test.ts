@@ -82,18 +82,15 @@ describe('CronScheduler.tick', () => {
     expect(fired).toEqual(['ok']); // second task still fired
   });
 
-  it('logs an async fire failure attributed to the task, and still advances (#1)', async () => {
-    const errSpy = vi.spyOn(console, 'error');
+  it('a recurring task advances even when the fire fails downstream (no retry loop) (#1)', () => {
     store.save([task({ id: 'flaky', recurring: true, schedule: '*/5 * * * *' })]);
-    // onFire returns a rejecting promise (delivery failed downstream).
-    sched(() => Promise.reject(new Error('deliver failed'))).tick();
-    // recurring task advanced despite the failure (no retry loop).
+    // onFire is fire-and-forget (void). A downstream delivery failure is
+    // attributed to the task at handleMessage's catch site (see
+    // cron-integration.test.ts), NOT here — the scheduler must still advance.
+    sched(() => {}).tick();
+    // recurring task advanced despite a (hypothetical) downstream failure.
     expect(store.load()[0].nextRun).toBeGreaterThan(Date.now());
-    // wait a microtask for the attached .catch to run.
-    await Promise.resolve();
-    const logged = errSpy.mock.calls.map((c) => c.join(' ')).join('\n');
-    expect(logged).toMatch(/flaky/);
-    expect(logged).toMatch(/failed during execution/);
+    expect(store.load()[0].lastRun).not.toBeNull();
   });
 
   it('missed task fires once (not per missed window)', () => {
