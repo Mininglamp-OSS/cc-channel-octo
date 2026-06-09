@@ -259,25 +259,15 @@ Before each `sendMessage` call, the relay runs `resolveMentions()` from `mention
 
 Resolved `mentionUids`, `mentionEntities`, and `mentionAll` are attached to the outbound payload so the IM server can route notifications correctly.
 
-### Media (G5/G24)
+### Outbound media & rich text
 
-`media-upload.ts` provides `uploadAndSendMedia()` for one-shot media delivery:
-1. Resolve input (`data:` / `file://` / `http(s)://`) into a file body, size, content-type, and dimensions (for images).
-2. Call `getUploadCredentials` to obtain short-lived COS STS credentials.
-3. Stream-upload via `cos-nodejs-sdk-v5` `putObject`; resolve CDN URL (re-encoded for non-ASCII keys).
-4. Call `sendMediaMessage` (Image with `width`/`height`/`name`/`size`, File-like with `name`/`size` only).
-
-500 MB max file size. Temp files cleaned in `finally`. PNG/JPEG/GIF/WebP dimension parsing reads only header bytes (no image decoding).
-
-### RichText (G6)
-
-`sendRichTextCombined()` packs text and `![alt](url)` markdown image references into a single `type=14` (RichText) message:
-- Parses markdown image refs, uploads each in parallel to COS.
-- Assembles interleaved `text` / `image` blocks.
-- Successful images become `{ type: "image", url, width, height }` blocks.
-- Failed images fall back inline as `[alt]` text inside the surrounding text block.
-- A `plain` field with `[图片]` placeholders is sent alongside for legacy-client compat (server recomputes from blocks authoritatively).
-- Returns `richText: false` when no images were uploaded successfully — caller falls back to plain text.
+cc does not implement an internal media-upload or rich-text-send pipeline. Outbound
+media delivery is handled by the agent's octo-cli skill (`octo-cli file upload` +
+`octo-cli message send`), consistent with the skill-as-data model (see RUNTIME.md).
+cc only reads `getUploadCredentials` once at startup to discover the media CDN host
+(so inbound CDN-hosted image URLs pass URL-policy validation); it uploads nothing
+itself. Inbound media (downloading images the user sent) lives in `media-inbound.ts`
+/ `inbound.ts`.
 
 ## Error Handling
 

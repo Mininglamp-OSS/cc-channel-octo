@@ -2,7 +2,7 @@
  * URL policy — shared SSRF defense + URL validation utilities.
  *
  * Stage 6 W1: consolidates URL validation that was previously duplicated and
- * inconsistent across media-upload.ts, inbound.ts, and config.ts.
+ * inconsistent across inbound.ts and config.ts.
  *
  * Three public surfaces:
  *   - isPrivateOrLocalAddress(address): IP-range check (IPv4 + IPv6 + v4-mapped)

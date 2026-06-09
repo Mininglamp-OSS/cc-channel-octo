@@ -44,7 +44,7 @@ skills + gaps), see RUNTIME.md:
 - L7: config.ts — configuration loading
 
 Cross-cutting: url-policy.ts (SSRF/URL validation), cwd-resolver.ts (per-session
-cwd isolation), media-upload.ts / file-inline-wrap.ts (inbound media), db-adapter.ts.
+cwd isolation), media-inbound.ts / file-inline-wrap.ts (inbound media), db-adapter.ts.
 
 ## Testing
 
