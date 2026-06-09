@@ -122,27 +122,6 @@ export const RICH_TEXT_BLOCK_IMAGE = "image";
 /** Placeholder rendered for an inline image when assembling plain text. */
 export const RICH_TEXT_IMAGE_PLACEHOLDER = '[图片]';
 
-/**
- * RichText(=14) `content` array element.
- *
- * Type "text" requires non-empty `text`; type "image" requires `url` (http/https)
- * and `width`/`height` > 0. Caller is responsible for validation; this interface
- * only describes the wire shape.
- *
- * `[key: string]: unknown` allows forward-compatibility with future block fields
- * without forcing type bumps.
- */
-export interface RichTextBlock {
-  type: string; // "text" | "image" | future variants
-  text?: string;
-  url?: string;
-  width?: number;
-  height?: number;
-  name?: string;
-  size?: number;
-  [key: string]: unknown;
-}
-
 // ─── Forward-payload nested message (MultipleForward children) ──────────────
 
 export interface ForwardUser {
