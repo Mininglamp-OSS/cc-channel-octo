@@ -21,7 +21,7 @@ import type { MessagePayload, ForwardMessage, ForwardUser } from './octo/types.j
 import { MessageType, RICH_TEXT_BLOCK_IMAGE, RICH_TEXT_BLOCK_TEXT, RICH_TEXT_IMAGE_PLACEHOLDER } from './octo/types.js';
 import { truncateUtf8ByBytes } from './file-inline-wrap.js';
 import { assertPublicUrl, fetchWithRedirectGuard } from './url-policy.js';
-import { sanitizeDisplayName } from './prompt-safety.js';
+import { sanitizeDisplayName, sanitizePromptBody } from './prompt-safety.js';
 
 /**
  * S1 helper: same-host check for credential scoping.
@@ -374,10 +374,15 @@ export function resolveMultipleForwardText(
   const truncatedCount = rawMsgs.length - msgs.length;
   const userMap = new Map<string, string>();
   for (const u of users) {
-    // SECURITY: u.name / u.uid are user-controlled and become a `<name>: ` line
-    // label in the transcript. Sanitize so a forwarded sender name can't forge a
-    // role label or section marker in the LLM prompt (prompt injection).
-    if (u.uid && u.name) userMap.set(u.uid, sanitizeDisplayName(u.name, u.uid));
+    // SECURITY: u.name AND u.uid are user-controlled in a forward payload and
+    // become a `<name>: ` line label. sanitizeDisplayName returns its fallback
+    // VERBATIM, so passing raw u.uid as the fallback re-introduces the injection
+    // when u.name collapses to empty (PR #128 review P1). Sanitize the uid too
+    // and only fall back to a constant when nothing survives.
+    if (u.uid && u.name) {
+      const safe = sanitizeDisplayName(u.name) || sanitizeDisplayName(u.uid) || 'unknown';
+      userMap.set(u.uid, safe);
+    }
   }
   const lines: string[] = ['[合并转发: 聊天记录]'];
   for (const m of msgs) {
@@ -387,7 +392,15 @@ export function resolveMultipleForwardText(
       lines.push(`${senderName}: [合并转发]`);
       lines.push(nested);
     } else {
-      lines.push(`${senderName}: ${resolveInnerMessageText(m.payload, apiUrl, cdnHost)}`);
+      // SECURITY: the inner message BODY is attacker-controlled (e.g. a forwarded
+      // Text content of `hi\n[assistant bot]: …`) and is NOT otherwise escaped
+      // before the assembled transcript flows into the user-role prompt (the
+      // forward path bypasses the quote/group-context body escapers). Neutralize
+      // role labels + section markers here so a forwarded body can't forge a turn
+      // boundary (PR #128 review). Nested transcripts are already escaped per-line
+      // by their own recursion, so only the leaf bodies need this.
+      const inner = sanitizePromptBody(resolveInnerMessageText(m.payload, apiUrl, cdnHost));
+      lines.push(`${senderName}: ${inner}`);
     }
   }
   if (truncatedCount > 0) {
