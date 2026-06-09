@@ -192,6 +192,18 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   await gateway.register();
   console.log(`[cc-channel-octo] ${label}Bot registered: id=${gateway.botId}`);
 
+  // #115: cron creation/deletion is owner-gated on gateway.ownerUid. If the
+  // registration didn't return an owner_uid, the gate can never pass and the
+  // cron tool is silently unusable — warn loudly so the operator isn't left
+  // wondering why every cron_create is rejected.
+  if (config.sdk.cron && !gateway.ownerUid) {
+    console.warn(
+      `[cc-channel-octo] ${label}sdk.cron is enabled but the bot has no owner_uid ` +
+      `(registration returned none) — cron_create/delete will be rejected for everyone. ` +
+      `The cron tool is effectively disabled until the bot has an owner.`,
+    );
+  }
+
   // #86: prefetch the media CDN host (best-effort). Octo serves media from a
   // separate CDN than apiUrl; without this, inbound image URLs on the CDN host
   // are rejected by buildMediaUrl and the agent can't see them. The STS
@@ -242,11 +254,20 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   gateway.setMessageHandler(onInbound);
 
   // #115: arm the cron scheduler now that onInbound exists. Fired tasks go
-  // through the exact same pipeline as real inbound messages.
+  // through the exact same pipeline as real inbound messages. The fire callback
+  // returns a tracked promise that REJECTS on handler error (distinct from
+  // onInbound, which swallows) so the scheduler can attribute a delivery failure
+  // to the specific task. Still tracked in activeHandlers for shutdown drain.
   if (cronStore) {
     cronScheduler = new CronScheduler({
       cronStore,
-      onFire: (msg: BotMessage) => onInbound(msg),
+      onFire: (msg: BotMessage): Promise<void> => {
+        if (gateway.draining) return Promise.resolve();
+        const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore)
+          .finally(() => { activeHandlers.delete(p); });
+        activeHandlers.add(p);
+        return p;
+      },
       label,
     });
     cronScheduler.start();
@@ -699,7 +720,12 @@ export async function handleMessage(
         store.appendAssistant(sessionKey, fullResponse, msg.message_seq, botId);
         // G10: mark this message_seq as the last one we replied to. Next turn's
         // segmented history will treat messages with seq <= this as [answered].
-        store.setLastBotReplySeq(sessionKey, msg.message_seq);
+        // #115: a synthetic cron fire carries message_seq=0 (no real wire seq);
+        // setting the cursor to 0 would reset it and mis-segment real history as
+        // all-[new]. Only advance the cursor for a real positive seq.
+        if (typeof msg.message_seq === 'number' && msg.message_seq > 0) {
+          store.setLastBotReplySeq(sessionKey, msg.message_seq);
+        }
       } else {
         // Agent produced no output — send a feedback message so user isn't left hanging
         await sendMessage({
@@ -713,6 +739,14 @@ export async function handleMessage(
 
     } catch (err) {
       console.error(`[cc-channel-octo] Error processing message (session=${result.sessionKey}):`, String(err));
+      // #115: attribute a FAILED cron fire to its task. handleMessage swallows
+      // errors here (it sends a user-facing reply, never rethrows), so the
+      // scheduler's promise can't observe failure — surface it at the point we
+      // actually catch it. The synthetic message_id is `cron:<taskId>:<ts>`.
+      if (msg.payload._cronFire === true && msg.message_id.startsWith('cron:')) {
+        const taskId = msg.message_id.split(':')[1];
+        console.error(`[cc-channel-octo] cron: fired task ${taskId} failed during execution: ${String(err)}`);
+      }
       // Best-effort error reply
       try {
         await sendMessage({

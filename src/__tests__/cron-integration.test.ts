@@ -103,6 +103,14 @@ describe('cron integration (#115)', () => {
     expect(queryAgent).toHaveBeenCalledTimes(1);
   });
 
+  it('a cron fire (message_seq=0) does NOT poison the reply-seq cursor (#3)', async () => {
+    const msg = synthesizeCronMessage(task({ channelId: '', channelType: ChannelType.DM, fromUid: 'peer-9' }));
+    expect(msg.message_seq).toBe(0);
+    await handleMessage(msg, config, store, router, groupContext, streamRelay, BOT_ID, cronStore);
+    // sessionKey for this DM is from_uid; the cursor must stay unset (not 0).
+    expect(store.getLastBotReplySeq('peer-9')).toBeUndefined();
+  });
+
   it('the agent turn is offered the cron MCP tool (mcpServers.cron present)', async () => {
     let captured: Record<string, unknown> | undefined;
     (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
@@ -115,5 +123,25 @@ describe('cron integration (#115)', () => {
     await handleMessage(msg, config, store, router, groupContext, streamRelay, BOT_ID, cronStore);
     expect(captured).toBeDefined();
     expect(captured!.cron).toBeDefined();
+  });
+
+  it('a FAILED cron fire is attributed to its task at the real catch site (#A)', async () => {
+    // The production failure path: queryAgent throws → handleMessage's own
+    // try/catch swallows it (sends a user-facing error reply, never rethrows).
+    // The cron attribution must therefore happen INSIDE that catch, keyed off
+    // the synthetic `cron:<taskId>:<ts>` message_id — not on a returned promise
+    // (handleMessage always resolves). Regression guard for PR #118.
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(async function* () {
+      throw new Error('agent blew up');
+      yield ''; // unreachable; keeps the generator well-typed
+    });
+    const msg = synthesizeCronMessage(task({ id: 'doomed', channelId: '', channelType: ChannelType.DM, fromUid: 'peer-9' }));
+    await handleMessage(msg, config, store, router, groupContext, streamRelay, BOT_ID, cronStore);
+
+    const logged = errSpy.mock.calls.map((c) => c.map(String).join(' ')).join('\n');
+    expect(logged).toMatch(/doomed/);
+    expect(logged).toMatch(/failed during execution/);
+    errSpy.mockRestore();
   });
 });

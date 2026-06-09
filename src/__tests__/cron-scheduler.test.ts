@@ -82,6 +82,17 @@ describe('CronScheduler.tick', () => {
     expect(fired).toEqual(['ok']); // second task still fired
   });
 
+  it('a recurring task advances even when the fire fails downstream (no retry loop) (#1)', () => {
+    store.save([task({ id: 'flaky', recurring: true, schedule: '*/5 * * * *' })]);
+    // onFire is fire-and-forget (void). A downstream delivery failure is
+    // attributed to the task at handleMessage's catch site (see
+    // cron-integration.test.ts), NOT here — the scheduler must still advance.
+    sched(() => {}).tick();
+    // recurring task advanced despite a (hypothetical) downstream failure.
+    expect(store.load()[0].nextRun).toBeGreaterThan(Date.now());
+    expect(store.load()[0].lastRun).not.toBeNull();
+  });
+
   it('missed task fires once (not per missed window)', () => {
     // nextRun 2h in the past, recurring every 5 min — must fire exactly once.
     store.save([task({ recurring: true, schedule: '*/5 * * * *', nextRun: Date.now() - 2 * 3600_000 })]);

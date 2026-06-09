@@ -84,3 +84,25 @@ describe('cron mention-gate bypass (#115)', () => {
     expect(r).toBeNull();
   });
 });
+
+describe('cron fire bypasses rate limit (#1/#5)', () => {
+  it('a cron fire is processed even when the per-session bucket is exhausted', async () => {
+    const router = new SessionRouter(makeConfig({ rateLimit: { maxPerMinute: 1 } }), ROBOT_ID);
+    const dm = (over?: Partial<BotMessage>): BotMessage => groupMsg({
+      channel_type: ChannelType.DM, channel_id: undefined, from_uid: 'peer-1', ...over,
+    });
+    // Exhaust the bucket with a real DM (maxPerMinute=1).
+    const first = await router.route(dm({ payload: { type: MessageType.Text, content: 'hi' } }));
+    expect(first?.shouldProcess).toBe(true);
+    // A second REAL message is now rate-limited.
+    const blocked = await router.route(dm({ message_id: '2', payload: { type: MessageType.Text, content: 'again' } }));
+    expect(blocked?.shouldProcess).toBe(false);
+    // But a CRON FIRE for the same session still processes (operator-scheduled).
+    const cron = await router.route(dm({
+      message_id: '3',
+      payload: { type: MessageType.Text, content: 'scheduled', _cronFire: true, [CRON_FIRE_NONCE_KEY]: CRON_FIRE_NONCE },
+    }));
+    expect(cron).not.toBeNull();
+    expect(cron!.shouldProcess).toBe(true);
+  });
+});

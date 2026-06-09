@@ -3,7 +3,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  parseCronExpression, matchesCron, computeNextRun, isOneShotSchedule,
+  parseCronExpression, matchesCron, computeNextRun, isOneShotSchedule, parseOneShot,
 } from '../cron-evaluator.js';
 
 describe('parseCronExpression', () => {
@@ -94,5 +94,46 @@ describe('computeNextRun', () => {
 
   it('impossible schedule (Feb 31) returns null', () => {
     expect(computeNextRun('0 0 31 2 *', true, NOW)).toBeNull();
+  });
+});
+
+describe('parseOneShot (#6 strict ISO)', () => {
+  it('accepts canonical ISO datetimes', () => {
+    expect(parseOneShot('2999-01-01T00:00:00Z')).toBe(new Date('2999-01-01T00:00:00Z').getTime());
+    expect(parseOneShot('2999-06-09T09:30Z')).toBe(new Date('2999-06-09T09:30Z').getTime());
+    expect(parseOneShot('2999-06-09T09:30:00')).not.toBeNull(); // no zone = local
+    expect(parseOneShot('2999-06-09T09:30:00+08:00')).not.toBeNull();
+  });
+
+  it('rejects lenient rollover dates (month 13, day 32) instead of shifting them', () => {
+    expect(parseOneShot('2026-13-13T00:00:00Z')).toBeNull(); // month 13
+    expect(parseOneShot('2026-02-31T00:00:00Z')).toBeNull(); // Feb 31 rolls to Mar
+    expect(parseOneShot('2026-06-32T00:00:00Z')).toBeNull(); // day 32
+  });
+
+  it('rejects rollover for numeric-offset and zone-less forms too (#B)', () => {
+    // The offset form used to skip calendar validation — Feb 31 +08:00 silently
+    // rolled into March. Calendar validity is zone-independent, so reject it.
+    expect(parseOneShot('2026-02-31T00:00:00+08:00')).toBeNull();
+    expect(parseOneShot('2026-13-13T00:00:00+05:30')).toBeNull();
+    expect(parseOneShot('2026-06-32T00:00:00-07:00')).toBeNull();
+    expect(parseOneShot('2026-02-31T00:00:00')).toBeNull(); // no zone (local)
+    expect(parseOneShot('2025-02-29T00:00:00+08:00')).toBeNull(); // 2025 not a leap year
+    // Out-of-range time fields are also calendar-invalid regardless of zone.
+    expect(parseOneShot('2026-06-09T25:00:00+08:00')).toBeNull(); // hour 25
+    expect(parseOneShot('2026-06-09T00:61:00+08:00')).toBeNull(); // minute 61
+    // A legitimate leap day with an offset must still pass.
+    expect(parseOneShot('2028-02-29T00:00:00+08:00')).not.toBeNull(); // 2028 IS leap
+  });
+
+  it('rejects non-ISO / garbage that the loose heuristic would pass', () => {
+    expect(parseOneShot('T')).toBeNull();
+    expect(parseOneShot('0T0')).toBeNull();
+    expect(parseOneShot('badT123')).toBeNull();
+    expect(parseOneShot('not a date')).toBeNull();
+  });
+
+  it('computeNextRun uses strict parsing — a rollover one-shot is rejected', () => {
+    expect(computeNextRun('2026-13-13T00:00:00Z', false, Date.now())).toBeNull();
   });
 });

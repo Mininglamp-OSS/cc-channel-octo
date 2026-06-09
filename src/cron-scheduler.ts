@@ -24,7 +24,13 @@ export const CRON_TICK_MS = 30_000;
 
 export interface CronSchedulerOptions {
   cronStore: CronStore;
-  /** Invoked with a synthetic BotMessage when a task is due (= onInbound). */
+  /**
+   * Invoked with a synthetic BotMessage when a task is due (= onInbound). Fire
+   * is non-blocking; the scheduler does not await it and nextRun advances
+   * regardless (a failed fire is logged at the handler's own catch site —
+   * attributed to the task via the `cron:<id>:<ts>` message_id — not retried, to
+   * avoid an error loop hammering the channel).
+   */
   onFire: (msg: BotMessage) => void;
   /** Log prefix, e.g. "[bot-id] " in multi-bot mode. */
   label?: string;
@@ -102,6 +108,11 @@ export class CronScheduler {
             );
           }
           try {
+            // Fire-and-forget: onFire (= onInbound) drives the full pipeline,
+            // which swallows its own errors and posts a user-facing reply. A
+            // FAILED fire is attributed to this task at handleMessage's catch
+            // site (via the `cron:<id>:<ts>` message_id) — not here, because the
+            // returned value is void and never rejects.
             this.opts.onFire(synthesizeCronMessage(task));
           } catch (err) {
             console.error(
