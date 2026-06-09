@@ -99,6 +99,72 @@ npm start
 
 The bot is now online. Send it a DM or @mention it in a group.
 
+### Install via Claude Code CLI (copy-paste prompts)
+
+Prefer to let Claude Code do the setup? Run `claude` in an empty working
+directory and paste **one prompt per step**. The two steps are deliberately
+separate: **Install** clones + builds the code (no secrets), then **Configure**
+writes your token(s) and starts the gateway. Both steps support single- and
+multi-bot deployments.
+
+> **Heads up — these are agentic prompts, not scripts.** Claude Code will run
+> `git`, `npm`, `mkdir`, and write files under `~/.cc-channel-octo/`. Read what
+> it proposes before approving. Your bot token(s) go only into
+> `~/.cc-channel-octo/<id>/config.json` (chmod `600`) — never into the repo,
+> shell history, or this prompt's output.
+
+#### Step 1 — Install (clone + build, no secrets)
+
+```text
+Install the cc-channel-octo gateway from source.
+
+1. Verify Node.js >= 22 is on PATH (`node -v`); stop and tell me if it is older.
+2. Clone https://github.com/Mininglamp-OSS/cc-channel-octo.git into the current
+   directory (skip the clone if a cc-channel-octo/ checkout is already here — just
+   `git pull` it instead) and cd into it.
+3. Run `npm install` then `npm run build`.
+4. Run `npm test` and confirm it passes.
+5. Print the absolute path of the repo and tell me to run the Configure prompt
+   next. Do NOT create any config files or ask me for a token in this step.
+```
+
+#### Step 2 — Configure & run (writes token, starts gateway)
+
+Edit the bracketed values first, then paste. For **multi-bot**, list more than
+one entry under "Bots".
+
+```text
+Configure and start the cc-channel-octo gateway you just installed.
+
+Octo API URL: https://your-octo-instance.com
+Bots (one line each — "id = token"; ids are slugs [a-z0-9._-]):
+  default = bf_YOUR_BOT_TOKEN
+  # add more lines for multi-bot, e.g.:
+  # support = bf_TOKEN_A
+  # ops     = bf_TOKEN_B
+Claude model: vertexai/claude-opus-4-8   # or leave blank for the SDK default
+
+Do this:
+1. Create the fixed layout under ~/.cc-channel-octo/ : a GLOBAL config.json
+   holding { "apiUrl": "<the URL>", "bots": [ { "id": "<id>" }, ... ] } with one
+   entry per bot above and NO tokens in it.
+2. For EACH bot, create ~/.cc-channel-octo/<id>/config.json containing that bot's
+   { "botToken": "<its token>", "sdk": { "model": "<model, if given>" } }.
+3. `chmod 600` the global config and every per-bot config.json. Tokens must
+   appear ONLY in the per-bot files — never echo a token back to me or put one in
+   the global file.
+4. Validate: the global `bots[]` ids must exactly match the per-bot directory
+   names, and each per-bot file must have a non-empty botToken. Fix mismatches.
+5. From the repo dir, start the gateway with `npm start` and watch the logs until
+   you see "Ready — listening for messages" (multi-bot also logs "Multi-bot mode:
+   starting N bots" and one "Bot connected" per bot). Report success, or surface
+   the first error if a bot fails to register/connect.
+```
+
+After "Ready", DM the bot or @mention it in a group. To change config later,
+edit the JSON files and restart (`npm start`); see [Configuration](#configuration)
+for every available field.
+
 ## Configuration
 
 All configuration comes from JSON files — there are **no environment-variable
