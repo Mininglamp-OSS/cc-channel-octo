@@ -39,6 +39,12 @@ While the major version is `0`, minor releases may carry breaking changes.
 
 ### Removed
 
+- **Dead Octo API functions** — removed `fetchBotGroups`, `getGroupInfo`,
+  `searchSpaceMembers` (originally G15/G16/G17) and their `BotGroup` / `GroupInfo`
+  / `SpaceMember` interfaces from `octo/api.ts`. They had **zero production callers**
+  (only tests referenced them) — these read-only group/space queries are covered by
+  the agent's octo-cli skill (`octo-cli group list` / `group get` / `bot space-members`).
+  No runtime behavior change.
 - **Dead media-upload pipeline + `cos-nodejs-sdk-v5`** — removed `media-upload.ts`
   (`uploadAndSendMedia` / `sendRichTextCombined` / `uploadFileToCOS`) and the
   `sendMediaMessage` / `sendRichTextMessage` API functions. This outbound media /
