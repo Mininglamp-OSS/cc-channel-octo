@@ -21,6 +21,7 @@ import type { MessagePayload, ForwardMessage, ForwardUser } from './octo/types.j
 import { MessageType, RICH_TEXT_BLOCK_IMAGE, RICH_TEXT_BLOCK_TEXT, RICH_TEXT_IMAGE_PLACEHOLDER } from './octo/types.js';
 import { truncateUtf8ByBytes } from './file-inline-wrap.js';
 import { assertPublicUrl, fetchWithRedirectGuard } from './url-policy.js';
+import { sanitizeDisplayName } from './prompt-safety.js';
 
 /**
  * S1 helper: same-host check for credential scoping.
@@ -327,7 +328,11 @@ function resolveInnerMessageText(payload: ForwardMessage['payload'], apiUrl?: st
     case MessageType.Card:
       return '[名片]';
     case MessageType.File: {
-      const label = payload.name ? `[文件: ${payload.name}]` : '[文件]';
+      // SECURITY: payload.name is user-controlled and lands inside a `[文件: …]`
+      // label; sanitizeDisplayName strips bracket/newline breakout chars so it
+      // can't forge a section marker or fake role label (prompt injection).
+      const safeName = payload.name ? sanitizeDisplayName(payload.name) : '';
+      const label = safeName ? `[文件: ${safeName}]` : '[文件]';
       return fullUrl ? `${label}\n${fullUrl}` : label;
     }
     case MessageType.MultipleForward:
@@ -369,11 +374,14 @@ export function resolveMultipleForwardText(
   const truncatedCount = rawMsgs.length - msgs.length;
   const userMap = new Map<string, string>();
   for (const u of users) {
-    if (u.uid && u.name) userMap.set(u.uid, u.name);
+    // SECURITY: u.name / u.uid are user-controlled and become a `<name>: ` line
+    // label in the transcript. Sanitize so a forwarded sender name can't forge a
+    // role label or section marker in the LLM prompt (prompt injection).
+    if (u.uid && u.name) userMap.set(u.uid, sanitizeDisplayName(u.name, u.uid));
   }
   const lines: string[] = ['[合并转发: 聊天记录]'];
   for (const m of msgs) {
-    const senderName = userMap.get(m.from_uid) ?? m.from_uid;
+    const senderName = userMap.get(m.from_uid) ?? sanitizeDisplayName(m.from_uid, 'unknown');
     if (m.payload?.type === MessageType.MultipleForward) {
       const nested = resolveMultipleForwardText(m.payload, apiUrl, cdnHost, _depth + 1);
       lines.push(`${senderName}: [合并转发]`);
@@ -443,7 +451,11 @@ export function resolveContent(payload: MessagePayload | undefined, apiUrl?: str
 
     case MessageType.File: {
       const url = buildMediaUrl(payload.url, apiUrl, cdnHost);
-      const fileName = typeof payload.name === 'string' ? payload.name : '未知文件';
+      // SECURITY: payload.name is user-controlled; sanitize before it enters the
+      // `[文件: …]` label so it can't forge a marker/role label (prompt injection).
+      const fileName = typeof payload.name === 'string'
+        ? sanitizeDisplayName(payload.name, '未知文件')
+        : '未知文件';
       return {
         text: url ? `[文件: ${fileName}]\n${url}` : `[文件: ${fileName}]`,
         mediaUrl: url,
@@ -465,8 +477,14 @@ export function resolveContent(payload: MessagePayload | undefined, apiUrl?: str
     }
 
     case MessageType.Card: {
-      const cardName = typeof payload.name === 'string' ? payload.name : '未知';
-      const cardUid = typeof payload.uid === 'string' ? payload.uid : '';
+      // SECURITY: name + uid are user-controlled and land inside a `[名片: …]`
+      // label; sanitize both so neither can forge a marker/role label.
+      const cardName = typeof payload.name === 'string'
+        ? sanitizeDisplayName(payload.name, '未知')
+        : '未知';
+      const cardUid = typeof payload.uid === 'string'
+        ? sanitizeDisplayName(payload.uid)
+        : '';
       return {
         text: cardUid ? `[名片: ${cardName} (${cardUid})]` : `[名片: ${cardName}]`,
       };
@@ -502,7 +520,7 @@ export function resolveHistoricalMessagePlaceholder(type?: number, name?: string
     case MessageType.GIF: return '[GIF]';
     case MessageType.Voice: return '[语音消息]';
     case MessageType.Video: return '[视频]';
-    case MessageType.File: return `[文件: ${name ?? '未知文件'}]`;
+    case MessageType.File: return `[文件: ${name ? sanitizeDisplayName(name, '未知文件') : '未知文件'}]`;
     case MessageType.Location: return '[位置信息]';
     case MessageType.Card: return '[名片]';
     case MessageType.MultipleForward: return '[合并转发]';
