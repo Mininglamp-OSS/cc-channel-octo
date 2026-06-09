@@ -142,26 +142,30 @@ prompt, marked `payload._cronFire`) through the **normal `handleMessage`
 pipeline** — so a fired task runs exactly like an inbound message, bound to the
 session that created it, and the reply goes back to that channel.
 
-- **Security:** task creation/deletion is **owner-gated** (`fromUid ===
-  registerBot.owner_uid`), server-enforced in the tool handler — an untrusted IM
-  user cannot get the agent to register a task on their behalf. Defense-in-depth:
-  the security prompt also tells the agent to refuse cron requests that come from
-  chat content.
-- **Self-propagation (accepted trade-off):** a cron fire runs as an
-  owner-authorized turn and is offered the full cron tool set, so a scheduled
-  task *can* create/delete further tasks. This is intentional — it's what lets a
-  bot manage its own schedule (the partial-autonomy story below) — but it means a
-  task whose prompt ingests untrusted content (e.g. a triage cron reading a
-  hostile issue body) could be steered into scheduling more tasks. **Only enable
-  `sdk.cron` for bots in trusted contexts**, or whose cron prompts don't read
-  untrusted external input. (Reviewed and accepted for the trusted-deployment
-  use case; a future `sdk.cronAllowSelfCreate=false` could gate it for untrusted
-  deployments.)
+- **Security model — the owner-gate is "防误 not 防攻".** The `cron_create` /
+  `cron_delete` owner check stops the agent from *casually* registering a task
+  for a non-owner. It is **not** a hard security boundary, and `cron.json` is
+  **not** an authenticity-checked execution source: under the default
+  `permissionMode: bypassPermissions` + `allowedTools: "*"`, the agent already
+  has `Write`/`Bash` and can write `<baseDir>/<id>/cron.json` directly, bypassing
+  the tool gate entirely. This is inherent to a full-tool bot — in that mode the
+  agent can already run any command, so cron adds no *new* capability an attacker
+  who controls the agent didn't already have. **Therefore: only enable `sdk.cron`
+  for bots you'd already trust with `bypassPermissions` + full tools** (your own
+  DM, trusted-team rooms). For an untrusted-input bot, the right control is a
+  restricted `allowedTools` (no arbitrary file write) — not a cron-specific lock,
+  which would be false assurance. (Reviewed: the tool owner-gate + the prompt
+  refusal line are defense-in-depth; the real boundary is the bot's tool set.)
+- **Self-propagation (same envelope):** a cron fire is an owner-authorized turn
+  with the full cron tools, so a scheduled task *can* create/delete tasks — what
+  lets a bot manage its own schedule. Same trust envelope as above.
 - **Mention-gate bypass:** synthetic cron messages set `payload._cronFire` so a
   group task fires without an @mention; rate limiting still applies. The marker
-  is authenticated by a per-process secret nonce (`cron-fire-marker.ts`), so a
-  group member cannot forge `_cronFire` in a real inbound payload to bypass the
-  gate.
+  is authenticated by a per-process secret nonce (`cron-fire-marker.ts`). Note
+  the inbound decoder spreads the wire payload (`socket.ts` `...payloadObj`), so
+  a real message *could* carry a `_cronFire` field — the nonce is what makes that
+  forgery inert (it can only ever skip the @mention requirement anyway, never
+  create a task; task creation is a separate in-process path).
 - **Missed tasks:** if the bot was down across a task's window, it fires once on
   catch-up, then advances to the next future occurrence (no thundering herd).
 - **Concurrency:** all cron.json mutations (tool create/delete + scheduler

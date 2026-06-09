@@ -10,6 +10,11 @@
  *    instant, then never again.
  *
  * Kept dependency-free (a tiny evaluator beats pulling a cron library for this).
+ *
+ * TIMEZONE: cron fields are matched against the gateway process's LOCAL time
+ * (`Date#getHours()` etc.), so `"0 9 * * *"` means 9am in the server's timezone.
+ * One-shot ISO datetimes are absolute instants (honor any offset/`Z` in the
+ * string). Set `TZ=...` on the process to control cron-field interpretation.
  */
 
 /** A parsed 5-field cron expression: each field is the set of allowed values. */

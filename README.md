@@ -273,7 +273,8 @@ work — the missing "non-IM trigger" that makes a bot more than purely reactive
 The agent calls:
 - `cron_create(schedule, prompt, recurring?)` — `schedule` is a 5-field cron
   expression (`"0 9 * * 1-5"` = weekdays 9am) or a one-shot ISO datetime
-  (`"2026-06-09T09:00:00Z"`).
+  (`"2026-06-09T09:00:00Z"`). Cron fields use the **gateway's local timezone**
+  (set `TZ` on the process); ISO datetimes are absolute instants.
 - `cron_list` / `cron_delete(id)`.
 
 Tasks persist to `<baseDir>/<id>/cron.json` and survive restarts. When a task is
@@ -281,14 +282,17 @@ due, the gateway scheduler re-runs its `prompt` **through the normal message
 pipeline, bound to the chat that created it** — so the result posts back in that
 same channel, exactly as if the prompt had arrived as a message.
 
-> **Security.** Task creation/deletion is **restricted to the bot owner**
-> (`registerBot.owner_uid`), enforced server-side in the tool — an untrusted IM
-> user cannot get the agent to register a task on their behalf. A fired task
-> bypasses the group @mention gate (it has no human to @ it) — authenticated by a
-> per-process nonce so the marker can't be forged from an inbound payload — but is
-> still rate-limited. **Note:** a fired task is itself offered the cron tools, so a
-> scheduled task *can* schedule more tasks; only enable `sdk.cron` for bots in
-> trusted contexts (or whose cron prompts don't ingest untrusted external input).
+> **Security.** The `cron_create`/`cron_delete` **owner check** (`registerBot.owner_uid`)
+> stops the agent from *casually* registering a task for a non-owner — but it is
+> **not a hard boundary**: under the default `bypassPermissions` + `allowedTools: "*"`
+> the agent can `Write` `cron.json` directly. That's inherent to a full-tool bot
+> (it can already run any command), so **only enable `sdk.cron` for bots you'd
+> already trust with full tools** (your own DM, trusted-team rooms). For an
+> untrusted-input bot, restrict `allowedTools` instead — a cron-specific lock
+> would be false assurance. A fired task bypasses the group @mention gate
+> (authenticated by a per-process nonce so a real inbound payload can't forge it)
+> and is still rate-limited; it is itself offered the cron tools, so it can
+> self-schedule.
 
 ### Multi-bot
 

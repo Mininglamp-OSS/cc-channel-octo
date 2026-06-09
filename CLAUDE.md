@@ -86,11 +86,13 @@ cwd isolation), media-upload.ts / file-inline-wrap.ts (inbound media), db-adapte
   channel coords); persisted to `<baseDir>/<id>/cron.json`; fired by a per-bot
   `CronScheduler` (~30s tick) that synthesizes a `BotMessage` through the normal
   `handleMessage` pipeline. **Creation/deletion is owner-gated**
-  (`fromUid === router.getOwnerUid()`, from `registerBot.owner_uid`). All
-  cron.json writes go through atomic `CronStore.update()` (no lost-update race).
-  Mention-gate bypass uses `payload._cronFire` + a per-process secret nonce
-  (`cron-fire-marker.ts`, `isAuthenticCronFire`) so a forged inbound `_cronFire`
-  can't bypass the gate. **Self-propagation is intentional+accepted**: a cron
-  fire is offered the full cron tools (can create/delete tasks) — only enable
-  `sdk.cron` for trusted-context bots. Self-contained 5-field cron evaluator in
+  (`fromUid === router.getOwnerUid()`) — but this is **防误 not 防攻**: under
+  `bypassPermissions` + `allowedTools:"*"` the agent can `Write` cron.json
+  directly, so the real boundary is the bot's tool set, not the cron gate (only
+  enable `sdk.cron` for trusted-context bots; restrict `allowedTools` for
+  untrusted ones). All cron.json writes go through atomic `CronStore.update()`
+  (no lost-update race). Mention-gate bypass uses `payload._cronFire` + a
+  per-process nonce (`cron-fire-marker.ts`, `isAuthenticCronFire`) — note
+  `socket.ts` spreads the wire payload, so the nonce (not the bare field) is what
+  makes an inbound `_cronFire` inert. Self-contained 5-field cron evaluator in
   `cron-evaluator.ts` (no dep).
