@@ -84,11 +84,13 @@ cwd isolation), media-upload.ts / file-inline-wrap.ts (inbound media), db-adapte
 - **Scheduled tasks (cron, `sdk.cron`)** — agent registers tasks via a `cron`
   in-process MCP tool (`createCronToolServer`, built per-turn with the message's
   channel coords); persisted to `<baseDir>/<id>/cron.json`; fired by a per-bot
-  `CronScheduler` (~30s tick) that synthesizes a `BotMessage` with
-  `payload._cronFire:true` through the normal `handleMessage` pipeline. **Creation
-  is owner-gated** (`fromUid === router.getOwnerUid()`, from `registerBot.owner_uid`)
-  — the agent is untrusted-user-driven, so this server-side check (not the LLM) is
-  the control. `_cronFire` bypasses the group @mention gate in `session-router`
-  (`isCronFire`); a group member could in principle forge it (only escalates past
-  the @mention gate, not rate limiting) — nonce hardening is a deferred follow-up.
-  Self-contained 5-field cron evaluator in `cron-evaluator.ts` (no dep).
+  `CronScheduler` (~30s tick) that synthesizes a `BotMessage` through the normal
+  `handleMessage` pipeline. **Creation/deletion is owner-gated**
+  (`fromUid === router.getOwnerUid()`, from `registerBot.owner_uid`). All
+  cron.json writes go through atomic `CronStore.update()` (no lost-update race).
+  Mention-gate bypass uses `payload._cronFire` + a per-process secret nonce
+  (`cron-fire-marker.ts`, `isAuthenticCronFire`) so a forged inbound `_cronFire`
+  can't bypass the gate. **Self-propagation is intentional+accepted**: a cron
+  fire is offered the full cron tools (can create/delete tasks) — only enable
+  `sdk.cron` for trusted-context bots. Self-contained 5-field cron evaluator in
+  `cron-evaluator.ts` (no dep).

@@ -53,4 +53,27 @@ describe('CronStore', () => {
     writeFileSync(path, '{"a":1}');
     expect(() => new CronStore(path).load()).toThrow(/not an array/);
   });
+
+  it('update() applies the mutator and persists atomically', () => {
+    const store = new CronStore(path);
+    store.save([task()]);
+    const result = store.update((tasks) => [...tasks, task({ id: 'id-2' })]);
+    expect(result.map((t) => t.id)).toEqual(['id-1', 'id-2']);
+    expect(store.load().map((t) => t.id)).toEqual(['id-1', 'id-2']); // persisted
+  });
+
+  it('update() seeds from [] when the file is absent', () => {
+    const store = new CronStore(path);
+    store.update((tasks) => [...tasks, task()]);
+    expect(store.load()).toHaveLength(1);
+  });
+
+  it('update() skips the write when the mutator returns the same reference', () => {
+    const store = new CronStore(path);
+    store.save([task()]);
+    // returning the same `tasks` ref must not rewrite (idle-tick optimization)
+    store.update((tasks) => tasks);
+    expect(readdirSync(dir).some((f) => f.endsWith('.tmp'))).toBe(false);
+    expect(store.load()).toHaveLength(1);
+  });
 });

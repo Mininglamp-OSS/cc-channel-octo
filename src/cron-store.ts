@@ -70,4 +70,23 @@ export class CronStore {
     writeFileSync(tmp, JSON.stringify(tasks, null, 2), { mode: 0o600 });
     renameSync(tmp, this.cronJsonPath);
   }
+
+  /**
+   * Atomic read-modify-write: load the current tasks, apply `mutator`, persist
+   * the result, and return it. The whole sequence runs **synchronously** (no
+   * await), so under Node's single-threaded model no other turn or scheduler
+   * tick can interleave between the load and the save — eliminating the
+   * lost-update race that separate load()+save() calls would risk if a caller
+   * ever introduced an await between them. All cron mutations (create, delete,
+   * scheduler advance) go through this one method.
+   */
+  update(mutator: (tasks: CronTask[]) => CronTask[]): CronTask[] {
+    const current = this.loadOrEmpty();
+    const next = mutator(current);
+    // Skip the write when the mutator returns the same array reference
+    // unchanged (e.g. an idle scheduler tick with nothing due) — avoids
+    // rewriting cron.json on every 30s tick.
+    if (next !== current) this.save(next);
+    return next;
+  }
 }

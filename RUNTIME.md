@@ -143,16 +143,30 @@ pipeline** — so a fired task runs exactly like an inbound message, bound to th
 session that created it, and the reply goes back to that channel.
 
 - **Security:** task creation/deletion is **owner-gated** (`fromUid ===
-  registerBot.owner_uid`), server-enforced in the tool handler — a prompt-injected
-  agent (driven by untrusted IM users) cannot register a malicious unattended
-  cron. Defense-in-depth: the security prompt also tells the agent to refuse
-  cron requests that come from chat content.
+  registerBot.owner_uid`), server-enforced in the tool handler — an untrusted IM
+  user cannot get the agent to register a task on their behalf. Defense-in-depth:
+  the security prompt also tells the agent to refuse cron requests that come from
+  chat content.
+- **Self-propagation (accepted trade-off):** a cron fire runs as an
+  owner-authorized turn and is offered the full cron tool set, so a scheduled
+  task *can* create/delete further tasks. This is intentional — it's what lets a
+  bot manage its own schedule (the partial-autonomy story below) — but it means a
+  task whose prompt ingests untrusted content (e.g. a triage cron reading a
+  hostile issue body) could be steered into scheduling more tasks. **Only enable
+  `sdk.cron` for bots in trusted contexts**, or whose cron prompts don't read
+  untrusted external input. (Reviewed and accepted for the trusted-deployment
+  use case; a future `sdk.cronAllowSelfCreate=false` could gate it for untrusted
+  deployments.)
 - **Mention-gate bypass:** synthetic cron messages set `payload._cronFire` so a
-  group task fires without an @mention; rate limiting still applies. (Nonce
-  hardening against a group member forging `_cronFire` is a noted follow-up; the
-  owner gate is the primary control.)
+  group task fires without an @mention; rate limiting still applies. The marker
+  is authenticated by a per-process secret nonce (`cron-fire-marker.ts`), so a
+  group member cannot forge `_cronFire` in a real inbound payload to bypass the
+  gate.
 - **Missed tasks:** if the bot was down across a task's window, it fires once on
   catch-up, then advances to the next future occurrence (no thundering herd).
+- **Concurrency:** all cron.json mutations (tool create/delete + scheduler
+  advance) go through a single atomic `CronStore.update()` read-modify-write, so
+  concurrent turns / a scheduler tick overlapping a tool call can't lose tasks.
 
 ### 8. Self-bootstrapping ◑ (partial)
 

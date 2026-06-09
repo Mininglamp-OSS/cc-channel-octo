@@ -6,6 +6,7 @@ import type { Config } from './config.js';
 import type { BotMessage, MentionEntity } from './octo/types.js';
 import { ChannelType, MessageType } from './octo/types.js';
 import { sendMessage } from './octo/api.js';
+import { isAuthenticCronFire } from './cron-fire-marker.js';
 
 export interface RouteResult {
   sessionKey: string;
@@ -244,12 +245,14 @@ export class SessionRouter {
   }
 
   /**
-   * #115: True for a cron-fired synthetic message (`payload._cronFire`). Such
-   * messages bypass the group @mention gate (they were owner-gated at creation
-   * and bound to this session). Real inbound messages never carry this marker.
+   * #115: True for a GENUINE in-process cron fire — `payload._cronFire` AND a
+   * matching per-process nonce. Such messages bypass the group @mention gate
+   * (owner-gated at creation, bound to this session). A forged inbound payload
+   * can set `_cronFire` but not the secret nonce, so it does not pass. Real
+   * inbound messages never carry the marker.
    */
   private isCronFire(msg: BotMessage): boolean {
-    return msg.payload._cronFire === true;
+    return isAuthenticCronFire(msg.payload);
   }
 
   private async processMessage(msg: BotMessage, key: string): Promise<RouteResult | null> {

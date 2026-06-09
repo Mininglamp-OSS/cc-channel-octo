@@ -42,9 +42,13 @@ While the major version is `0`, minor releases may carry breaking changes.
   RUNTIME.md's scheduled-tasks gap. **Security:** creation/deletion is owner-gated
   (`registerBot.owner_uid`), server-enforced — a prompt-injected agent cannot
   register a malicious unattended task; defense-in-depth line added to the
-  security prompt. Synthetic fires carry `payload._cronFire` to bypass the group
-  @mention gate (rate limiting still applies; nonce hardening is a noted
-  follow-up). New `src/cron-{evaluator,store,tool,scheduler}.ts`; no new
+  security prompt. Synthetic fires carry `payload._cronFire` + a per-process
+  nonce (`cron-fire-marker.ts`) to bypass the group @mention gate without being
+  forgeable from an inbound payload (rate limiting still applies). All cron.json
+  writes go through an atomic `CronStore.update()` read-modify-write (no
+  lost-update race). A fired task is offered the cron tools (can self-schedule) —
+  intentional for self-management; enable only for trusted-context bots. New
+  `src/cron-{evaluator,store,tool,scheduler}.ts` + `cron-fire-marker.ts`; no new
   dependency (self-contained cron evaluator).
 
 - **`sdk.skills` per-bot skill selection** (#110) — a bot enables a subset of the

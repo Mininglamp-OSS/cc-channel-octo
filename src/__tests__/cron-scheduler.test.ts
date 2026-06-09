@@ -111,6 +111,7 @@ describe('synthesizeCronMessage', () => {
     expect(m.payload.type).toBe(MessageType.Text);
     expect(m.payload.content).toBe('hi');
     expect(m.payload._cronFire).toBe(true);
+    expect(m.payload._cronFireNonce).toBeDefined();
     expect(m.channel_id).toBe('grp');
     expect(m.channel_type).toBe(ChannelType.Group);
     expect(m.message_id.startsWith('cron:')).toBe(true);

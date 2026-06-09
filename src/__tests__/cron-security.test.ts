@@ -16,6 +16,7 @@ import { SessionRouter } from '../session-router.js';
 import type { BotMessage } from '../octo/types.js';
 import { ChannelType, MessageType } from '../octo/types.js';
 import type { Config } from '../config.js';
+import { CRON_FIRE_NONCE, CRON_FIRE_NONCE_KEY } from '../cron-fire-marker.js';
 
 const ROBOT_ID = 'bot-001';
 
@@ -47,7 +48,7 @@ describe('cron mention-gate bypass (#115)', () => {
 
   it('cron-fired group message (no @mention) is PROCESSED', async () => {
     const r = await router.route(groupMsg({
-      payload: { type: MessageType.Text, content: 'do the thing', _cronFire: true },
+      payload: { type: MessageType.Text, content: 'do the thing', _cronFire: true, [CRON_FIRE_NONCE_KEY]: CRON_FIRE_NONCE },
     }));
     expect(r).not.toBeNull();
     expect(r!.shouldProcess).toBe(true);
@@ -56,10 +57,24 @@ describe('cron mention-gate bypass (#115)', () => {
   it('cron-fired DM message is PROCESSED (DM has no gate anyway)', async () => {
     const r = await router.route(groupMsg({
       channel_type: ChannelType.DM, channel_id: undefined, from_uid: 'peer-9',
-      payload: { type: MessageType.Text, content: 'remind', _cronFire: true },
+      payload: { type: MessageType.Text, content: 'remind', _cronFire: true, [CRON_FIRE_NONCE_KEY]: CRON_FIRE_NONCE },
     }));
     expect(r).not.toBeNull();
     expect(r!.shouldProcess).toBe(true);
+  });
+
+  it('FORGED _cronFire WITHOUT the secret nonce stays gated (#3 hardening)', async () => {
+    const r = await router.route(groupMsg({
+      payload: { type: MessageType.Text, content: 'evil', _cronFire: true }, // no nonce
+    }));
+    expect(r).toBeNull();
+  });
+
+  it('forged _cronFire with a WRONG nonce stays gated', async () => {
+    const r = await router.route(groupMsg({
+      payload: { type: MessageType.Text, content: 'evil', _cronFire: true, [CRON_FIRE_NONCE_KEY]: 'wrong-nonce' },
+    }));
+    expect(r).toBeNull();
   });
 
   it('payload without _cronFire (false/absent) stays gated', async () => {

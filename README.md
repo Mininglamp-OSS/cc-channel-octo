@@ -282,10 +282,13 @@ pipeline, bound to the chat that created it** — so the result posts back in th
 same channel, exactly as if the prompt had arrived as a message.
 
 > **Security.** Task creation/deletion is **restricted to the bot owner**
-> (`registerBot.owner_uid`), enforced server-side in the tool — a prompt-injected
-> agent (driven by untrusted IM users) cannot register a malicious unattended
-> task. A fired task bypasses the group @mention gate (it has no human to @ it)
-> but is still rate-limited.
+> (`registerBot.owner_uid`), enforced server-side in the tool — an untrusted IM
+> user cannot get the agent to register a task on their behalf. A fired task
+> bypasses the group @mention gate (it has no human to @ it) — authenticated by a
+> per-process nonce so the marker can't be forged from an inbound payload — but is
+> still rate-limited. **Note:** a fired task is itself offered the cron tools, so a
+> scheduled task *can* schedule more tasks; only enable `sdk.cron` for bots in
+> trusted contexts (or whose cron prompts don't ingest untrusted external input).
 
 ### Multi-bot
 

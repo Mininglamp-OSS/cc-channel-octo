@@ -98,10 +98,6 @@ export function buildCronTools(
                   : `schedule never matches (impossible cron): ${args.schedule}`,
               );
             }
-            const tasks = cronStore.loadOrEmpty();
-            if (tasks.length >= MAX_TASKS_PER_BOT) {
-              return errResult(`task limit reached (max ${MAX_TASKS_PER_BOT}). Delete one first.`);
-            }
             const task: CronTask = {
               id: crypto.randomUUID(),
               schedule: args.schedule,
@@ -117,8 +113,16 @@ export function buildCronTools(
               lastRun: null,
               nextRun,
             };
-            tasks.push(task);
-            cronStore.save(tasks);
+            // Atomic read-modify-write; re-check the cap inside the mutator so a
+            // concurrent create can't push us over the limit.
+            let capped = false;
+            cronStore.update((tasks) => {
+              if (tasks.length >= MAX_TASKS_PER_BOT) { capped = true; return tasks; }
+              return [...tasks, task];
+            });
+            if (capped) {
+              return errResult(`task limit reached (max ${MAX_TASKS_PER_BOT}). Delete one first.`);
+            }
             return jsonResult({ created: summarize(task) });
           } catch (err) {
             return errResult(err instanceof Error ? err.message : String(err));
@@ -146,12 +150,15 @@ export function buildCronTools(
             if (!isOwner) {
               return errResult('Only the bot owner can delete scheduled tasks.');
             }
-            const tasks = cronStore.loadOrEmpty();
-            const next = tasks.filter((t) => t.id !== args.id);
-            if (next.length === tasks.length) {
+            let found = false;
+            cronStore.update((tasks) => {
+              const next = tasks.filter((t) => t.id !== args.id);
+              found = next.length !== tasks.length;
+              return found ? next : tasks;
+            });
+            if (!found) {
               return errResult(`no task with id ${args.id}`);
             }
-            cronStore.save(next);
             return jsonResult({ deleted: args.id });
           } catch (err) {
             return errResult(err instanceof Error ? err.message : String(err));

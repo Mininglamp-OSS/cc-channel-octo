@@ -17,6 +17,7 @@ import { MessageType } from './octo/types.js';
 import type { ChannelType } from './octo/types.js';
 import { CronStore, type CronTask } from './cron-store.js';
 import { computeNextRun } from './cron-evaluator.js';
+import { CRON_FIRE_NONCE, CRON_FIRE_NONCE_KEY } from './cron-fire-marker.js';
 
 /** How often the scheduler scans cron.json (ms). 30s → ≤30s firing latency. */
 export const CRON_TICK_MS = 30_000;
@@ -42,10 +43,13 @@ export function synthesizeCronMessage(task: CronTask): BotMessage {
     payload: {
       type: MessageType.Text,
       content: task.prompt,
-      // Synthetic marker: lets the router bypass the group @mention gate for
-      // cron-fired turns (see session-router isCronFire). Allowed by the
+      // Synthetic marker + per-process nonce: lets the router bypass the group
+      // @mention gate for genuine in-process cron fires only (see
+      // session-router isCronFire / cron-fire-marker). A forged inbound payload
+      // can set `_cronFire` but cannot know the secret nonce. Allowed by the
       // MessagePayload index signature; never set on real inbound messages.
       _cronFire: true,
+      [CRON_FIRE_NONCE_KEY]: CRON_FIRE_NONCE,
     },
   };
 }
@@ -75,52 +79,47 @@ export class CronScheduler {
    * Never throws.
    */
   tick(): void {
-    let tasks: CronTask[];
-    try {
-      tasks = this.opts.cronStore.loadOrEmpty();
-    } catch (err) {
-      console.error(`[cc-channel-octo] ${this.opts.label ?? ''}cron: load failed: ${String(err)}`);
-      return;
-    }
     const now = Date.now();
-    let changed = false;
-    const survivors: CronTask[] = [];
-
-    for (const task of tasks) {
-      if (!task.enabled || task.nextRun === null || task.nextRun > now) {
-        survivors.push(task);
-        continue;
-      }
-      // Due. Fire (best-effort; onFire is fire-and-forget).
-      const lateMin = Math.round((now - task.nextRun) / 60_000);
-      if (lateMin >= 1) {
-        console.warn(
-          `[cc-channel-octo] ${this.opts.label ?? ''}cron: task ${task.id} (${task.schedule}) ` +
-            `fired ${lateMin} min late (catch-up)`,
-        );
-      }
-      try {
-        this.opts.onFire(synthesizeCronMessage(task));
-      } catch (err) {
-        console.error(
-          `[cc-channel-octo] ${this.opts.label ?? ''}cron: onFire threw for ${task.id}: ${String(err)}`,
-        );
-      }
-      task.lastRun = now;
-      changed = true;
-      if (task.recurring) {
-        task.nextRun = computeNextRun(task.schedule, true, now);
-        survivors.push(task); // keep; next future occurrence (or null → inert)
-      }
-      // one-shot: drop (not pushed to survivors)
-    }
-
-    if (changed) {
-      try {
-        this.opts.cronStore.save(survivors);
-      } catch (err) {
-        console.error(`[cc-channel-octo] ${this.opts.label ?? ''}cron: save failed: ${String(err)}`);
-      }
+    // Single atomic read-modify-write: fire due tasks and persist the survivor
+    // set in one synchronous pass, so a concurrent tool create/delete (which
+    // also goes through cronStore.update) can't lose updates against us.
+    try {
+      this.opts.cronStore.update((tasks) => {
+        const survivors: CronTask[] = [];
+        let changed = false;
+        for (const task of tasks) {
+          if (!task.enabled || task.nextRun === null || task.nextRun > now) {
+            survivors.push(task);
+            continue;
+          }
+          changed = true;
+          // Due. Fire (best-effort; onFire is fire-and-forget).
+          const lateMin = Math.round((now - task.nextRun) / 60_000);
+          if (lateMin >= 1) {
+            console.warn(
+              `[cc-channel-octo] ${this.opts.label ?? ''}cron: task ${task.id} (${task.schedule}) ` +
+                `fired ${lateMin} min late (catch-up)`,
+            );
+          }
+          try {
+            this.opts.onFire(synthesizeCronMessage(task));
+          } catch (err) {
+            console.error(
+              `[cc-channel-octo] ${this.opts.label ?? ''}cron: onFire threw for ${task.id}: ${String(err)}`,
+            );
+          }
+          task.lastRun = now;
+          if (task.recurring) {
+            task.nextRun = computeNextRun(task.schedule, true, now);
+            survivors.push(task); // keep; next future occurrence (or null → inert)
+          }
+          // one-shot: drop (not pushed to survivors)
+        }
+        // Return the SAME reference when nothing fired so update() skips the write.
+        return changed ? survivors : tasks;
+      });
+    } catch (err) {
+      console.error(`[cc-channel-octo] ${this.opts.label ?? ''}cron: tick failed: ${String(err)}`);
     }
   }
 }
