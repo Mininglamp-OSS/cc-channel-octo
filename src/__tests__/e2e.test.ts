@@ -47,6 +47,21 @@ vi.mock('../agent-bridge.js', async (importOriginal) => {
   };
 });
 
+// Mock the inbound-image downloader so the suite never does a real network
+// fetch (the #86 download path). Without this, G1 (a non-text DM with an image
+// URL) intermittently fails as `downloadInboundImage` tries a live HTTP request
+// and times out / errors. Preserve the real constants (e.g.
+// MAX_IMAGES_PER_MESSAGE, used by index.ts) via importOriginal; stub only the
+// network call to a deterministic error so the caller falls back to the URL
+// marker (`[图片] <url>`) — exactly the behavior G1 asserts.
+vi.mock('../media-inbound.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../media-inbound.js')>();
+  return {
+    ...original,
+    downloadInboundImage: vi.fn().mockResolvedValue({ error: 'mocked: no network in tests' }),
+  };
+});
+
 // --- Imports (after mocks) ---
 
 import { SessionStore } from '../session-store.js';
