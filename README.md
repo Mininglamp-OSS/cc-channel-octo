@@ -365,7 +365,9 @@ Octo User
 
 The gateway connects to Octo via the WuKongIM binary protocol (DH key exchange + AES-CBC encryption). Inbound messages are routed through the session router, which enforces @mention gating for groups and per-session rate limiting. The agent bridge constructs prompts from conversation history and group context, then calls the Claude Agent SDK. Responses stream back through the stream relay, which throttles output and handles Octo's stream API lifecycle.
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full design document.
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full design document, and
+[RUNTIME.md](./RUNTIME.md) for how cc provides an openclaw-style agent runtime on
+top of the Claude Agent SDK (identity, memory, sessions, skills — and the gaps).
 
 ## Development
 

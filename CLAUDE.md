@@ -31,7 +31,9 @@ cc-channel-octo: Independent Node.js gateway bridging Claude Code (Claude Agent 
 
 ## Architecture
 
-Layered design (L0–L7), see ARCHITECTURE.md:
+Layered design (L0–L7), see ARCHITECTURE.md. For how cc provides an
+openclaw-style agent runtime on the Claude Agent SDK (identity/memory/sessions/
+skills + gaps), see RUNTIME.md:
 - L0: octo/ — WuKongIM binary protocol (forked from openclaw-channel-octo)
 - L1: gateway.ts — WS lifecycle + token refresh
 - L2: session-router.ts — routing + concurrency + rate limiting
