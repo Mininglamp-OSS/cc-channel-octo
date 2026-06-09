@@ -81,3 +81,18 @@ cwd isolation), media-upload.ts / file-inline-wrap.ts (inbound media), db-adapte
   deploy `$HOME`/ancestors free of `CLAUDE.md`; `~/.cc-channel-octo/CLAUDE.md` is
   the all-bots baseline. Do NOT switch `settingSources` to `['user']` (would pull
   in the host's personal `~/.claude`).
+- **Scheduled tasks (cron, `sdk.cron`)** — agent registers tasks via a `cron`
+  in-process MCP tool (`createCronToolServer`, built per-turn with the message's
+  channel coords); persisted to `<baseDir>/<id>/cron.json`; fired by a per-bot
+  `CronScheduler` (~30s tick) that synthesizes a `BotMessage` through the normal
+  `handleMessage` pipeline. **Creation/deletion is owner-gated**
+  (`fromUid === router.getOwnerUid()`) — but this is **防误 not 防攻**: under
+  `bypassPermissions` + `allowedTools:"*"` the agent can `Write` cron.json
+  directly, so the real boundary is the bot's tool set, not the cron gate (only
+  enable `sdk.cron` for trusted-context bots; restrict `allowedTools` for
+  untrusted ones). All cron.json writes go through atomic `CronStore.update()`
+  (no lost-update race). Mention-gate bypass uses `payload._cronFire` + a
+  per-process nonce (`cron-fire-marker.ts`, `isAuthenticCronFire`) — note
+  `socket.ts` spreads the wire payload, so the nonce (not the bare field) is what
+  makes an inbound `_cronFire` inert. Self-contained 5-field cron evaluator in
+  `cron-evaluator.ts` (no dep).

@@ -25,6 +25,9 @@ import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } f
 import { downloadInboundImage, MAX_IMAGES_PER_MESSAGE } from './media-inbound.js';
 import { handleCommand } from './commands.js';
 import { loadGroupConfig } from './group-config.js';
+import { CronStore } from './cron-store.js';
+import { CronScheduler } from './cron-scheduler.js';
+import { createCronToolServer, CRON_TOOL_SERVER_NAME, type CronSessionCoords } from './cron-tool.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes } from './file-inline-wrap.js';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
@@ -169,6 +172,15 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   const groupContext = new GroupContext(adapter, config.context.maxContextChars);
   groupContext.loadAllFromDb();
 
+  // --- #115: cron (opt-in). Store is shared by the per-turn cron tool (writes)
+  // and the scheduler (reads + fires). Scheduler is armed after the handler is
+  // installed (see below), stopped in shutdown. ---
+  let cronStore: CronStore | undefined;
+  let cronScheduler: CronScheduler | undefined;
+  if (config.sdk.cron && config.botId) {
+    cronStore = new CronStore(join(config.baseDir, config.botId, 'cron.json'));
+  }
+
   // --- Stream relay ---
   const streamRelay = new StreamRelay();
 
@@ -218,7 +230,7 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
     // these on the WS path; guard here too for safety (otherwise a bot's own
     // group message could be cached into group context as un-processed chatter).
     if (msg.from_uid === gateway.botId) return;
-    const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId)
+    const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore)
       .catch((err) => {
         console.error(`[cc-channel-octo] ${label}Unhandled message handler error:`, err instanceof Error ? err.message : err);
       })
@@ -228,6 +240,17 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
     activeHandlers.add(p);
   };
   gateway.setMessageHandler(onInbound);
+
+  // #115: arm the cron scheduler now that onInbound exists. Fired tasks go
+  // through the exact same pipeline as real inbound messages.
+  if (cronStore) {
+    cronScheduler = new CronScheduler({
+      cronStore,
+      onFire: (msg: BotMessage) => onInbound(msg),
+      label,
+    });
+    cronScheduler.start();
+  }
 
   // Phase 2 (called by main() after cross-registration): open the WebSocket.
   // Async + awaited so a connection failure fails startup instead of leaving
@@ -239,6 +262,7 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
 
   const shutdown = async (): Promise<void> => {
     clearInterval(cwdCleanupTimer);
+    cronScheduler?.stop();
     await gateway.stop(activeHandlers);
     store.close();
   };
@@ -262,6 +286,7 @@ export async function handleMessage(
   groupContext: GroupContext,
   streamRelay: StreamRelay,
   botId: string,
+  cronStore?: CronStore,
 ): Promise<void> {
   const channelId = msg.channel_id ?? '';
   const channelType = msg.channel_type ?? ChannelType.DM;
@@ -594,7 +619,7 @@ export async function handleMessage(
       // double-injecting history. We still persist to our own store (for the
       // non-persistent fallback, /reset, and group context), so this only
       // changes what the agent is *prompted* with, not what we record.
-      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; memoryDir?: string } | undefined;
+      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; memoryDir?: string; mcpServers?: Record<string, ReturnType<typeof createCronToolServer>> } | undefined;
       let historyForQuery = historyPrefix;
       if (config.sdk.persistentSession) {
         const resume = store.getSdkSessionId(sessionKey);
@@ -624,6 +649,23 @@ export async function handleMessage(
         if (groupInstructions) {
           sessionOpts = { ...(sessionOpts ?? {}), groupInstructions };
         }
+      }
+
+      // #115: when cron is on, inject the cron MCP tool bound to THIS session's
+      // raw coords (so a task created now fires + replies here) and gated to the
+      // bot owner uid. Per-turn server (coords differ per message).
+      if (config.sdk.cron && cronStore && config.botId) {
+        const coords: CronSessionCoords = {
+          channelId,
+          channelType,
+          fromUid: msg.from_uid,
+          fromName: msg.from_name,
+        };
+        const cronServer = createCronToolServer(cronStore, coords, router.getOwnerUid());
+        sessionOpts = {
+          ...(sessionOpts ?? {}),
+          mcpServers: { [CRON_TOOL_SERVER_NAME]: cronServer },
+        };
       }
 
       const rawChunks = queryAgent(userContentForLLM, historyForQuery, contextStr, config, sessionCtx, onToolUse, sessionOpts);

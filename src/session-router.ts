@@ -6,6 +6,7 @@ import type { Config } from './config.js';
 import type { BotMessage, MentionEntity } from './octo/types.js';
 import { ChannelType, MessageType } from './octo/types.js';
 import { sendMessage } from './octo/api.js';
+import { isAuthenticCronFire } from './cron-fire-marker.js';
 
 export interface RouteResult {
   sessionKey: string;
@@ -243,6 +244,17 @@ export class SessionRouter {
     return false;
   }
 
+  /**
+   * #115: True for a GENUINE in-process cron fire — `payload._cronFire` AND a
+   * matching per-process nonce. Such messages bypass the group @mention gate
+   * (owner-gated at creation, bound to this session). A forged inbound payload
+   * can set `_cronFire` but not the secret nonce, so it does not pass. Real
+   * inbound messages never carry the marker.
+   */
+  private isCronFire(msg: BotMessage): boolean {
+    return isAuthenticCronFire(msg.payload);
+  }
+
   private async processMessage(msg: BotMessage, key: string): Promise<RouteResult | null> {
     // Skip messages from self.
     if (msg.from_uid === this.robotId) return null;
@@ -283,7 +295,10 @@ export class SessionRouter {
     // the blocklist (above) get hard-dropped without even checking mentions.
 
     // Group mention gate — skip unless mentioned OR in mention-free group (G12).
-    if (this.isGroupLike(msg.channel_type) && !this.isMentioned(msg)) {
+    // #115: cron-fired synthetic messages bypass the @mention requirement — they
+    // were created (owner-gated) and bound to this session; there's no human to
+    // @-mention the bot at fire time. Rate limiting below still applies.
+    if (this.isGroupLike(msg.channel_type) && !this.isMentioned(msg) && !this.isCronFire(msg)) {
       // G12: Check if this group is in the mention-free list
       const isMentionFree = this.config.mentionFreeGroups?.includes(msg.channel_id ?? '') ?? false;
       if (!isMentionFree) {
