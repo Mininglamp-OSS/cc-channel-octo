@@ -341,6 +341,37 @@ describe('GroupContext consumption cursor', () => {
     const ctx2 = new GroupContext(adapter, 6000);
     expect(ctx2.getContextCursor('ch1')).toBe(42);
   });
+
+  it('buildContextSince keeps the NEWEST messages (not oldest) when the budget is tight (PR #120 review)', () => {
+    // A small budget that fits ~2 short lines. With the old ASC fetch + newest-
+    // within-budget loop the cursor would still advance past everything, dropping
+    // recent lines; the newest-first fetch makes the budget keep the latest ones.
+    const small = new GroupContext(adapter, 40);
+    for (let i = 1; i <= 6; i++) {
+      small.pushMessage('ch1', `u${i}`, 'A', `m${i}`, i);
+    }
+    const out = small.buildContextSince('ch1', 0);
+    // The most-recent message must be present; the oldest must be the one dropped.
+    expect(out.text).toContain('A：m6');
+    expect(out.text).not.toContain('A：m1');
+    // Cursor advances past the whole delta (highest existing id), so dropped-oldest
+    // lines are never re-shown on a later turn.
+    expect(out.lastId).toBe(small.getMaxMessageId('ch1'));
+  });
+
+  it('buildContextSince advances lastId past a backlog larger than the fetch limit', () => {
+    // maxWindowSize=100: with >100 unseen, the newest-first fetch returns the
+    // latest 100; lastId is the highest existing id so the cursor jumps past the
+    // entire backlog (the oldest beyond-window messages are intentionally skipped).
+    for (let i = 1; i <= 130; i++) {
+      ctx.pushMessage('ch1', 'u', 'A', `m${i}`, i);
+    }
+    const out = ctx.buildContextSince('ch1', 0);
+    // Newest message reaches the model.
+    expect(out.text).toContain('A：m130');
+    // lastId reflects the true max in the channel, not just the last fetched row.
+    expect(out.lastId).toBe(ctx.getMaxMessageId('ch1'));
+  });
 });
 
 // ─── G23: robot flag tracking ───────────────────────────────────────────────────────────────

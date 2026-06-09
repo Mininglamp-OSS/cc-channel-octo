@@ -96,10 +96,14 @@ export class GroupContext {
     this.deleteOldMessages = this.adapter.prepare(
       'DELETE FROM group_messages WHERE channel_id = ? AND id NOT IN (SELECT id FROM group_messages WHERE channel_id = ? ORDER BY id DESC LIMIT ?)',
     );
-    // Cursor delta: messages strictly newer than the cursor, oldest-first, with
-    // their rowid so the caller can advance the cursor to the last included id.
+    // Cursor delta: messages strictly newer than the cursor, NEWEST-first so a
+    // backlog larger than the fetch limit keeps the most-recent messages (the
+    // relevant ones) rather than ancient ones. LIMIT (maxWindowSize=100) is <=
+    // deleteOldMessages' retained 200, so every fetchable row survives trimming.
+    // buildContextSince re-sorts the budget-selected slice into chronological
+    // order for display. Mirrors the in-memory buildContext rolling-window.
     this.selectMessagesSince = this.adapter.prepare(
-      'SELECT id, from_name, content FROM group_messages WHERE channel_id = ? AND id > ? ORDER BY id ASC LIMIT ?',
+      'SELECT id, from_name, content FROM group_messages WHERE channel_id = ? AND id > ? ORDER BY id DESC LIMIT ?',
     );
     this.selectMaxId = this.adapter.prepare(
       'SELECT MAX(id) AS maxId FROM group_messages WHERE channel_id = ?',
@@ -303,13 +307,17 @@ export class GroupContext {
 
   /**
    * Build a group-context block from messages NEWER than `sinceId` (the delta the
-   * model hasn't seen yet), oldest-first, within `maxContextChars`. Returns the
-   * block text (same `[Recent group messages]` format as buildContext) and the
-   * highest id included so the caller can advance the cursor. Empty text + the
+   * model hasn't seen yet), within `maxContextChars`. Returns the block text (same
+   * `[Recent group messages]` format as buildContext) and the highest id that
+   * EXISTS in the channel above `sinceId` (so the caller advances the cursor past
+   * the whole delta, including any oldest lines the char budget dropped — those
+   * are the least-relevant and are intentionally not re-shown). Empty text + the
    * unchanged cursor when there's nothing new.
    *
-   * Unlike buildContext (in-memory rolling window), this reads from the DB so the
-   * cursor delta is exact even across restarts / window eviction.
+   * Rows are fetched newest-first (so a backlog larger than the budget keeps the
+   * most-recent messages); the selected slice is reversed back to chronological
+   * order for display. Unlike buildContext (in-memory rolling window), this reads
+   * from the DB so the cursor delta is exact even across restarts / window eviction.
    */
   buildContextSince(channelId: string, sinceId: number): { text: string; lastId: number } {
     let rows: Array<{ id: number; from_name: string; content: string }>;
@@ -325,17 +333,19 @@ export class GroupContext {
     }
     if (rows.length === 0) return { text: '', lastId: sinceId };
 
+    // rows are newest-first; the highest id is the first row. Advance the cursor to
+    // it regardless of what the budget keeps, so we never re-show a line.
+    const lastId = rows[0].id;
+
     const header = '[Recent group messages]\n';
     const trailer = '\n';
     const budget = this.maxContextChars - header.length - trailer.length;
-    if (budget <= 0) return { text: '', lastId: sinceId };
+    if (budget <= 0) return { text: '', lastId };
 
-    // Keep the NEWEST messages within budget (walk newest→oldest), but advance
-    // the cursor to the newest included id regardless so we never re-show a line.
-    const lastId = rows[rows.length - 1].id;
+    // Walk newest→oldest (rows[0] is newest) keeping lines within budget.
     const selected: string[] = [];
     let used = 0;
-    for (let i = rows.length - 1; i >= 0; i--) {
+    for (let i = 0; i < rows.length; i++) {
       const line = `${rows[i].from_name}：${rows[i].content}`;
       const cost = line.length + (selected.length > 0 ? 1 : 0);
       if (used + cost > budget) break;
@@ -343,7 +353,7 @@ export class GroupContext {
       used += cost;
     }
     if (selected.length === 0) return { text: '', lastId };
-    selected.reverse();
+    selected.reverse(); // chronological order for display
     return { text: `${header}${selected.join('\n')}${trailer}`, lastId };
   }
 

@@ -204,13 +204,22 @@ export function assembleUserMessage(context: string, body: string, maxBytes: num
   if (ctxBytes <= contextBudget) {
     return context + body;
   }
-  // Truncate context from the FRONT (keep the most-recent tail). Slice the buffer
-  // to the last `contextBudget` bytes; a leading partial UTF-8 sequence decodes to
+  // Truncate context from the FRONT (keep the most-recent tail). A truncation
+  // marker is prepended, so reserve its byte size from the budget too — otherwise
+  // the result would exceed maxBytes by the marker length (PR #120 review). Slice
+  // the buffer to the remaining bytes; a leading partial UTF-8 sequence decodes to
   // a replacement char which we strip so we never emit U+FFFD.
+  const marker = '[… earlier context truncated]\n';
+  const markerBytes = Buffer.byteLength(marker, 'utf-8');
+  const tailBudget = contextBudget - markerBytes;
+  if (tailBudget <= 0) {
+    // No room for any context once the marker is accounted for — drop it entirely.
+    return body;
+  }
   const ctxBuf = Buffer.from(context, 'utf-8');
-  const tail = ctxBuf.subarray(ctxBuf.length - contextBudget);
+  const tail = ctxBuf.subarray(ctxBuf.length - tailBudget);
   const decoded = new TextDecoder('utf-8').decode(tail).replace(/^�+/, '');
-  return '[… earlier context truncated]\n' + decoded + body;
+  return marker + decoded + body;
 }
 
 /** Exported for tests. */
