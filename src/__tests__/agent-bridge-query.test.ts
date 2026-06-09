@@ -569,6 +569,24 @@ describe('queryAgent', () => {
     expect(chunks).toEqual(['partial']);
     expect(mockQuery).toHaveBeenCalledTimes(1); // no retry after partial output
   });
+
+  it('does NOT retry after a tool_use block then a resume error (no duplicated side effect)', async () => {
+    // A tool_use is a side effect — if the stream throws a resume-shaped error
+    // after it, retrying from scratch would re-run the tool. emitted.any must be
+    // set on ANY assistant content, not just text (PR #120 review, non-blocking).
+    const partial = createMockStream([]);
+    partial[Symbol.asyncIterator] = async function* () {
+      yield { type: 'assistant', session_id: 's', message: { content: [{ type: 'tool_use', name: 'Bash', input: {} }] } };
+      throw new Error('No conversation found with session ID: x');
+    };
+    mockQuery.mockReturnValue(partial);
+    await expect(async () => {
+      for await (const _ of queryAgent('hi', makeConfig(), undefined, undefined, {
+        resume: 'sid', onResumeFailed: () => {},
+      })) { void _; }
+    }).rejects.toThrow('No conversation found');
+    expect(mockQuery).toHaveBeenCalledTimes(1); // no retry after a tool_use side effect
+  });
 });
 
 describe('queryAgent — sdk.env injection (#107)', () => {

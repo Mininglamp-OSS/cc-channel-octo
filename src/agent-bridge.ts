@@ -330,9 +330,14 @@ export async function* queryAgent(
           // assistant message lacks `.message` or `.message.content`, treat as
           // empty rather than throwing TypeError into the async generator.
           const content = message.message?.content ?? [];
+          // Mark the stream as having produced output as soon as ANY assistant
+          // content block is seen — text OR tool_use. A tool_use is a side effect
+          // (the agent already acted); if the stream then throws a resume-shaped
+          // error, we must NOT retry from scratch and risk duplicating that work
+          // (PR #120 review). Recovery is only safe before any content is emitted.
+          if (content.length > 0) emitted.any = true;
           for (const block of content) {
             if (block.type === 'text' && block.text) {
-              emitted.any = true;
               yield block.text;
             } else if (block.type === 'tool_use' && onToolUse) {
               // v0.3 tool progress: report the tool name + its input (so callers
