@@ -143,11 +143,20 @@ function makeGroupMsg(
 }
 
 function mockQueryYield(...texts: string[]): void {
-  (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(async function* () {
-    for (const t of texts) {
-      yield t;
-    }
-  });
+  // Mirror the real SDK: report a session id (so cc stores it and resumes on the
+  // next turn) before yielding text. A stable id per mock install is fine for
+  // these single-session tests.
+  (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
+    async function* (
+      _u: string, _cfg: unknown, _ctx: unknown, _t: unknown,
+      opts?: { onSessionId?: (id: string) => void },
+    ) {
+      opts?.onSessionId?.('sdk-session-mock');
+      for (const t of texts) {
+        yield t;
+      }
+    },
+  );
 }
 
 /**
@@ -248,11 +257,11 @@ describe('E2E smoke tests', () => {
   // --- v0.3 tool progress display ---
 
   it('sends 🔧 progress messages when sdk.toolProgress is on, deduped', async () => {
-    // Mock queryAgent to drive the onToolUse callback (6th arg) like the SDK
+    // Mock queryAgent to drive the onToolUse callback (4th arg) like the SDK
     // would, then yield the final answer.
     (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
       async function* (
-        _u: string, _h: string, _c: string, _cfg: Config, _ctx: unknown,
+        _u: string, _cfg: Config, _ctx: unknown,
         onToolUse?: (t: string) => void,
       ) {
         onToolUse?.('Bash');
@@ -275,7 +284,7 @@ describe('E2E smoke tests', () => {
   it('sends NO progress messages when toolProgress is off (default)', async () => {
     (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
       async function* (
-        _u: string, _h: string, _c: string, _cfg: Config, _ctx: unknown,
+        _u: string, _cfg: Config, _ctx: unknown,
         onToolUse?: (t: string) => void,
       ) {
         onToolUse?.('Bash'); // callback should be undefined → no-op
@@ -288,39 +297,66 @@ describe('E2E smoke tests', () => {
     expect(sent.some((s) => s.startsWith('🔧 Running'))).toBe(false);
   });
 
-  // --- v0.3 persistent (v2) sessions ---
+  // --- SDK sessions (always-on: the SDK session owns history) ---
 
-  it('persistent session: captures session_id, then resumes it with empty history', async () => {
-    const cfg = makeConfig({ sdk: { ...config.sdk, persistentSession: true } });
-    const seen: Array<{ history: string; resume: string | undefined }> = [];
+  it('session: turn 1 has no resume + injects history in the user message; turn 2 resumes with no injection', async () => {
+    const cfg = makeConfig();
+    const seen: Array<{ userMsg: string; resume: string | undefined }> = [];
     (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
       async function* (
-        _u: string, history: string, _c: string, _cfg: Config, _ctx: unknown,
-        _onToolUse: unknown,
+        userMsg: string, _cfg: Config, _ctx: unknown, _onToolUse: unknown,
         opts?: { resume?: string; onSessionId?: (id: string) => void },
       ) {
-        seen.push({ history, resume: opts?.resume });
+        seen.push({ userMsg, resume: opts?.resume });
         opts?.onSessionId?.('sdk-session-1');
         yield 'ok';
       },
     );
 
-    // Turn 1: no prior session → no resume, history present, captures the id.
+    // Turn 1: no prior session → no resume. No prior history yet → nothing injected.
     await simulateMessage(makeDmMsg('first'), cfg, store, router, groupContext, streamRelay);
     expect(seen[0].resume).toBeUndefined();
+    expect(seen[0].userMsg).toBe('first'); // nothing prepended on a truly first turn
     expect(store.getSdkSessionId(USER_UID)).toBe('sdk-session-1');
 
-    // Turn 2: resumes the captured id, history suppressed (lives in SDK session).
+    // Turn 2: resumes the captured id. History lives in the SDK session, so the
+    // user message is NOT prefixed with a [Prior conversation history] block.
     await simulateMessage(makeDmMsg('second'), cfg, store, router, groupContext, streamRelay);
     expect(seen[1].resume).toBe('sdk-session-1');
-    expect(seen[1].history).toBe('');
+    expect(seen[1].userMsg).toBe('second');
+    expect(seen[1].userMsg).not.toContain('[Prior conversation history');
   });
 
-  it('persistent session: /reset clears the stored SDK session id', async () => {
-    const cfg = makeConfig({ sdk: { ...config.sdk, persistentSession: true } });
+  it('session: a brand-new session WITH prior SQLite history injects it once on the first turn (migration)', async () => {
+    const cfg = makeConfig();
+    // Seed SQLite history but NO sdk_sessions row → simulates an existing
+    // deployment migrating to SDK-session-owned history. getOrCreate makes the
+    // session row (DM channelType=1); then append the prior turns.
+    store.getOrCreate(USER_UID, USER_UID, 1);
+    store.appendUser(USER_UID, 'old question', 1, 'TestUser');
+    store.appendAssistant(USER_UID, 'old answer', 2, BOT_ID);
+
+    let firstUserMsg = '';
+    (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
+      async function* (userMsg: string, _cfg: Config, _ctx: unknown, _t: unknown, opts?: { onSessionId?: (id: string) => void }) {
+        firstUserMsg = userMsg;
+        opts?.onSessionId?.('sdk-session-m');
+        yield 'ok';
+      },
+    );
+    await simulateMessage(makeDmMsg('new question'), cfg, store, router, groupContext, streamRelay);
+    // The one-time history block is prepended to the user message.
+    expect(firstUserMsg).toContain('[Prior conversation history');
+    expect(firstUserMsg).toContain('old question');
+    expect(firstUserMsg).toContain('old answer');
+    expect(firstUserMsg).toContain('new question');
+  });
+
+  it('session: /reset clears the stored SDK session id', async () => {
+    const cfg = makeConfig();
     (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
       async function* (
-        _u: string, _h: string, _c: string, _cfg: Config, _ctx: unknown, _t: unknown,
+        _u: string, _cfg: Config, _ctx: unknown, _t: unknown,
         opts?: { onSessionId?: (id: string) => void },
       ) {
         opts?.onSessionId?.('sdk-session-2');
@@ -334,22 +370,23 @@ describe('E2E smoke tests', () => {
     expect(store.getSdkSessionId(USER_UID)).toBeUndefined();
   });
 
-  it('non-persistent (default) sets no resume/onSessionId and stores no SDK session id', async () => {
+  it('session: always sets resume/onSessionId and stores the SDK session id', async () => {
     let sawOpts: { resume?: string; onSessionId?: unknown; memoryDir?: string } | undefined;
     (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
       async function* (
-        _u: string, _h: string, _c: string, _cfg: Config, _ctx: unknown, _t: unknown,
-        opts?: { resume?: string; onSessionId?: unknown; memoryDir?: string },
+        _u: string, _cfg: Config, _ctx: unknown, _t: unknown,
+        opts?: { resume?: string; onSessionId?: (id: string) => void; memoryDir?: string },
       ) {
         sawOpts = opts;
+        opts?.onSessionId?.('sdk-session-3');
         yield 'ok';
       },
     );
     await simulateMessage(makeDmMsg('hi'), config, store, router, groupContext, streamRelay);
-    // memoryDir is always present; persistence-related fields must be absent.
+    // First turn: no resume yet, but onSessionId is wired and the id is captured.
     expect(sawOpts?.resume).toBeUndefined();
-    expect(sawOpts?.onSessionId).toBeUndefined();
-    expect(store.getSdkSessionId(USER_UID)).toBeUndefined();
+    expect(typeof sawOpts?.onSessionId).toBe('function');
+    expect(store.getSdkSessionId(USER_UID)).toBe('sdk-session-3');
   });
 
   // --- v1.0 GROUP.md per-group instructions ---
@@ -362,7 +399,7 @@ describe('E2E smoke tests', () => {
     let sawInstructions: string | undefined;
     (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
       async function* (
-        _u: string, _h: string, _c: string, _cfg: Config, _ctx: unknown, _t: unknown,
+        _u: string, _cfg: Config, _ctx: unknown, _t: unknown,
         opts?: { groupInstructions?: string },
       ) {
         sawInstructions = opts?.groupInstructions;
@@ -384,7 +421,7 @@ describe('E2E smoke tests', () => {
     let sawOpts: { groupInstructions?: string; memoryDir?: string } | undefined;
     (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
       async function* (
-        _u: string, _h: string, _c: string, _cfg: Config, _ctx: unknown, _t: unknown,
+        _u: string, _cfg: Config, _ctx: unknown, _t: unknown,
         opts?: { groupInstructions?: string; memoryDir?: string },
       ) {
         sawOpts = opts;
@@ -423,10 +460,11 @@ describe('E2E smoke tests', () => {
     mockQueryYield('fresh answer');
     await simulateMessage(g('hello again', 11), config, store, router, groupContext, streamRelay);
 
-    // The agent's systemPrompt/history must NOT contain the pre-reset content.
+    // The agent's user message (which now carries any first-turn history block)
+    // must NOT contain the pre-reset content.
     const call = (queryAgent as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
-    const historyPrefix = call[1] as string;
-    expect(historyPrefix).not.toContain('SECRET pre-reset line');
+    const userMessage = call[0] as string;
+    expect(userMessage).not.toContain('SECRET pre-reset line');
     // And the persisted store must not have re-seeded it either.
     expect(store.buildHistoryPrefix(sessionKey, 40)).not.toContain('SECRET pre-reset line');
   });
@@ -457,13 +495,13 @@ describe('E2E smoke tests', () => {
   it('DM threads a dm SessionCtx (kind+sessionKey) into queryAgent', async () => {
     await simulateMessage(makeDmMsg('Hi'), config, store, router, groupContext, streamRelay);
 
-    // 5th positional arg of queryAgent is the SessionCtx that resolveSessionCwd
+    // 3rd positional arg of queryAgent is the SessionCtx that resolveSessionCwd
     // hashes into the per-session cwd. USER_UID has no `s`-prefix → no spaceId →
     // bare-uid DM sessionKey.
-    const ctx = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][4];
+    const ctx = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][2];
     expect(ctx).toEqual({ kind: 'dm', sessionKey: USER_UID });
     // DM also gets a private memory dir (opts.memoryDir is always set).
-    const opts = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][6];
+    const opts = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][4];
     expect(typeof opts.memoryDir).toBe('string');
     expect(opts.memoryDir.length).toBeGreaterThan(0);
   });
@@ -471,8 +509,8 @@ describe('E2E smoke tests', () => {
   it('DM and group get DIFFERENT memory dirs (private vs shared)', async () => {
     await simulateMessage(makeDmMsg('hi'), config, store, router, groupContext, streamRelay);
     await simulateMessage(makeGroupMsg('hi', true), config, store, router, groupContext, streamRelay);
-    const dmDir = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][6].memoryDir;
-    const grpDir = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[1][6].memoryDir;
+    const dmDir = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][4].memoryDir;
+    const grpDir = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[1][4].memoryDir;
     expect(dmDir).not.toBe(grpDir);
   });
 
@@ -482,13 +520,13 @@ describe('E2E smoke tests', () => {
     await simulateMessage(makeGroupMsg('hi from A', true, { from_uid: 'member-A' }), config, store, router, groupContext, streamRelay);
     await simulateMessage(makeGroupMsg('hi from B', true, { from_uid: 'member-B' }), config, store, router, groupContext, streamRelay);
 
-    const ctxA = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][4];
-    const ctxB = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[1][4];
+    const ctxA = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][2];
+    const ctxB = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[1][2];
     expect(ctxA).toEqual({ kind: 'group', sessionKey: GROUP_CHANNEL });
     expect(ctxB).toEqual({ kind: 'group', sessionKey: GROUP_CHANNEL });
     // And the memory dir is the same for both members (shared memory).
-    const optsA = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][6];
-    const optsB = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[1][6];
+    const optsA = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][4];
+    const optsB = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[1][4];
     expect(optsA.memoryDir).toBe(optsB.memoryDir);
   });
 
@@ -567,14 +605,15 @@ describe('E2E smoke tests', () => {
 
     expect(queryAgent).toHaveBeenCalledTimes(2);
 
-    // Second call: user message is separate (first arg), history is in second arg
+    // Turn 2 resumes the SDK session, so history is NOT re-injected into the user
+    // message — the second user message is just the new turn. (The SDK session
+    // carries the prior conversation; first-turn injection only fires when there
+    // is no stored session id yet.)
     const secondUserMsg = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[1][0] as string;
     expect(secondUserMsg).toBe('Follow up');
-    const secondHistory = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[1][1] as string;
-    expect(secondHistory).toContain('[user TestUser]: Hello');
-    expect(secondHistory).toContain('[assistant bot-001]: First reply');
+    expect(secondUserMsg).not.toContain('[Prior conversation history');
 
-    // Full history stored
+    // Full history is still recorded in SQLite (durable record / migration / recovery).
     const history = store.buildHistoryPrefix(USER_UID, 40);
     expect(history).toContain('[user TestUser]: Hello');
     expect(history).toContain('[assistant bot-001]: First reply');
@@ -594,22 +633,25 @@ describe('E2E smoke tests', () => {
 
   // --- 8. Group context not duplicated in prompt ---
 
-  it('Group @mention: current message not in group context section', async () => {
+  it('Group @mention: group context delta injected into the user message, current message excluded', async () => {
     // Pre-populate some group context
     groupContext.pushMessage(GROUP_CHANNEL, 'other-user', 'Alice', 'Previous message', Date.now());
 
     const msg = makeGroupMsg('My question', true);
     await simulateMessage(msg, config, store, router, groupContext, streamRelay);
 
-    // User message is passed as first arg (user role), NOT concatenated
+    // Group context (B4) now rides in the USER message (first arg), not a separate
+    // system-prompt arg. The prior chatter is present; the current message is NOT
+    // echoed back into the [Recent group messages] block.
     const userMsg3 = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
-    expect(userMsg3).toBe('My question');
-
-    // Group context is passed as third arg (goes into system prompt)
-    const groupCtx = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][2] as string;
-    expect(groupCtx).toContain('Alice：Previous message');
-    // Current message should NOT be in group context
-    expect(groupCtx).not.toContain('My question');
+    expect(userMsg3).toContain('Alice：Previous message');
+    expect(userMsg3).toContain('My question'); // the actual question (the body) is present
+    // The [Recent group messages] context block (everything up to the body) must
+    // not include the current message — only prior chatter.
+    const recentIdx = userMsg3.indexOf('[Recent group messages]');
+    const contextBlock = userMsg3.slice(recentIdx, userMsg3.lastIndexOf('My question'));
+    expect(contextBlock).toContain('Alice：Previous message');
+    expect(contextBlock).not.toContain('My question');
   });
 
   // --- 9. queryAgent error → best-effort error reply ---

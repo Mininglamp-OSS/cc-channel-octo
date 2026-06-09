@@ -51,7 +51,7 @@ function createMockStream() {
 }
 
 async function drain(config: Config): Promise<void> {
-  for await (const chunk of queryAgent('hello', '', '', config)) {
+  for await (const chunk of queryAgent('hello', config)) {
     void chunk;
     // Drain generator so queryAgent invokes the SDK mock.
   }

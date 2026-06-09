@@ -279,6 +279,70 @@ describe('GroupContext', () => {
   });
 });
 
+// ─── consumption cursor (frozen-prompt: B4 delta into the user message) ──────
+
+describe('GroupContext consumption cursor', () => {
+  let adapter: DbAdapter;
+  let ctx: GroupContext;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    adapter = createTestAdapter();
+    ctx = new GroupContext(adapter, 6000);
+  });
+
+  it('getContextCursor defaults to 0 for a fresh channel', () => {
+    expect(ctx.getContextCursor('ch1')).toBe(0);
+  });
+
+  it('buildContextSince returns only messages newer than the cursor + the new lastId', () => {
+    ctx.pushMessage('ch1', 'u1', 'Alice', 'one', 1);
+    ctx.pushMessage('ch1', 'u2', 'Bob', 'two', 2);
+    const first = ctx.buildContextSince('ch1', 0);
+    expect(first.text).toContain('Alice：one');
+    expect(first.text).toContain('Bob：two');
+    expect(first.lastId).toBeGreaterThan(0);
+
+    // Advance the cursor; a new message arrives.
+    ctx.setContextCursor('ch1', first.lastId);
+    ctx.pushMessage('ch1', 'u3', 'Carol', 'three', 3);
+    const second = ctx.buildContextSince('ch1', ctx.getContextCursor('ch1'));
+    // Only the new message is included; the old ones are not re-shown.
+    expect(second.text).toContain('Carol：three');
+    expect(second.text).not.toContain('Alice：one');
+    expect(second.text).not.toContain('Bob：two');
+    expect(second.lastId).toBeGreaterThan(first.lastId);
+  });
+
+  it('buildContextSince returns empty text + unchanged cursor when nothing is new', () => {
+    ctx.pushMessage('ch1', 'u1', 'Alice', 'one', 1);
+    const first = ctx.buildContextSince('ch1', 0);
+    ctx.setContextCursor('ch1', first.lastId);
+    const second = ctx.buildContextSince('ch1', ctx.getContextCursor('ch1'));
+    expect(second.text).toBe('');
+    expect(second.lastId).toBe(ctx.getContextCursor('ch1'));
+  });
+
+  it('setContextCursor is monotonic (never moves backward)', () => {
+    ctx.setContextCursor('ch1', 10);
+    ctx.setContextCursor('ch1', 5); // lower → ignored
+    expect(ctx.getContextCursor('ch1')).toBe(10);
+    ctx.setContextCursor('ch1', 20); // higher → applied
+    expect(ctx.getContextCursor('ch1')).toBe(20);
+  });
+
+  it('cursor is per-channel (isolated)', () => {
+    ctx.setContextCursor('ch1', 7);
+    expect(ctx.getContextCursor('ch2')).toBe(0);
+  });
+
+  it('cursor persists across a fresh GroupContext over the same DB', () => {
+    ctx.setContextCursor('ch1', 42);
+    const ctx2 = new GroupContext(adapter, 6000);
+    expect(ctx2.getContextCursor('ch1')).toBe(42);
+  });
+});
+
 // ─── G23: robot flag tracking ───────────────────────────────────────────────────────────────
 
 describe('G23: robot flag', () => {

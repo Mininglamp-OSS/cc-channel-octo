@@ -34,7 +34,7 @@ skills, sessions) for free — at the cost of living within the SDK's model (see
 | Persona / identity (SOUL.md) | cc composes → SDK `systemPrompt` | ✅ Done |
 | Behavior rules (CLAUDE.md) | SDK `project` settings discovery | ✅ Done |
 | Long-term memory | SDK auto-memory | ✅ Done |
-| Conversation continuity (sessions) | SDK session + `resume` | ◑ Partial (opt-in; see #2) |
+| Conversation continuity (sessions) | SDK session + `resume` (always-on) | ✅ Done (see #4) |
 | Skills / external tools | SDK skills + Bash | ✅ Done |
 | Per-bot isolation & identity | cc config + dirs | ✅ Done |
 | Scheduled tasks | cc cron tool + gateway scheduler | ✅ Done |
@@ -46,8 +46,9 @@ skills, sessions) for free — at the cost of living within the SDK's model (see
 
 Each bot's persona lives in `<baseDir>/<botId>/SOUL.md`. cc loads it
 (`config.ts` `loadSoul`) and it **overrides** `sdk.systemPrompt`. The composed
-system prompt (security prefix + SOUL + group instructions + context/history)
-rides in the SDK preset prompt's `append` (`agent-bridge.ts` `buildSystemPrompt`).
+system prompt — security prefix + SOUL + group instructions, all
+operator-controlled and **frozen** (no per-turn history/context; see #4) — rides
+in the SDK preset prompt's `append` (`agent-bridge.ts` `buildSystemPrompt`).
 openclaw-style "give the bot a soul" — done, per bot.
 
 ## 2. Behavior rules — CLAUDE.md ✅ (with a documented caveat)
@@ -74,35 +75,52 @@ precedence over any `projectSettings` value, so memory stays contained even with
 (group = shared per channel, DM = per peer) and live **outside** `cwdBase` so the
 7-day cwd TTL never reclaims it.
 
-## 4. Conversation continuity — sessions ◑
+## 4. Conversation continuity — sessions ✅
 
 The SDK persists each conversation as a session (`~/.claude/projects/.../*.jsonl`)
-and continues it via `resume`. cc supports this through `persistentSession`
-(opt-in) — it stores the SDK session id and `resume`s next turn.
+and continues it via `resume`. cc **always** resumes: it stores the SDK session id
+per `sessionKey` and resumes it next turn. The SDK session is the **source of
+truth** for conversation history.
 
-**Today (default OFF):** cc rebuilds `[Conversation history]` from its own SQLite
-`messages` table and injects it into the prompt each turn. This predates heavy
-session use.
+**Frozen system prompt.** Per Anthropic's own guidance (found in the bundled
+`claude` binary: *"keep the system prompt frozen; inject dynamic context in a user
+message"*), cc's `systemPrompt.append` now carries ONLY stable, operator-controlled
+content — security prefix + SOUL + group instructions. It no longer contains
+`[Conversation history]` (B5) or `[Group context]` (B4), so the SDK's cached system
+block is byte-identical turn-to-turn and the prompt-caching prefix actually hits.
+(Previously the per-turn-variable history/context sat inside the cached block,
+forcing a cache-write with zero reads every turn.)
+
+**Where dynamic content goes now:**
+- **History (B5):** lives in the SDK session. Only the FIRST turn of a session
+  (no stored id) — or a migration from an existing SQLite deployment — injects the
+  prior history ONCE as a `[Prior conversation history]` block prepended to the
+  user message. After that, `resume` carries it.
+- **Group context (B4):** injected into the user message as a delta — only the
+  group messages NEW since the channel's consumption cursor
+  (`group_context_cursors`), not the whole window every turn.
 
 **Verified by spike (#2) — group chat over SDK session works:**
 - Multi-speaker attribution survives: encode the speaker in the turn content
   (`[user Alice]: …`); the SDK persists it verbatim and resume replays it. A
   later turn correctly answered "who said what".
-- `resume` continuity across speakers is fine; the session id is stable across
-  turns (cc's `onSessionId` re-store is harmless but more than needed).
+- `resume` continuity across speakers is fine; the session id is stable across turns.
 
-→ **DM and group are NOT fundamentally different** at the session level; both can
-use SDK persistent sessions (only the `sessionKey` granularity differs:
-DM = `spaceId:peer`, group = `channel_id`). The SQLite-history approach is
-largely a pre-session legacy, not a group requirement.
+→ **DM and group are NOT fundamentally different** at the session level; both use
+SDK sessions (only the `sessionKey` granularity differs: DM = `spaceId:peer`,
+group = `channel_id`).
 
-**Intended role split (evolution direction):**
-- **Conversation history → SDK session** (persistent + resume): the source of truth.
-- **SQLite → state, cursors, mappings**: group background-message consumption
-  offset, session-id maps, `/reset` control — *not* history reconstruction.
+**Stale-resume recovery.** If a stored session id is invalid/expired the SDK throws
+`No conversation found with session ID: …` (verified by spike). `queryAgent` catches
+this (only when it fails before any output), clears the bad id, and retries once
+WITHOUT resume, re-injecting the history block from SQLite — so a turn never silently
+loses the conversation.
 
-This is a future refactor, not yet implemented — tracked as the evolution from
-the current opt-in `persistentSession` to session-as-default.
+**Role split (implemented):**
+- **Conversation history → SDK session** (resume): the source of truth.
+- **SQLite → state, cursors, mappings**: durable conversation record (migration +
+  stale-resume recovery substrate), group consumption cursor, session-id maps,
+  `/reset` control — NOT live prompt-history reconstruction.
 
 ## 5. Skills & external tools ✅
 
@@ -185,15 +203,16 @@ loop would build on #7.
 
 ## Summary
 
-cc replicates the **identity + memory + skills + (optional) session + scheduled
-tasks** parts of an openclaw-style runtime by configuring the Claude Agent SDK per
-bot — with little runtime code of its own. The remaining gap is **full autonomy**:
-the agent can schedule its own future runs (cron) but has no always-on
-free-running loop — every action still originates from an inbound message or a
-registered cron fire. The **session layer** is mid-evolution (SQLite-history today
-→ SDK-session-as-truth, with SQLite demoted to state/cursors). The deliberate
-trade for staying thin is living within the SDK's model — notably **lossy
-compaction**: on a long conversation the SDK summarizes older turns and *can drop
-early details, including a speaker's specific facts* (verified in the #2 spike).
-Business-critical facts that must survive compaction belong in auto-memory or
-SQLite, not only in the rolling session.
+cc replicates the **identity + memory + skills + session + scheduled tasks** parts
+of an openclaw-style runtime by configuring the Claude Agent SDK per bot — with
+little runtime code of its own. The remaining gap is **full autonomy**: the agent
+can schedule its own future runs (cron) but has no always-on free-running loop —
+every action still originates from an inbound message or a registered cron fire.
+The **session layer** is now SDK-session-as-truth: the system prompt is frozen
+(cacheable), history lives in the SDK session (resumed every turn), and SQLite is
+demoted to state/cursors/mappings + a durable record for migration & stale-resume
+recovery. The deliberate trade for staying thin is living within the SDK's model —
+notably **lossy compaction**: on a long conversation the SDK summarizes older turns
+and *can drop early details, including a speaker's specific facts* (verified in the
+#2 spike). Business-critical facts that must survive compaction belong in
+auto-memory or SQLite, not only in the rolling session.

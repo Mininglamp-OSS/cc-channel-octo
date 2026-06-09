@@ -54,6 +54,27 @@ cwd isolation), media-upload.ts / file-inline-wrap.ts (inbound media), db-adapte
 
 ## Gotchas
 
+- **Frozen system prompt + SDK-session-owned history** — `buildSystemPrompt`
+  (`agent-bridge.ts`) assembles ONLY stable operator content (security prefix +
+  SOUL + GROUP.md) so the SDK's cached system block is byte-identical turn-to-turn
+  (prompt-cache hits). **Do NOT put per-turn-variable text in the system prompt** —
+  it sits inside the `cache_control` block and invalidates the whole prefix every
+  turn (Anthropic's own guidance, found in the bundled `claude` binary). History
+  lives in the **SDK session** (`queryAgent` always `resume`s the stored id); only
+  a session's FIRST turn (or migration from existing SQLite history) injects prior
+  history ONCE into the **user message** as a `[Prior conversation history]` block.
+  Group context (B4) rides in the user message too, as a **delta** since a
+  per-channel cursor (`group_context_cursors` in `group-context.ts`
+  `buildContextSince` / `get|setContextCursor`), not the whole window. There is **no
+  `sdk.persistentSession` flag** — sessions are always on. Stale/expired resume (SDK
+  throws "No conversation found with session ID …") is caught in `queryAgent`
+  (`onResumeFailed` clears the id + retries once with `fallbackHistoryBlock`). SQLite
+  `messages` is kept as a durable record (migration + recovery substrate), NOT live
+  prompt history. Untrusted IM text moved out of the system prompt into the user
+  message is still escaped at the boundary (`sanitizePromptBody` for group context,
+  `escapeSectionMarkers` for history — same helpers, new location). The SDK still
+  auto-injects `<system-reminder># currentDate` (date only, no clock time) into the
+  first user message — don't duplicate it; for precise time the agent must run `date`.
 - **Pre-commit hook scope** — `.husky/pre-commit` runs `lint-staged` (ESLint on
   staged `*.ts` only) + `npm run type-check`. Non-`.ts` files (README, *.json)
   bypass lint-staged; full `npm test` is deferred to CI, so run it locally

@@ -15,7 +15,7 @@ import type { Config } from './config.js';
 import { resolveSessionCwd } from './cwd-resolver.js';
 import type { SessionCtx } from './cwd-resolver.js';
 import { linkSkillsIntoSandbox } from './skill-linker.js';
-import { safeBody, safeSectioned, trustedText, escapeSectionMarkers } from './prompt-safety.js';
+import { trustedText, escapeSectionMarkers } from './prompt-safety.js';
 import type { SafeText } from './prompt-safety.js';
 
 const VALID_PERMISSION_MODES: Set<string> = new Set([
@@ -94,24 +94,27 @@ export function sanitizeForSystemPrompt(text: string): string {
 }
 
 /**
- * Build the system prompt combining security prefix, optional custom instructions,
- * group context, and conversation history.
+ * Build the FROZEN system prompt: only stable, operator-controlled content that
+ * does NOT change turn-to-turn — security prefix + custom/SOUL instructions +
+ * per-group instructions. This keeps the SDK's cached system block stable across
+ * turns so the prompt-caching prefix actually hits (Anthropic's own guidance:
+ * "keep the system prompt frozen; inject dynamic context in a user message").
+ *
+ * Per-turn-variable content — conversation history (B5) and group chat context
+ * (B4) — is NO LONGER assembled here. History lives in the SDK session (resume);
+ * group context + first-turn/migration history are injected into the USER message
+ * by the caller (see src/index.ts). The result is that NO user-controlled text
+ * enters the system prompt at all.
  *
  * The security prefix is always first and cannot be overridden (Q9 fix).
  * Custom systemPrompt from config is appended after, not replacing it.
  *
- * Both `historyPrefix` and `groupContext` are user-controlled (recordings of
- * IM users' messages), so both are sanitized to escape any embedded section
- * markers (S3 fix / PM P1-B — stage 6).
- *
- * @param historyPrefix - Formatted conversation history from SessionStore
- * @param groupContext - Group chat context string (rolling cache of recent
- *                       group messages — USER-CONTROLLED)
- * @param customPrompt - Optional custom system prompt from config (appended, not replacing)
+ * @param customPrompt - Optional custom system prompt from config / SOUL.md
+ *                       (appended, not replacing). Operator-controlled, trusted.
+ * @param groupInstructions - Optional per-group GROUP.md instructions.
+ *                       Operator-controlled, trusted.
  */
 export function buildSystemPrompt(
-  historyPrefix: string,
-  groupContext: string,
   customPrompt?: string,
   groupInstructions?: string,
 ): string {
@@ -119,7 +122,8 @@ export function buildSystemPrompt(
   // so a future section that interpolates user text can't be pushed raw — the
   // compiler rejects a plain string here. This is the choke-point enforcement
   // (finding #10): "unsafe text reached the prompt" is now a type error, not a
-  // convention each call site must remember.
+  // convention each call site must remember. All three parts are trustedText
+  // (operator-controlled), so the system prompt now carries NO untrusted input.
   const parts: SafeText[] = [trustedText(SECURITY_PROMPT_PREFIX)];
   if (customPrompt) {
     // Operator-provided global instruction (config systemPrompt / SOUL.md) — trusted.
@@ -127,115 +131,25 @@ export function buildSystemPrompt(
   }
   if (groupInstructions) {
     // v1.0 GROUP.md: operator-provided, trusted per-group instructions. Placed
-    // after the global custom prompt so a group can specialize behavior. NOT
-    // sanitized like group context — this is a trusted operator file, not chat.
+    // after the global custom prompt so a group can specialize behavior.
     parts.push(trustedText(`[Group instructions]\n${groupInstructions}`));
   }
-  if (groupContext) {
-    // SECURITY: group context lines are user-authored chat (`<name>：<body>`),
-    // NOT our `[role name]:` turn format — so a member can forge BOTH a section
-    // marker AND a `[assistant ...]:` role label inside them. safeBody escapes
-    // both. (Safe to escape role labels here precisely because these lines are
-    // not our renderer's labels; doing the same to historyPrefix would clobber
-    // the legitimate labels renderTurn already produced.)
-    parts.push(trustedText('[Group context]\n') + safeBody(groupContext) as SafeText);
-  }
-  if (historyPrefix) {
-    // History turns are rendered by SessionStore.renderTurn, which already
-    // escapes role labels in the user content per-fragment and emits the
-    // legitimate `[user <name>]:` labels. Here we only escape SECTION markers —
-    // escaping role labels again would corrupt those legitimate labels.
-    parts.push(trustedText('[Conversation history]\n') + safeSectioned(historyPrefix) as SafeText);
-  }
   const assembled = parts.join('\n\n');
-  // D1/P1-3 (齐 P1-3): cap the assembled system prompt to prevent
-  // SDK context_length_exceeded errors. History/groupContext can grow
-  // unbounded with long messages × historyLimit (default 40) × maxContextChars
-  // (default 6000). 100 KiB is comfortably above any realistic legitimate
-  // prompt while staying well under model context limits.
+  // The assembled prompt is now bounded by operator-controlled content (security
+  // prefix + SOUL + GROUP.md), not unbounded user history. A flat cap remains as
+  // a safety net against a pathologically large SOUL/GROUP.md file.
   if (assembled.length <= MAX_SYSTEM_PROMPT_CHARS) {
     return assembled;
   }
-  return truncateSystemPrompt(parts);
+  return assembled.slice(0, MAX_SYSTEM_PROMPT_CHARS);
 }
 
 /**
- * Maximum assembled system prompt length in characters.
- * Beyond this, history is truncated (keeping the most recent entries)
- * to fit. Security prefix + custom prompt are always preserved.
+ * Maximum assembled system prompt length in characters. The prompt is now bounded
+ * by operator-controlled content only (security prefix + SOUL + GROUP.md), so this
+ * is just a safety net against a pathologically large config file.
  */
 const MAX_SYSTEM_PROMPT_CHARS = 100 * 1024;
-
-/**
- * Best-effort truncation: keep SECURITY_PROMPT_PREFIX + customPrompt intact,
- * then preserve the tail of history (most recent) within the remaining budget.
- * GroupContext is preserved up to a fixed share; the rest of the budget goes
- * to history.
- */
-function truncateSystemPrompt(parts: string[]): string {
-  // parts layout (some may be absent): [securityPrefix, customPrompt?,
-  // "[Group context]\n..."?, "[Conversation history]\n..."?]
-  const securityPrefix = parts[0];
-  // Reserved for non-truncated sections.
-  const reservedNonHistory: string[] = [securityPrefix];
-  let used = securityPrefix.length + 2; // +2 for join "\n\n"
-  let groupSection: string | undefined;
-  let historySection: string | undefined;
-  // Pull customPrompt + groupContext into reserved up-front so they can be
-  // budgeted before we drop history lines.
-  for (let i = 1; i < parts.length; i++) {
-    const p = parts[i];
-    if (p.startsWith('[Group context]\n')) {
-      groupSection = p;
-    } else if (p.startsWith('[Conversation history]\n')) {
-      historySection = p;
-    } else {
-      reservedNonHistory.push(p);
-      used += p.length + 2;
-    }
-  }
-  // Group context: keep up to 20 KiB, drop oldest lines if needed.
-  const groupBudget = 20 * 1024;
-  if (groupSection) {
-    if (groupSection.length <= groupBudget) {
-      reservedNonHistory.push(groupSection);
-      used += groupSection.length + 2;
-    } else {
-      const header = '[Group context]\n';
-      const body = groupSection.substring(header.length);
-      const lines = body.split('\n');
-      let kept: string[] = [];
-      let keptLen = 0;
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const candidate = lines[i].length + 1;
-        if (keptLen + candidate > groupBudget) break;
-        kept.unshift(lines[i]);
-        keptLen += candidate;
-      }
-      const truncatedGroup = header + '[older messages dropped]\n' + kept.join('\n');
-      reservedNonHistory.push(truncatedGroup);
-      used += truncatedGroup.length + 2;
-    }
-  }
-  // History: take remaining budget for the tail of the section.
-  if (historySection) {
-    const header = '[Conversation history]\n';
-    const body = historySection.substring(header.length);
-    const remaining = Math.max(1024, MAX_SYSTEM_PROMPT_CHARS - used - header.length - 64);
-    const lines = body.split('\n');
-    let kept: string[] = [];
-    let keptLen = 0;
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const candidate = lines[i].length + 1;
-      if (keptLen + candidate > remaining) break;
-      kept.unshift(lines[i]);
-      keptLen += candidate;
-    }
-    const truncatedHistory = header + '[older turns dropped]\n' + kept.join('\n');
-    reservedNonHistory.push(truncatedHistory);
-  }
-  return reservedNonHistory.join('\n\n');
-}
 
 /**
  * Query Claude Agent SDK with structural role separation.
@@ -248,9 +162,9 @@ function truncateSystemPrompt(parts: string[]): string {
  * assistant responses because their input occupies a distinct role boundary
  * enforced by the model's message format.
  *
- * @param userMessage - Raw user message text (passed as user role)
- * @param historyPrefix - Formatted conversation history from SessionStore
- * @param groupContext - Group chat context string (may be empty)
+ * @param userMessage - Raw user message text (passed as user role). The caller
+ *   prepends any per-turn dynamic context (first-turn/migration history, group
+ *   context delta, quoted message) to this, wrapped + sanitized — see src/index.ts.
  * @param config - Application config (sdk.* fields used)
  * @param sessionCtx - Per-session routing context for cwd isolation (Q3)
  * @param onToolUse - Optional callback fired with each tool name AND its input
@@ -258,31 +172,28 @@ function truncateSystemPrompt(parts: string[]): string {
  *   reporter — it does not dedup, rate-limit, or format; the caller decides how
  *   to surface progress (and how to truncate the input). A throwing callback
  *   must never break the stream, so calls are guarded.
- * @param opts - v0.3 persistent-session options:
- *   - `resume`: a prior SDK session id to continue (v2 Session API). When set,
- *     conversation history lives in the SDK session, so the caller should pass
- *     an empty `historyPrefix` to avoid double-injecting it.
+ * @param opts - session options:
+ *   - `resume`: a prior SDK session id to continue (v2 Session API). The SDK
+ *     session is the source of truth for conversation history; on resume the
+ *     caller injects nothing (history already lives in the session).
  *   - `onSessionId`: called with the SDK session id observed for this turn, so
  *     the caller can persist it and resume next time.
  * @yields string chunks of assistant text output
  */
 export async function* queryAgent(
   userMessage: string,
-  historyPrefix: string,
-  groupContext: string,
   config: Config,
   sessionCtx?: SessionCtx,
   onToolUse?: (toolName: string, toolInput?: unknown) => void,
-  opts?: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; memoryDir?: string; mcpServers?: Record<string, McpServerConfig> },
+  opts?: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; memoryDir?: string; mcpServers?: Record<string, McpServerConfig>; onResumeFailed?: () => void; fallbackHistoryBlock?: string },
 ): AsyncIterable<string> {
   const permissionMode = toPermissionMode(config.sdk.permissionMode);
   const settingSources = toSettingSources(config.sdk.settingSources);
 
-  // Build system prompt: non-overridable security prefix + custom + group
-  // instructions (v1.0 GROUP.md) + context + history
+  // Build the FROZEN system prompt: non-overridable security prefix + custom
+  // (SOUL.md) + per-group instructions (v1.0 GROUP.md). History + group context
+  // are NOT here — they ride in the user message / SDK session (see src/index.ts).
   const systemPrompt = buildSystemPrompt(
-    historyPrefix,
-    groupContext,
     config.sdk.systemPrompt,
     opts?.groupInstructions,
   );
@@ -326,107 +237,153 @@ export async function* queryAgent(
       }
     : undefined;
 
-  const stream = sdkQuery({
-    prompt: userMessage,
-    options: {
-      cwd,
-      // v1.1: the system prompt MUST be the `claude_code` preset (not a raw
-      // string). The SDK's auto-memory awareness/recall is a *dynamic section
-      // of the preset prompt* and "has no effect when a custom (non-preset)
-      // system prompt is in use" (sdk.d.ts). A raw string here silently
-      // disables memory — the agent has no idea it has a memory and, when told
-      // to "remember", falls back to writing whatever config file it can see.
-      // Our composed prompt (security prefix + SOUL + group + history) rides in
-      // `append`, below the preset's base. excludeDynamicSections is left unset
-      // so the memory-path section stays in the prompt.
-      systemPrompt: { type: 'preset', preset: 'claude_code', append: systemPrompt },
-      ...(env ? { env } : {}),
-      // v0.3: resume a prior SDK session to persist workspace state across turns.
-      ...(opts?.resume ? { resume: opts.resume } : {}),
-      // v1.1: enable the SDK's built-in auto-memory, pointed at a stable per-
-      // session dir OUTSIDE cwdBase (so the 7-day cwd TTL never reclaims it).
-      // Inline `settings` is the flag tier — autoMemoryDirectory is honored here
-      // (it's only ignored when set via checked-in projectSettings). Orthogonal
-      // to settingSources, which is left untouched.
-      ...(opts?.memoryDir
-        ? {
-            settings: {
-              autoMemoryEnabled: true,
-              autoMemoryDirectory: opts.memoryDir,
-            } satisfies Settings,
-          }
-        : {}),
-      // Q2: `"*"` means "no whitelist" — drop the option so the SDK falls back
-      // to its built-in tool set. An explicit string[] is forwarded as-is.
-      ...(config.sdk.allowedTools === '*'
-        ? {}
-        : { allowedTools: config.sdk.allowedTools }),
-      permissionMode,
-      maxTurns: config.sdk.maxTurns,
-      model: config.sdk.model,
-      settingSources,
-      // #110: per-bot skill selection — enable only the listed skills (or 'all')
-      // from those discovered in the sandbox. Omitted when unset (SDK default).
-      ...(config.sdk.skills !== undefined ? { skills: config.sdk.skills } : {}),
-      // #115: in-process MCP servers (e.g. the cron tool) injected by the caller
-      // for this turn. Omitted when none.
-      ...(opts?.mcpServers ? { mcpServers: opts.mcpServers } : {}),
-      allowDangerouslySkipPermissions: permissionMode === 'bypassPermissions',
-    },
-  });
+  // Build + iterate the SDK stream for a given resume id and prompt. Extracted so
+  // a stale/expired `resume` (the SDK throws "No conversation found with session
+  // ID: …", verified by spike) can be recovered: clear the bad id and retry once
+  // WITHOUT resume, prepending the fallback history block so the turn still has
+  // continuity instead of silently losing the conversation.
+  const runStream = (resumeId: string | undefined, promptText: string) =>
+    sdkQuery({
+      prompt: promptText,
+      options: {
+        cwd,
+        // v1.1: the system prompt MUST be the `claude_code` preset (not a raw
+        // string). The SDK's auto-memory awareness/recall is a *dynamic section
+        // of the preset prompt* and "has no effect when a custom (non-preset)
+        // system prompt is in use" (sdk.d.ts). A raw string here silently
+        // disables memory. Our frozen prompt (security prefix + SOUL + group
+        // instructions) rides in `append`; history/context ride in the user
+        // message / SDK session, NOT here.
+        systemPrompt: { type: 'preset', preset: 'claude_code', append: systemPrompt },
+        ...(env ? { env } : {}),
+        // Resume a prior SDK session — the source of truth for conversation history.
+        ...(resumeId ? { resume: resumeId } : {}),
+        // v1.1: enable the SDK's built-in auto-memory, pointed at a stable per-
+        // session dir OUTSIDE cwdBase (so the 7-day cwd TTL never reclaims it).
+        // Inline `settings` is the flag tier — autoMemoryDirectory is honored here
+        // (it's only ignored when set via checked-in projectSettings). Orthogonal
+        // to settingSources, which is left untouched.
+        ...(opts?.memoryDir
+          ? {
+              settings: {
+                autoMemoryEnabled: true,
+                autoMemoryDirectory: opts.memoryDir,
+              } satisfies Settings,
+            }
+          : {}),
+        // Q2: `"*"` means "no whitelist" — drop the option so the SDK falls back
+        // to its built-in tool set. An explicit string[] is forwarded as-is.
+        ...(config.sdk.allowedTools === '*'
+          ? {}
+          : { allowedTools: config.sdk.allowedTools }),
+        permissionMode,
+        maxTurns: config.sdk.maxTurns,
+        model: config.sdk.model,
+        settingSources,
+        // #110: per-bot skill selection — enable only the listed skills (or 'all')
+        // from those discovered in the sandbox. Omitted when unset (SDK default).
+        ...(config.sdk.skills !== undefined ? { skills: config.sdk.skills } : {}),
+        // #115: in-process MCP servers (e.g. the cron tool) injected by the caller
+        // for this turn. Omitted when none.
+        ...(opts?.mcpServers ? { mcpServers: opts.mcpServers } : {}),
+        allowDangerouslySkipPermissions: permissionMode === 'bypassPermissions',
+      },
+    });
 
-  try {
+  // Detect the SDK's stale/invalid-resume signal (verified via spike): it throws
+  // an Error whose message names the missing/invalid session id.
+  const isResumeError = (err: unknown): boolean => {
+    const m = err instanceof Error ? err.message : String(err);
+    return /No conversation found with session ID|--resume requires a valid session/i.test(m);
+  };
+
+  const stream = runStream(opts?.resume, userMessage);
+
+  // Drain one SDK stream, yielding assistant text. `suppressSessionId` skips the
+  // onSessionId report (used on the FIRST attempt only matters; on a recovery
+  // retry we DO want to capture+persist the fresh id). Tracks whether any text
+  // was emitted so the caller can decide if a mid-stream failure is recoverable.
+  async function* drainStream(
+    s: ReturnType<typeof runStream>,
+    emitted: { any: boolean },
+  ): AsyncIterable<string> {
     let reportedSessionId = false;
-    for await (const message of stream) {
-      // v0.3: every SDK message carries session_id. Report it once so the caller
-      // can persist it and resume this session on the next turn. Guarded — a
-      // throwing callback must not break the stream.
-      if (!reportedSessionId && opts?.onSessionId) {
-        const sid = (message as { session_id?: string }).session_id;
-        if (typeof sid === 'string' && sid) {
-          reportedSessionId = true;
-          try {
-            opts.onSessionId(sid);
-          } catch (err) {
-            console.error(`[cc-channel-octo] onSessionId callback threw: ${String(err)}`);
-          }
-        }
-      }
-      if (message.type === 'assistant') {
-        // D1/P1-4 (齐 P1-4): guard against malformed SDK output — if the
-        // assistant message lacks `.message` or `.message.content`, treat as
-        // empty rather than throwing TypeError into the async generator.
-        const content = message.message?.content ?? [];
-        for (const block of content) {
-          if (block.type === 'text' && block.text) {
-            yield block.text;
-          } else if (block.type === 'tool_use' && onToolUse) {
-            // v0.3 tool progress: report the tool name + its input (so callers
-            // can render `<tool>(params)`). Guard the callback so a throw never
-            // propagates into the SDK stream and kills the turn.
-            const name = typeof block.name === 'string' ? block.name : 'tool';
+    try {
+      for await (const message of s) {
+        if (!reportedSessionId && opts?.onSessionId) {
+          const sid = (message as { session_id?: string }).session_id;
+          if (typeof sid === 'string' && sid) {
+            reportedSessionId = true;
             try {
-              onToolUse(name, (block as { input?: unknown }).input);
+              opts.onSessionId(sid);
             } catch (err) {
-              console.error(`[cc-channel-octo] onToolUse callback threw: ${String(err)}`);
+              console.error(`[cc-channel-octo] onSessionId callback threw: ${String(err)}`);
             }
           }
         }
-      } else if (message.type === 'result') {
-        if (message.subtype !== 'success') {
-          yield `\n[Error: ${message.subtype}]`;
+        if (message.type === 'assistant') {
+          // D1/P1-4 (齐 P1-4): guard against malformed SDK output — if the
+          // assistant message lacks `.message` or `.message.content`, treat as
+          // empty rather than throwing TypeError into the async generator.
+          const content = message.message?.content ?? [];
+          for (const block of content) {
+            if (block.type === 'text' && block.text) {
+              emitted.any = true;
+              yield block.text;
+            } else if (block.type === 'tool_use' && onToolUse) {
+              // v0.3 tool progress: report the tool name + its input (so callers
+              // can render `<tool>(params)`). Guard the callback so a throw never
+              // propagates into the SDK stream and kills the turn.
+              const name = typeof block.name === 'string' ? block.name : 'tool';
+              try {
+                onToolUse(name, (block as { input?: unknown }).input);
+              } catch (err) {
+                console.error(`[cc-channel-octo] onToolUse callback threw: ${String(err)}`);
+              }
+            }
+          }
+        } else if (message.type === 'result') {
+          if (message.subtype !== 'success') {
+            yield `\n[Error: ${message.subtype}]`;
+          }
+        } else if (
+          message.type === 'system' &&
+          (message as { subtype?: string }).subtype === 'memory_recall'
+        ) {
+          // v1.1: the SDK surfaced relevant long-term memories into this turn.
+          const recalled = (message as { memories?: unknown[] }).memories;
+          const n = Array.isArray(recalled) ? recalled.length : 0;
+          if (n > 0) console.log(`[cc-channel-octo] recalled ${n} memory item(s)`);
         }
-      } else if (
-        message.type === 'system' &&
-        (message as { subtype?: string }).subtype === 'memory_recall'
-      ) {
-        // v1.1: the SDK surfaced relevant long-term memories into this turn.
-        const recalled = (message as { memories?: unknown[] }).memories;
-        const n = Array.isArray(recalled) ? recalled.length : 0;
-        if (n > 0) console.log(`[cc-channel-octo] recalled ${n} memory item(s)`);
       }
+    } finally {
+      s.close();
     }
-  } finally {
-    stream.close();
+  }
+
+  const emitted = { any: false };
+  try {
+    yield* drainStream(stream, emitted);
+  } catch (err) {
+    // Stale/expired resume (verified by spike: the SDK throws "No conversation
+    // found with session ID: …"). If it failed BEFORE any output and we were
+    // resuming, recover: tell the caller to clear the bad id, then retry once
+    // WITHOUT resume, prepending the caller's fallback history block so the turn
+    // keeps continuity instead of silently losing the conversation.
+    if (opts?.resume && !emitted.any && isResumeError(err)) {
+      console.error(
+        `[cc-channel-octo] resume failed for a stale session id — clearing and retrying fresh: ${String(err)}`,
+      );
+      try {
+        opts.onResumeFailed?.();
+      } catch (cbErr) {
+        console.error(`[cc-channel-octo] onResumeFailed callback threw: ${String(cbErr)}`);
+      }
+      const retryPrompt = (opts.fallbackHistoryBlock ?? '') + userMessage;
+      const retryEmitted = { any: false };
+      yield* drainStream(runStream(undefined, retryPrompt), retryEmitted);
+      return;
+    }
+    throw err;
   }
 }

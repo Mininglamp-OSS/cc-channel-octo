@@ -70,7 +70,7 @@ describe('queryAgent', () => {
     mockQuery.mockReturnValue(stream);
 
     const chunks: string[] = [];
-    for await (const chunk of queryAgent('Hi', '', '', makeConfig())) {
+    for await (const chunk of queryAgent('Hi', makeConfig())) {
       chunks.push(chunk);
     }
     expect(chunks).toEqual(['Hello ', 'world']);
@@ -92,7 +92,7 @@ describe('queryAgent', () => {
     mockQuery.mockReturnValue(stream);
 
     const chunks: string[] = [];
-    for await (const chunk of queryAgent('test', '', '', makeConfig())) {
+    for await (const chunk of queryAgent('test', makeConfig())) {
       chunks.push(chunk);
     }
     expect(chunks).toEqual(['Result here']);
@@ -110,7 +110,7 @@ describe('queryAgent', () => {
     mockQuery.mockReturnValue(stream);
 
     const chunks: string[] = [];
-    for await (const chunk of queryAgent('test', '', '', makeConfig())) {
+    for await (const chunk of queryAgent('test', makeConfig())) {
       chunks.push(chunk);
     }
     expect(chunks).toEqual(['Only this']);
@@ -123,7 +123,7 @@ describe('queryAgent', () => {
     mockQuery.mockReturnValue(stream);
 
     const chunks: string[] = [];
-    for await (const chunk of queryAgent('test', '', '', makeConfig())) {
+    for await (const chunk of queryAgent('test', makeConfig())) {
       chunks.push(chunk);
     }
     expect(chunks).toEqual(['\n[Error: error]']);
@@ -140,7 +140,7 @@ describe('queryAgent', () => {
     mockQuery.mockReturnValue(stream);
 
     const chunks: string[] = [];
-    for await (const chunk of queryAgent('test', '', '', makeConfig())) {
+    for await (const chunk of queryAgent('test', makeConfig())) {
       chunks.push(chunk);
     }
     expect(chunks).toEqual(['done']);
@@ -156,7 +156,7 @@ describe('queryAgent', () => {
 
     const chunks: string[] = [];
     try {
-      for await (const chunk of queryAgent('test', '', '', makeConfig())) {
+      for await (const chunk of queryAgent('test', makeConfig())) {
         chunks.push(chunk);
       }
     } catch {
@@ -183,7 +183,7 @@ describe('queryAgent', () => {
 
     // Consume the generator
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    for await (const _ of queryAgent('hello', '[user]: prev', 'group ctx', config)) { /* drain */ }
+    for await (const _ of queryAgent('hello', config)) { /* drain */ }
 
     expect(mockQuery).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -200,14 +200,16 @@ describe('queryAgent', () => {
       }),
     );
     // systemPrompt is the claude_code preset (required for SDK auto-memory to
-    // activate); our composed text rides in `append`.
+    // activate); our FROZEN composed text rides in `append`.
     const callArgs = mockQuery.mock.calls[0][0];
     const sp = callArgs.options.systemPrompt;
     expect(sp).toMatchObject({ type: 'preset', preset: 'claude_code' });
     expect(sp.append).toContain('untrusted IM users');
     expect(sp.append).toContain('Custom instructions');
-    expect(sp.append).toContain('[Group context]');
-    expect(sp.append).toContain('[Conversation history]');
+    // FROZEN: history (B5) and group context (B4) are NOT in the system prompt —
+    // they ride in the user message / SDK session now.
+    expect(sp.append).not.toContain('\n[Group context]\n');
+    expect(sp.append).not.toContain('\n[Conversation history]\n');
   });
 
   it('throws on invalid permissionMode', async () => {
@@ -217,7 +219,7 @@ describe('queryAgent', () => {
 
     await expect(async () => {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      for await (const _ of queryAgent('test', '', '', config)) { /* drain */ }
+      for await (const _ of queryAgent('test', config)) { /* drain */ }
     }).rejects.toThrow('Invalid permissionMode');
   });
 
@@ -228,7 +230,7 @@ describe('queryAgent', () => {
 
     await expect(async () => {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      for await (const _ of queryAgent('test', '', '', config)) { /* drain */ }
+      for await (const _ of queryAgent('test', config)) { /* drain */ }
     }).rejects.toThrow('Invalid settingSource');
   });
 
@@ -247,7 +249,7 @@ describe('queryAgent', () => {
     mockQuery.mockReturnValue(stream);
 
     const chunks: string[] = [];
-    for await (const chunk of queryAgent('test', '', '', makeConfig())) {
+    for await (const chunk of queryAgent('test', makeConfig())) {
       chunks.push(chunk);
     }
     expect(chunks).toEqual(['actual content']);
@@ -272,7 +274,7 @@ describe('queryAgent', () => {
 
     const tools: string[] = [];
     const chunks: string[] = [];
-    for await (const chunk of queryAgent('test', '', '', makeConfig(), undefined, (t) => tools.push(t))) {
+    for await (const chunk of queryAgent('test', makeConfig(), undefined, (t) => tools.push(t))) {
       chunks.push(chunk);
     }
     expect(tools).toEqual(['Bash', 'Read']);
@@ -286,7 +288,7 @@ describe('queryAgent', () => {
     mockQuery.mockReturnValue(stream);
 
     const tools: string[] = [];
-    for await (const _ of queryAgent('t', '', '', makeConfig(), undefined, (t) => tools.push(t))) {
+    for await (const _ of queryAgent('t', makeConfig(), undefined, (t) => tools.push(t))) {
       void _;
     }
     expect(tools).toEqual(['tool']);
@@ -310,7 +312,7 @@ describe('queryAgent', () => {
     const onToolUse = (): void => {
       throw new Error('callback boom');
     };
-    for await (const chunk of queryAgent('t', '', '', makeConfig(), undefined, onToolUse)) {
+    for await (const chunk of queryAgent('t', makeConfig(), undefined, onToolUse)) {
       chunks.push(chunk);
     }
     expect(chunks).toEqual(['still here']);
@@ -331,7 +333,7 @@ describe('queryAgent', () => {
     mockQuery.mockReturnValue(stream);
 
     const chunks: string[] = [];
-    for await (const chunk of queryAgent('t', '', '', makeConfig())) {
+    for await (const chunk of queryAgent('t', makeConfig())) {
       chunks.push(chunk);
     }
     expect(chunks).toEqual(['ok']);
@@ -343,7 +345,7 @@ describe('queryAgent', () => {
     mockQuery.mockReturnValue(createMockStream([
       { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
     ]));
-    for await (const _ of queryAgent('t', '', '', makeConfig(), undefined, undefined, { resume: 'prior-sid' })) {
+    for await (const _ of queryAgent('t', makeConfig(), undefined, undefined, { resume: 'prior-sid' })) {
       void _;
     }
     const options = mockQuery.mock.calls[0][0].options;
@@ -354,7 +356,7 @@ describe('queryAgent', () => {
     mockQuery.mockReturnValue(createMockStream([
       { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
     ]));
-    for await (const _ of queryAgent('t', '', '', makeConfig())) { void _; }
+    for await (const _ of queryAgent('t', makeConfig())) { void _; }
     expect(mockQuery.mock.calls[0][0].options).not.toHaveProperty('resume');
   });
 
@@ -362,7 +364,7 @@ describe('queryAgent', () => {
     mockQuery.mockReturnValue(createMockStream([
       { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
     ]));
-    for await (const _ of queryAgent('t', '', '', makeConfig(), undefined, undefined, { memoryDir: '/mem/abc' })) {
+    for await (const _ of queryAgent('t', makeConfig(), undefined, undefined, { memoryDir: '/mem/abc' })) {
       void _;
     }
     const options = mockQuery.mock.calls[0][0].options;
@@ -375,7 +377,7 @@ describe('queryAgent', () => {
     mockQuery.mockReturnValue(createMockStream([
       { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
     ]));
-    for await (const _ of queryAgent('t', '', '', makeConfig())) { void _; }
+    for await (const _ of queryAgent('t', makeConfig())) { void _; }
     expect(mockQuery.mock.calls[0][0].options).not.toHaveProperty('settings');
   });
 
@@ -391,7 +393,7 @@ describe('queryAgent', () => {
       globalSkillsDir: '/base/skills',
       sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: ['project'] },
     });
-    for await (const _ of queryAgent('t', '', '', config, { kind: 'dm', sessionKey: 'u1' })) { void _; }
+    for await (const _ of queryAgent('t', config, { kind: 'dm', sessionKey: 'u1' })) { void _; }
     expect(linkSkillsIntoSandbox).toHaveBeenCalledTimes(1);
     const [sandboxDir, sources] = vi.mocked(linkSkillsIntoSandbox).mock.calls[0];
     // sandbox is the resolved per-session cwd under cwdBase
@@ -409,7 +411,7 @@ describe('queryAgent', () => {
       globalSkillsDir: '/base/skills',
       sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: [] },
     });
-    for await (const _ of queryAgent('t', '', '', config, { kind: 'dm', sessionKey: 'u1' })) { void _; }
+    for await (const _ of queryAgent('t', config, { kind: 'dm', sessionKey: 'u1' })) { void _; }
     expect(linkSkillsIntoSandbox).not.toHaveBeenCalled();
   });
 
@@ -421,7 +423,7 @@ describe('queryAgent', () => {
       skillsDir: '/base/default/skills',
       sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: ['project'] },
     });
-    for await (const _ of queryAgent('t', '', '', config)) { void _; }
+    for await (const _ of queryAgent('t', config)) { void _; }
     expect(linkSkillsIntoSandbox).not.toHaveBeenCalled();
   });
 
@@ -433,7 +435,7 @@ describe('queryAgent', () => {
       cwdBase: '/tmp/cwdbase',
       sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: ['project'] },
     });
-    for await (const _ of queryAgent('t', '', '', config, { kind: 'dm', sessionKey: 'u1' })) { void _; }
+    for await (const _ of queryAgent('t', config, { kind: 'dm', sessionKey: 'u1' })) { void _; }
     expect(linkSkillsIntoSandbox).not.toHaveBeenCalled();
   });
 
@@ -442,7 +444,7 @@ describe('queryAgent', () => {
       { type: 'assistant', session_id: 's-1', message: { content: [{ type: 'text', text: 'hi' }] } },
     ]));
     const config = makeConfig({ sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: ['project'] } });
-    for await (const _ of queryAgent('t', '', '', config)) { void _; }
+    for await (const _ of queryAgent('t', config)) { void _; }
     expect(mockQuery.mock.calls[0][0].options.settingSources).toEqual(['project']);
   });
 
@@ -453,7 +455,7 @@ describe('queryAgent', () => {
       { type: 'result', subtype: 'success', session_id: 'sid-xyz' },
     ]));
     const ids: string[] = [];
-    for await (const _ of queryAgent('t', '', '', makeConfig(), undefined, undefined, { onSessionId: (id) => ids.push(id) })) {
+    for await (const _ of queryAgent('t', makeConfig(), undefined, undefined, { onSessionId: (id) => ids.push(id) })) {
       void _;
     }
     expect(ids).toEqual(['sid-xyz']); // reported exactly once
@@ -465,10 +467,83 @@ describe('queryAgent', () => {
     ]));
     const chunks: string[] = [];
     const onSessionId = (): void => { throw new Error('boom'); };
-    for await (const chunk of queryAgent('t', '', '', makeConfig(), undefined, undefined, { onSessionId })) {
+    for await (const chunk of queryAgent('t', makeConfig(), undefined, undefined, { onSessionId })) {
       chunks.push(chunk);
     }
     expect(chunks).toEqual(['still streamed']);
+  });
+
+  // --- stale/expired resume recovery (Phase 5; spike-verified the SDK throws
+  // "No conversation found with session ID: …") ---
+
+  it('recovers from a stale resume: clears the id and retries WITHOUT resume', async () => {
+    // First call (with resume) throws the SDK's stale-session error before any
+    // output; second call (no resume) succeeds.
+    const throwing = createMockStream([]);
+    throwing[Symbol.asyncIterator] = async function* () {
+      throw new Error('No conversation found with session ID: stale-sid');
+    };
+    const ok = createMockStream([
+      { type: 'assistant', session_id: 'fresh-sid', message: { content: [{ type: 'text', text: 'recovered' }] } },
+    ]);
+    mockQuery.mockReturnValueOnce(throwing).mockReturnValueOnce(ok);
+
+    let resumeFailed = false;
+    const ids: string[] = [];
+    const chunks: string[] = [];
+    for await (const chunk of queryAgent('hi', makeConfig(), undefined, undefined, {
+      resume: 'stale-sid',
+      onSessionId: (id) => ids.push(id),
+      onResumeFailed: () => { resumeFailed = true; },
+      fallbackHistoryBlock: '[Prior conversation history]\nold turn\n---\n',
+    })) {
+      chunks.push(chunk);
+    }
+
+    expect(resumeFailed).toBe(true);
+    expect(chunks).toEqual(['recovered']);
+    // The retry was made WITHOUT resume and WITH the fallback history prepended.
+    expect(mockQuery).toHaveBeenCalledTimes(2);
+    expect(mockQuery.mock.calls[0][0].options.resume).toBe('stale-sid');
+    expect(mockQuery.mock.calls[1][0].options).not.toHaveProperty('resume');
+    expect(mockQuery.mock.calls[1][0].prompt).toBe('[Prior conversation history]\nold turn\n---\nhi');
+    // The fresh session id is still captured for next turn.
+    expect(ids).toEqual(['fresh-sid']);
+  });
+
+  it('does NOT recover (rethrows) when the error is unrelated to resume', async () => {
+    const throwing = createMockStream([]);
+    throwing[Symbol.asyncIterator] = async function* () {
+      throw new Error('some other SDK failure');
+    };
+    mockQuery.mockReturnValue(throwing);
+    let resumeFailed = false;
+    await expect(async () => {
+      for await (const _ of queryAgent('hi', makeConfig(), undefined, undefined, {
+        resume: 'sid', onResumeFailed: () => { resumeFailed = true; },
+      })) { void _; }
+    }).rejects.toThrow('some other SDK failure');
+    expect(resumeFailed).toBe(false);
+    expect(mockQuery).toHaveBeenCalledTimes(1); // no retry
+  });
+
+  it('does NOT retry if the stale error arrives AFTER output (no double reply)', async () => {
+    // Emit a chunk, THEN throw a resume-shaped error: recovery must not fire
+    // (we already streamed a partial reply; a retry would duplicate it).
+    const partial = createMockStream([]);
+    partial[Symbol.asyncIterator] = async function* () {
+      yield { type: 'assistant', session_id: 's', message: { content: [{ type: 'text', text: 'partial' }] } };
+      throw new Error('No conversation found with session ID: x');
+    };
+    mockQuery.mockReturnValue(partial);
+    const chunks: string[] = [];
+    await expect(async () => {
+      for await (const chunk of queryAgent('hi', makeConfig(), undefined, undefined, {
+        resume: 'sid', onResumeFailed: () => {},
+      })) { chunks.push(chunk); }
+    }).rejects.toThrow('No conversation found');
+    expect(chunks).toEqual(['partial']);
+    expect(mockQuery).toHaveBeenCalledTimes(1); // no retry after partial output
   });
 });
 
@@ -480,7 +555,7 @@ describe('queryAgent — sdk.env injection (#107)', () => {
       { type: 'assistant', session_id: 's', message: { content: [{ type: 'text', text: 'hi' }] } },
     ]));
     return (async () => {
-      for await (const _ of queryAgent('t', '', '', config)) { void _; }
+      for await (const _ of queryAgent('t', config)) { void _; }
     })();
   }
 
@@ -530,7 +605,7 @@ describe('queryAgent — sdk.skills selection (#110)', () => {
       { type: 'assistant', session_id: 's', message: { content: [{ type: 'text', text: 'hi' }] } },
     ]));
     return (async () => {
-      for await (const _ of queryAgent('t', '', '', config)) { void _; }
+      for await (const _ of queryAgent('t', config)) { void _; }
     })();
   }
 
@@ -572,7 +647,7 @@ describe('queryAgent — mcpServers forwarding (#115)', () => {
       { type: 'assistant', session_id: 's', message: { content: [{ type: 'text', text: 'hi' }] } },
     ]));
     const fakeServer = { type: 'sdk', name: 'cron', instance: {} } as never;
-    for await (const _ of queryAgent('t', '', '', makeConfig(), undefined, undefined, { mcpServers: { cron: fakeServer } })) { void _; }
+    for await (const _ of queryAgent('t', makeConfig(), undefined, undefined, { mcpServers: { cron: fakeServer } })) { void _; }
     const options = mockQuery.mock.calls[0][0].options;
     expect(options.mcpServers).toBeDefined();
     expect(options.mcpServers.cron).toBe(fakeServer);
@@ -582,7 +657,7 @@ describe('queryAgent — mcpServers forwarding (#115)', () => {
     mockQuery.mockReturnValue(createMockStream([
       { type: 'assistant', session_id: 's', message: { content: [{ type: 'text', text: 'hi' }] } },
     ]));
-    for await (const _ of queryAgent('t', '', '', makeConfig())) { void _; }
+    for await (const _ of queryAgent('t', makeConfig())) { void _; }
     expect(mockQuery.mock.calls[0][0].options).not.toHaveProperty('mcpServers');
   });
 });
