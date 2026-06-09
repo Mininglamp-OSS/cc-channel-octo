@@ -175,6 +175,44 @@ export function truncateUtf8ByBytes(input: string, maxBytes: number): {
   };
 }
 
+/**
+ * Assemble a user-role message from injected `context` (first-turn history +
+ * group-context delta, or a stale-resume fallback history block) and the current
+ * message `body`, byte-capped at `maxBytes`.
+ *
+ * The body is the PRIORITY — it is the actual new request and must always reach
+ * the model whole. So we reserve the body's full byte size first, then give the
+ * remaining budget to the context, truncating the context from the FRONT (drop
+ * oldest) — never the end. If the body alone meets/exceeds the budget, context is
+ * dropped entirely and the body is byte-capped as a last resort. This prevents a
+ * large prior-history block from evicting the current message (PR #120 review).
+ */
+export function assembleUserMessage(context: string, body: string, maxBytes: number): string {
+  if (!context) {
+    const { truncated, wasTruncated } = truncateUtf8ByBytes(body, maxBytes);
+    return wasTruncated ? truncated + '\n[… user input truncated to cap]' : body;
+  }
+  const bodyBytes = Buffer.byteLength(body, 'utf-8');
+  if (bodyBytes >= maxBytes) {
+    // Pathological: the body alone fills/overflows the budget. Drop context
+    // entirely and cap the body — the current message still gets through.
+    const { truncated, wasTruncated } = truncateUtf8ByBytes(body, maxBytes);
+    return wasTruncated ? truncated + '\n[… user input truncated to cap]' : body;
+  }
+  const contextBudget = maxBytes - bodyBytes;
+  const ctxBytes = Buffer.byteLength(context, 'utf-8');
+  if (ctxBytes <= contextBudget) {
+    return context + body;
+  }
+  // Truncate context from the FRONT (keep the most-recent tail). Slice the buffer
+  // to the last `contextBudget` bytes; a leading partial UTF-8 sequence decodes to
+  // a replacement char which we strip so we never emit U+FFFD.
+  const ctxBuf = Buffer.from(context, 'utf-8');
+  const tail = ctxBuf.subarray(ctxBuf.length - contextBudget);
+  const decoded = new TextDecoder('utf-8').decode(tail).replace(/^�+/, '');
+  return '[… earlier context truncated]\n' + decoded + body;
+}
+
 /** Exported for tests. */
 export const _internal = {
   MAX_INLINE_WRAP_BYTES,

@@ -120,7 +120,6 @@ configurable.
 | `sdk.maxTurns` | *(SDK default)* | Max agentic turns per query |
 | `sdk.systemPrompt` | *(built-in)* | Custom system prompt (a `<baseDir>/<id>/SOUL.md` overrides this). |
 | `sdk.toolProgress` | `false` | When true, post `🔧 Running <tool>(<params>)…` notices as the agent invokes tools (params truncated; deduped, capped per turn) |
-| `sdk.persistentSession` | `false` | When true, persist agent workspace state across messages via the SDK v2 Session API (resume by stored session id). `/reset` clears it. |
 | `sdk.settingSources` | `['project']` | Filesystem settings sources the SDK loads. Default `['project']` so it discovers skills symlinked into the session sandbox's `.claude/skills/` (see [Agent skills](#agent-skills)). Memory stays isolated regardless (inline auto-memory dir pin). Add `'user'` only to deliberately load the operator's real `~/.claude`. |
 | `groupConfigDir` | *(unset)* | Directory of per-group instruction files (`<groupId>.md`). A match is injected into the system prompt as trusted custom instructions for that group. See [Per-group instructions](#per-group-instructions). |
 | `sdk.anthropicBaseUrl` | *(unset)* | Override the upstream Claude API endpoint. See [Self-hosted gateway](#self-hosted-gateway) below. |
@@ -472,7 +471,7 @@ src/
 - **Per-session workspace isolation** — Each session gets its own SHA-256 hex sandbox under the bot's `workspace/` (`<baseDir>/<botId>/workspace`), partitioned by the same key as conversation history — **per DM peer** and **per group channel** (a whole group shares one sandbox by design). Idle sandboxes (>7d) are auto-cleaned every 6h. Note: it separates sessions from each other but does not confine a session to its directory (absolute-path reads via Bash/Read remain possible) — see the Security Model section.
 - **Groups are a shared workspace** — All members of a group share one history, one sandbox, and one auto-memory store (the session key is the channel id). There is **no member-to-member isolation within a group**; DM sessions remain private per peer.
 - **Auto-memory is not TTL-reclaimed** — Long-term memory lives at `<baseDir>/<botId>/memory` (a sibling of `workspace/`) and is never swept by the cwd janitor, so it persists across `/reset` and grows unbounded on long-lived deploys.
-- **Stateless sessions by default** — Uses the v1 `query()` API; workspace state (open files, command history) does not persist across messages. Enable `sdk.persistentSession` to use the SDK v2 Session API, which resumes the prior agent session each turn so that state carries over.
+- **SDK session owns conversation history** — every turn resumes the stored SDK session (the source of truth for history + workspace state); the system prompt is frozen (no per-turn history/context, so the prompt cache hits). A session's first turn — or a migration from existing SQLite history — injects prior history once into the user message; later turns rely on resume. A stale/expired session id is recovered automatically (cleared + retried with history re-injected). SQLite keeps a durable record for migration/recovery, not live prompt history.
 
 ## Roadmap
 

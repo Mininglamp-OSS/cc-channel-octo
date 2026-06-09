@@ -511,6 +511,30 @@ describe('queryAgent', () => {
     expect(ids).toEqual(['fresh-sid']);
   });
 
+  it('caps the stale-resume retry prompt so a huge fallback history cannot blow the budget (PR #120 review #3)', async () => {
+    const throwing = createMockStream([]);
+    throwing[Symbol.asyncIterator] = async function* () {
+      throw new Error('No conversation found with session ID: stale');
+    };
+    const ok = createMockStream([
+      { type: 'assistant', session_id: 'fresh', message: { content: [{ type: 'text', text: 'ok' }] } },
+    ]);
+    mockQuery.mockReturnValueOnce(throwing).mockReturnValueOnce(ok);
+
+    const hugeFallback = '[Prior conversation history]\n' + 'x'.repeat(300_000) + '\n---\n';
+    for await (const _ of queryAgent('THE REQUEST', makeConfig(), undefined, undefined, {
+      resume: 'stale', onSessionId: () => {}, onResumeFailed: () => {},
+      fallbackHistoryBlock: hugeFallback,
+    })) { void _; }
+
+    const retryPrompt = mockQuery.mock.calls[1][0].prompt as string;
+    // The current request survives WHOLE at the end; the fallback was front-truncated.
+    expect(retryPrompt.endsWith('THE REQUEST')).toBe(true);
+    expect(retryPrompt).toContain('[… earlier context truncated]');
+    // Retry prompt stays within the 96 KB payload budget (+ small marker slack).
+    expect(Buffer.byteLength(retryPrompt, 'utf-8')).toBeLessThanOrEqual(98_304 + 64);
+  });
+
   it('does NOT recover (rethrows) when the error is unrelated to resume', async () => {
     const throwing = createMockStream([]);
     throwing[Symbol.asyncIterator] = async function* () {

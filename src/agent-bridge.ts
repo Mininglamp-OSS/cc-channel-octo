@@ -17,6 +17,10 @@ import type { SessionCtx } from './cwd-resolver.js';
 import { linkSkillsIntoSandbox } from './skill-linker.js';
 import { trustedText, escapeSectionMarkers } from './prompt-safety.js';
 import type { SafeText } from './prompt-safety.js';
+import { assembleUserMessage } from './file-inline-wrap.js';
+
+/** Hard cap on the user-role payload (mirrors index.ts MAX_USER_LLM_BYTES). */
+const MAX_USER_LLM_BYTES = 98_304; // 96 KB
 
 const VALID_PERMISSION_MODES: Set<string> = new Set([
   'default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto',
@@ -379,7 +383,16 @@ export async function* queryAgent(
       } catch (cbErr) {
         console.error(`[cc-channel-octo] onResumeFailed callback threw: ${String(cbErr)}`);
       }
-      const retryPrompt = (opts.fallbackHistoryBlock ?? '') + userMessage;
+      // Re-inject the fallback history as CONTEXT and the original user message as
+      // the BODY to preserve, byte-capped the same way index.ts caps the live
+      // payload — so a large SQLite history can't push the retry over the limit
+      // and trigger a context-size error (PR #120 review). The body (the user's
+      // actual request) always survives; the history is front-truncated if needed.
+      const retryPrompt = assembleUserMessage(
+        opts.fallbackHistoryBlock ?? '',
+        userMessage,
+        MAX_USER_LLM_BYTES,
+      );
       const retryEmitted = { any: false };
       yield* drainStream(runStream(undefined, retryPrompt), retryEmitted);
       return;

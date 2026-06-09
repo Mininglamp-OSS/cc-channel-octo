@@ -654,6 +654,59 @@ describe('E2E smoke tests', () => {
     expect(contextBlock).not.toContain('My question');
   });
 
+  it('first-turn: oversized prior history does NOT evict the current message (PR #120 review #1)', async () => {
+    // Seed a DM session with a HUGE prior history (no SDK session id → first turn
+    // injects it). The injected history block alone exceeds the 96 KB cap; the
+    // current message must still reach queryAgent whole.
+    store.getOrCreate(USER_UID, USER_UID, 1);
+    for (let i = 0; i < 60; i++) {
+      store.appendUser(USER_UID, 'X'.repeat(3000), i * 2 + 1, 'TestUser');
+      store.appendAssistant(USER_UID, 'Y'.repeat(3000), i * 2 + 2, BOT_ID);
+    }
+    let captured = '';
+    (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
+      async function* (u: string, _cfg: unknown, _ctx: unknown, _t: unknown, opts?: { onSessionId?: (id: string) => void }) {
+        captured = u;
+        opts?.onSessionId?.('sdk-session-huge');
+        yield 'ok';
+      },
+    );
+    await simulateMessage(makeDmMsg('THE CURRENT QUESTION'), config, store, router, groupContext, streamRelay);
+    // The current message survived in full, at the end.
+    expect(captured).toContain('THE CURRENT QUESTION');
+    expect(captured.endsWith('THE CURRENT QUESTION')).toBe(true);
+    // The history was front-truncated (marker present), not the body.
+    expect(captured).toContain('[… earlier context truncated]');
+    // Within budget (+ small marker slack).
+    expect(Buffer.byteLength(captured, 'utf-8')).toBeLessThanOrEqual(98_304 + 64);
+  });
+
+  it('two consecutive group mentions: the first handled message is NOT re-injected on the second (PR #120 review #2)', async () => {
+    const CH = 'group-dup-test';
+    const g = (content: string, seq: number) =>
+      makeGroupMsg(content, true, { channel_id: CH, message_seq: seq, from_uid: USER_UID });
+
+    // Both turns establish/resume an SDK session (mockQueryYield reports an id),
+    // so the resumed session already holds the first turn's user message.
+    const captured: string[] = [];
+    (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
+      async function* (u: string, _cfg: unknown, _ctx: unknown, _t: unknown, opts?: { onSessionId?: (id: string) => void }) {
+        captured.push(u);
+        opts?.onSessionId?.('sdk-session-dup');
+        yield 'ok';
+      },
+    );
+
+    await simulateMessage(g('first mentioned question', 1), config, store, router, groupContext, streamRelay);
+    await simulateMessage(g('second mentioned question', 2), config, store, router, groupContext, streamRelay);
+
+    expect(captured).toHaveLength(2);
+    // Turn 2's user message must NOT re-inject the first (already-handled) message
+    // as group context — the resumed SDK session already has it.
+    expect(captured[1]).toContain('second mentioned question');
+    expect(captured[1]).not.toContain('first mentioned question');
+  });
+
   // --- 9. queryAgent error → best-effort error reply ---
 
   it('handles queryAgent error with best-effort error reply', async () => {
