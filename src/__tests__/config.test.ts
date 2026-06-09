@@ -451,6 +451,21 @@ describe('resolveBotConfigs (two-layer)', () => {
     expect(bot.sdk.model).toBe('file-model');
   });
 
+  it('#110: sdk.skills survives the per-bot config.json load path (per-bot selection)', () => {
+    const cfg = loadConfig(writeConfig({
+      apiUrl: 'https://a',
+      bots: [{ id: 'triage' }, { id: 'plain' }],
+    }));
+    // Each bot selects its own skill subset via its per-bot file.
+    writeBotConfig('triage', { botToken: 'bf_1', sdk: { skills: ['octo-messaging', 'github-issue-triage'] } });
+    writeBotConfig('plain', { botToken: 'bf_2', sdk: { skills: 'all' } });
+    const bots = resolveBotConfigs(cfg);
+    const triage = bots.find((b) => b.botId === 'triage')!;
+    const plain = bots.find((b) => b.botId === 'plain')!;
+    expect(triage.sdk.skills).toEqual(['octo-messaging', 'github-issue-triage']);
+    expect(plain.sdk.skills).toBe('all');
+  });
+
   it('inline bots[] fields apply when no per-bot file overrides them', () => {
     const cfg = loadConfig(writeConfig({
       apiUrl: 'https://a',
