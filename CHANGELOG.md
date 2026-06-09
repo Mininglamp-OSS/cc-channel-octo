@@ -34,6 +34,15 @@ While the major version is `0`, minor releases may carry breaking changes.
 
 ### Added
 
+- **`sdk.skills` per-bot skill selection** (#110) — a bot enables a subset of the
+  centrally-maintained skill library via `sdk.skills: string[] | 'all'`
+  (per-bot). Maintain skills once in `~/.cc-channel-octo/skills/`; each bot picks
+  what it uses. Strengthens the multi-bot identity model alongside per-bot
+  `SOUL.md` + `<id>/CLAUDE.md`. `settingSources` stays `['project']` (not
+  `['user']`) to avoid coupling bots to the host's personal `~/.claude`. Note:
+  CLAUDE.md's upward-walk has no project boundary — keep the host `$HOME` (and
+  ancestors) free of `CLAUDE.md`; see README.
+
 - **`sdk.env` config** (#107) — declare extra environment variables, injected
   verbatim into the agent's tool subprocess. Generic (cc doesn't interpret them)
   and per-bot. Primary use: give a multi-bot deploy's shared CLI its identity

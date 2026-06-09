@@ -72,3 +72,10 @@ cwd isolation), media-upload.ts / file-inline-wrap.ts (inbound media), db-adapte
   auto-memory dir is pinned via inline `settings.autoMemoryDirectory`, which the
   SDK ranks above any projectSettings value (verified). Skills are operator-owned
   + trusted; never put secrets in a skill file (their contents reach the model).
+  Per-bot **selection** via `sdk.skills: string[] | 'all'` (config; library
+  maintained once, each bot picks its subset). Per-bot **identity** via
+  `<id>/SOUL.md` + `<id>/CLAUDE.md`. ⚠️ CLAUDE.md upward-walk has NO project
+  boundary (verified: reaches `~/CLAUDE.md` and higher from a sandbox) — keep the
+  deploy `$HOME`/ancestors free of `CLAUDE.md`; `~/.cc-channel-octo/CLAUDE.md` is
+  the all-bots baseline. Do NOT switch `settingSources` to `['user']` (would pull
+  in the host's personal `~/.claude`).

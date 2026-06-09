@@ -521,3 +521,45 @@ describe('queryAgent — sdk.env injection (#107)', () => {
     expect(mockQuery.mock.calls[0][0].options).not.toHaveProperty('env');
   });
 });
+
+describe('queryAgent — sdk.skills selection (#110)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  function drainSkills(config: Config): Promise<void> {
+    mockQuery.mockReturnValue(createMockStream([
+      { type: 'assistant', session_id: 's', message: { content: [{ type: 'text', text: 'hi' }] } },
+    ]));
+    return (async () => {
+      for await (const _ of queryAgent('t', '', '', config)) { void _; }
+    })();
+  }
+
+  it('forwards sdk.skills array to the SDK when set', async () => {
+    const config = makeConfig({
+      sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: ['project'], skills: ['octo-messaging', 'github-issue-triage'] },
+    });
+    await drainSkills(config);
+    expect(mockQuery.mock.calls[0][0].options.skills).toEqual(['octo-messaging', 'github-issue-triage']);
+  });
+
+  it("forwards sdk.skills 'all'", async () => {
+    const config = makeConfig({
+      sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: ['project'], skills: 'all' },
+    });
+    await drainSkills(config);
+    expect(mockQuery.mock.calls[0][0].options.skills).toBe('all');
+  });
+
+  it('omits skills when unset (SDK default)', async () => {
+    await drainSkills(makeConfig());
+    expect(mockQuery.mock.calls[0][0].options).not.toHaveProperty('skills');
+  });
+
+  it('forwards an empty array verbatim (explicit "no skills")', async () => {
+    const config = makeConfig({
+      sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: ['project'], skills: [] },
+    });
+    await drainSkills(config);
+    expect(mockQuery.mock.calls[0][0].options.skills).toEqual([]);
+  });
+});

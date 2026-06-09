@@ -359,6 +359,9 @@ export async function* queryAgent(
       maxTurns: config.sdk.maxTurns,
       model: config.sdk.model,
       settingSources,
+      // #110: per-bot skill selection — enable only the listed skills (or 'all')
+      // from those discovered in the sandbox. Omitted when unset (SDK default).
+      ...(config.sdk.skills !== undefined ? { skills: config.sdk.skills } : {}),
       allowDangerouslySkipPermissions: permissionMode === 'bypassPermissions',
     },
   });
