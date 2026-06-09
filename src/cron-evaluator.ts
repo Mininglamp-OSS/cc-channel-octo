@@ -120,6 +120,39 @@ export function isOneShotSchedule(schedule: string): boolean {
 }
 
 /**
+ * Strictly parse a one-shot ISO-8601 datetime → Unix ms, or null if invalid.
+ *
+ * `new Date()` alone is too lenient (e.g. it rolls "2026-13-13T…" into a real
+ * but wrong instant instead of rejecting it). We additionally require the
+ * canonical shape via regex AND verify the parsed Date round-trips its UTC
+ * fields, so an out-of-range month/day/hour can't sneak through as a silently
+ * shifted time.
+ */
+export function parseOneShot(schedule: string): number | null {
+  const s = schedule.trim();
+  // YYYY-MM-DDThh:mm(:ss(.fff)?)? with optional Z or ±hh:mm offset.
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})?$/.exec(s);
+  if (!m) return null;
+  const t = new Date(s).getTime();
+  if (Number.isNaN(t)) return null;
+  // Reject lenient rollover: re-render the instant and confirm the calendar
+  // fields the user wrote actually match. Compare in UTC when an explicit
+  // Z/offset was given; otherwise the string is local wall-clock, so compare
+  // local fields.
+  const d = new Date(t);
+  const hasZone = m[7] !== undefined;
+  const yr = hasZone ? d.getUTCFullYear() : d.getFullYear();
+  const mo = (hasZone ? d.getUTCMonth() : d.getMonth()) + 1;
+  const day = hasZone ? d.getUTCDate() : d.getDate();
+  // With a numeric offset (not Z) the wall-clock is shifted, so only validate
+  // the calendar for Z / no-zone; an offset is already unambiguous via Date.
+  if (m[7] === undefined || m[7] === 'Z') {
+    if (yr !== Number(m[1]) || mo !== Number(m[2]) || day !== Number(m[3])) return null;
+  }
+  return t;
+}
+
+/**
  * Compute the next fire time (Unix ms) strictly after `fromMs`, or null when
  * there is none (a past/invalid one-shot, or an impossible cron).
  *
@@ -128,8 +161,8 @@ export function isOneShotSchedule(schedule: string): boolean {
  */
 export function computeNextRun(schedule: string, recurring: boolean, fromMs: number): number | null {
   if (isOneShotSchedule(schedule)) {
-    const t = new Date(schedule).getTime();
-    if (Number.isNaN(t)) return null;
+    const t = parseOneShot(schedule);
+    if (t === null) return null;
     return t > fromMs ? t : null;
   }
   const parsed = parseCronExpression(schedule);

@@ -322,18 +322,24 @@ export class SessionRouter {
     // G20 fix: peek all three buckets without consuming; only consume on full
     // pass. On block, attach notified state to the actual blocking bucket so
     // the debounce reply doesn't spam when a different bucket has tokens.
-    const blocker = this.checkAllRateLimits(key, msg.from_uid);
-    if (blocker) {
-      if (!blocker.notified) {
-        blocker.notified = true;
-        await this.replySafe(msg, '请稍后再试');
+    // #115: cron fires skip the rate limit — a scheduler-fired task is an
+    // operator-scheduled action (already bounded by the cron interval), not
+    // user spam. Without this a fire that lands while the owner's bucket is
+    // exhausted would be silently dropped while its nextRun has already advanced.
+    if (!this.isCronFire(msg)) {
+      const blocker = this.checkAllRateLimits(key, msg.from_uid);
+      if (blocker) {
+        if (!blocker.notified) {
+          blocker.notified = true;
+          await this.replySafe(msg, '请稍后再试');
+        }
+        return {
+          sessionKey: key,
+          shouldProcess: false,
+          message: msg,
+          rejectionReason: 'rate_limited',
+        };
       }
-      return {
-        sessionKey: key,
-        shouldProcess: false,
-        message: msg,
-        rejectionReason: 'rate_limited',
-      };
     }
 
     // G1: All payload types are now resolved by inbound.resolveContent in

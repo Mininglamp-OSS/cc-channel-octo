@@ -103,6 +103,14 @@ describe('cron integration (#115)', () => {
     expect(queryAgent).toHaveBeenCalledTimes(1);
   });
 
+  it('a cron fire (message_seq=0) does NOT poison the reply-seq cursor (#3)', async () => {
+    const msg = synthesizeCronMessage(task({ channelId: '', channelType: ChannelType.DM, fromUid: 'peer-9' }));
+    expect(msg.message_seq).toBe(0);
+    await handleMessage(msg, config, store, router, groupContext, streamRelay, BOT_ID, cronStore);
+    // sessionKey for this DM is from_uid; the cursor must stay unset (not 0).
+    expect(store.getLastBotReplySeq('peer-9')).toBeUndefined();
+  });
+
   it('the agent turn is offered the cron MCP tool (mcpServers.cron present)', async () => {
     let captured: Record<string, unknown> | undefined;
     (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(

@@ -24,8 +24,14 @@ export const CRON_TICK_MS = 30_000;
 
 export interface CronSchedulerOptions {
   cronStore: CronStore;
-  /** Invoked with a synthetic BotMessage when a task is due (= onInbound). */
-  onFire: (msg: BotMessage) => void;
+  /**
+   * Invoked with a synthetic BotMessage when a task is due (= onInbound). May
+   * return a promise that resolves when the fired turn finishes; the scheduler
+   * attaches a per-task failure logger to it (attribution) but does NOT await it
+   * — firing stays non-blocking and nextRun advances regardless (a failed fire
+   * is logged, not retried, to avoid an error loop hammering the channel).
+   */
+  onFire: (msg: BotMessage) => void | Promise<void>;
   /** Log prefix, e.g. "[bot-id] " in multi-bot mode. */
   label?: string;
 }
@@ -102,7 +108,19 @@ export class CronScheduler {
             );
           }
           try {
-            this.opts.onFire(synthesizeCronMessage(task));
+            const r = this.opts.onFire(synthesizeCronMessage(task));
+            // Attribute an async delivery failure to THIS task (the pipeline's
+            // own .catch logs it unattributed). Not awaited — fire stays
+            // non-blocking and nextRun advances regardless.
+            if (r && typeof (r as Promise<void>).catch === 'function') {
+              const taskId = task.id;
+              const label = this.opts.label ?? '';
+              (r as Promise<void>).catch((err) => {
+                console.error(
+                  `[cc-channel-octo] ${label}cron: fired task ${taskId} failed during execution: ${String(err)}`,
+                );
+              });
+            }
           } catch (err) {
             console.error(
               `[cc-channel-octo] ${this.opts.label ?? ''}cron: onFire threw for ${task.id}: ${String(err)}`,

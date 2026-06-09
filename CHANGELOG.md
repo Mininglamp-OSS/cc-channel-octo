@@ -15,6 +15,19 @@ While the major version is `0`, minor releases may carry breaking changes.
 
 ### Fixed
 
+- **Cron robustness — review follow-ups** (#115) — four operational-hardening
+  fixes from the xhigh review: (1/5) cron fires now **bypass the rate limit**
+  (like the @mention gate) so an operator-scheduled task isn't silently dropped
+  when the owner's bucket is exhausted, and the scheduler **logs an async fire
+  failure attributed to the specific task** (delivery errors were previously
+  invisible); (2) a **startup warning** when `sdk.cron` is on but the bot has no
+  `owner_uid` (the owner-gate would otherwise reject every `cron_create` with no
+  hint why); (3) a synthetic cron fire's `message_seq=0` **no longer poisons the
+  history-segmentation cursor** (`setLastBotReplySeq` is skipped for non-positive
+  seq); (6) **strict ISO-8601 validation** for one-shot schedules
+  (`parseOneShot`) so a lenient rollover like `2026-13-13T…` is rejected instead
+  of silently firing at a shifted time.
+
 - **Router drops non-conversation channel types** (#68) — found in live
   deployment: on connect the bot received a system message on `channel_type: 8`
   (`systemcmdonline`) and replied to it. `SessionRouter` now allowlists only DM /
