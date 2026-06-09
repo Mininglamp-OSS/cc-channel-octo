@@ -289,8 +289,9 @@ describe('assembleUserMessage (PR #120: current message must always reach the mo
     expect(out.endsWith(body)).toBe(true);
     // Context was front-truncated with a marker.
     expect(out).toContain('[… earlier context truncated]');
-    // Within budget (+ small marker slack).
-    expect(Buffer.byteLength(out, 'utf-8')).toBeLessThanOrEqual(98_304 + 64);
+    // Within budget — the marker bytes are reserved, so the cap holds strictly
+    // (PR #120 review #5: previously overshot by the marker length).
+    expect(Buffer.byteLength(out, 'utf-8')).toBeLessThanOrEqual(98_304);
   });
 
   it('drops context entirely when the body alone meets/exceeds the budget', () => {

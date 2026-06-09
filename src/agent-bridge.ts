@@ -303,10 +303,11 @@ export async function* queryAgent(
 
   const stream = runStream(opts?.resume, userMessage);
 
-  // Drain one SDK stream, yielding assistant text. `suppressSessionId` skips the
-  // onSessionId report (used on the FIRST attempt only matters; on a recovery
-  // retry we DO want to capture+persist the fresh id). Tracks whether any text
-  // was emitted so the caller can decide if a mid-stream failure is recoverable.
+  // Drain one SDK stream, yielding assistant text. Reports the SDK session id once
+  // (the first message that carries one) via opts.onSessionId — on a recovery retry
+  // this captures+persists the fresh id. Sets `emitted.any` true once ANY assistant
+  // content block (text OR tool_use) is seen, so the caller can tell whether a
+  // mid-stream failure is still recoverable (recovery is only safe before output).
   async function* drainStream(
     s: ReturnType<typeof runStream>,
     emitted: { any: boolean },
@@ -401,6 +402,18 @@ export async function* queryAgent(
       const retryEmitted = { any: false };
       yield* drainStream(runStream(undefined, retryPrompt), retryEmitted);
       return;
+    }
+    // Resume error that surfaced AFTER output (emitted.any) — we must NOT retry
+    // (a tool_use side effect may already have run; a retry could duplicate it).
+    // But the stored id is still stale, so clear it here too: otherwise the next
+    // turn would resume the same dead id and fail again. Clearing lets the next
+    // turn start fresh and recover via fallbackHistoryBlock (PR #120 review #4).
+    if (opts?.resume && isResumeError(err)) {
+      try {
+        opts.onResumeFailed?.();
+      } catch (cbErr) {
+        console.error(`[cc-channel-octo] onResumeFailed callback threw: ${String(cbErr)}`);
+      }
     }
     throw err;
   }

@@ -640,9 +640,18 @@ export async function handleMessage(
       // string from the end (as a naive single cap would) could drop the new
       // request entirely when prior history is large (review #120: oversized
       // firstTurnHistory). assembleUserMessage budgets context, preserving body.
+      //
+      // On the FIRST turn the injected history already covers recent group chatter
+      // (for a cold-start group, G4 backfill seeds the same messages the delta
+      // reads from group_messages), so adding the delta too would duplicate it
+      // (review #120). Prefer history on the first turn; fall back to the delta
+      // only when there is no history. Later turns carry only the delta. The
+      // cursor was already advanced above, so dropping the delta here does not
+      // strand messages — history covers them and they must not be re-shown.
+      const injectedContext = firstTurnHistory ? firstTurnHistory : groupContextBlock;
       const MAX_USER_LLM_BYTES = 98_304; // 96 KB
       const userContentForLLM = assembleUserMessage(
-        firstTurnHistory + groupContextBlock,
+        injectedContext,
         userBody,
         MAX_USER_LLM_BYTES,
       );

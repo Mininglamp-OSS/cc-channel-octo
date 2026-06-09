@@ -531,8 +531,8 @@ describe('queryAgent', () => {
     // The current request survives WHOLE at the end; the fallback was front-truncated.
     expect(retryPrompt.endsWith('THE REQUEST')).toBe(true);
     expect(retryPrompt).toContain('[… earlier context truncated]');
-    // Retry prompt stays within the 96 KB payload budget (+ small marker slack).
-    expect(Buffer.byteLength(retryPrompt, 'utf-8')).toBeLessThanOrEqual(98_304 + 64);
+    // Retry prompt stays within the 96 KB payload budget (marker bytes reserved).
+    expect(Buffer.byteLength(retryPrompt, 'utf-8')).toBeLessThanOrEqual(98_304);
   });
 
   it('does NOT recover (rethrows) when the error is unrelated to resume', async () => {
@@ -551,9 +551,10 @@ describe('queryAgent', () => {
     expect(mockQuery).toHaveBeenCalledTimes(1); // no retry
   });
 
-  it('does NOT retry if the stale error arrives AFTER output (no double reply)', async () => {
+  it('does NOT retry if the stale error arrives AFTER output (no double reply) but DOES clear the stale id', async () => {
     // Emit a chunk, THEN throw a resume-shaped error: recovery must not fire
-    // (we already streamed a partial reply; a retry would duplicate it).
+    // (we already streamed a partial reply; a retry would duplicate it). But the
+    // stale id is still cleared so the NEXT turn can recover (PR #120 review #4).
     const partial = createMockStream([]);
     partial[Symbol.asyncIterator] = async function* () {
       yield { type: 'assistant', session_id: 's', message: { content: [{ type: 'text', text: 'partial' }] } };
@@ -561,31 +562,36 @@ describe('queryAgent', () => {
     };
     mockQuery.mockReturnValue(partial);
     const chunks: string[] = [];
+    let resumeFailed = false;
     await expect(async () => {
       for await (const chunk of queryAgent('hi', makeConfig(), undefined, undefined, {
-        resume: 'sid', onResumeFailed: () => {},
+        resume: 'sid', onResumeFailed: () => { resumeFailed = true; },
       })) { chunks.push(chunk); }
     }).rejects.toThrow('No conversation found');
     expect(chunks).toEqual(['partial']);
     expect(mockQuery).toHaveBeenCalledTimes(1); // no retry after partial output
+    expect(resumeFailed).toBe(true); // but the stale id was cleared
   });
 
-  it('does NOT retry after a tool_use block then a resume error (no duplicated side effect)', async () => {
+  it('does NOT retry after a tool_use block then a resume error (no duplicated side effect) but DOES clear the stale id', async () => {
     // A tool_use is a side effect — if the stream throws a resume-shaped error
     // after it, retrying from scratch would re-run the tool. emitted.any must be
     // set on ANY assistant content, not just text (PR #120 review, non-blocking).
+    // The stale id is still cleared so the next turn recovers (PR #120 review #4).
     const partial = createMockStream([]);
     partial[Symbol.asyncIterator] = async function* () {
       yield { type: 'assistant', session_id: 's', message: { content: [{ type: 'tool_use', name: 'Bash', input: {} }] } };
       throw new Error('No conversation found with session ID: x');
     };
     mockQuery.mockReturnValue(partial);
+    let resumeFailed = false;
     await expect(async () => {
       for await (const _ of queryAgent('hi', makeConfig(), undefined, undefined, {
-        resume: 'sid', onResumeFailed: () => {},
+        resume: 'sid', onResumeFailed: () => { resumeFailed = true; },
       })) { void _; }
     }).rejects.toThrow('No conversation found');
     expect(mockQuery).toHaveBeenCalledTimes(1); // no retry after a tool_use side effect
+    expect(resumeFailed).toBe(true); // but the stale id was cleared
   });
 });
 
