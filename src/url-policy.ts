@@ -274,3 +274,33 @@ export function isAllowedApiUrl(url: string): boolean {
     return false;
   }
 }
+
+/**
+ * Boot-time WebSocket URL validation — the transport-integrity counterpart to
+ * isAllowedApiUrl.
+ *
+ * The WuKongIM payload layer is AES-CBC WITHOUT an authentication tag, so message
+ * integrity rests entirely on the transport. An unencrypted `ws://` link lets a
+ * network attacker bit-flip ciphertext undetected (silent corruption / DoS).
+ * Require `wss://` for any non-loopback host; permit plaintext `ws://` only to an
+ * explicit localhost form (local dev / a co-located reverse proxy that terminates
+ * TLS). Mirrors the http→localhost-only carve-out in isAllowedApiUrl.
+ */
+export function isAllowedWsUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    const bareHost = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+
+    if (parsed.protocol === "wss:") {
+      if (isIP(bareHost) && isPrivateOrLocalAddress(bareHost)) return false;
+      return true;
+    }
+    if (parsed.protocol === "ws:") {
+      return host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}

@@ -178,20 +178,30 @@ export class StreamRelay {
       // Accumulate all chunks, with truncation guard (Q32).
       let accumulated = "";
       let truncated = false;
-      for await (const chunk of chunks) {
-        accumulated += chunk;
-        // Q32: Stop accumulating once limit is reached to prevent unbounded memory.
-        if (accumulated.length > maxResponseChars) {
-          // P1-6: cut at code-unit boundary, but back off if it lands inside
-          // a surrogate pair (would produce an orphan high surrogate = invalid
-          // Unicode). Mirrors splitMessage's hard-cut surrogate guard.
-          let cutAt = maxResponseChars;
-          const code = accumulated.charCodeAt(cutAt - 1);
-          if (code >= 0xD800 && code <= 0xDBFF) cutAt--;
-          accumulated = accumulated.slice(0, cutAt) + TRUNCATION_SUFFIX;
-          truncated = true;
-          break;
+      // If the agent stream throws mid-way (network blip, non-recoverable SDK
+      // error after partial output), we still want to deliver what we have
+      // instead of dropping a real partial reply on the floor — then re-throw so
+      // the caller's error path still runs. Capture the error and flush below.
+      let streamError: unknown;
+      try {
+        for await (const chunk of chunks) {
+          accumulated += chunk;
+          // Q32: Stop accumulating once limit is reached to prevent unbounded memory.
+          if (accumulated.length > maxResponseChars) {
+            // P1-6: cut at code-unit boundary, but back off if it lands inside
+            // a surrogate pair (would produce an orphan high surrogate = invalid
+            // Unicode). Mirrors splitMessage's hard-cut surrogate guard.
+            let cutAt = maxResponseChars;
+            const code = accumulated.charCodeAt(cutAt - 1);
+            if (code >= 0xD800 && code <= 0xDBFF) cutAt--;
+            accumulated = accumulated.slice(0, cutAt) + TRUNCATION_SUFFIX;
+            truncated = true;
+            break;
+          }
         }
+      } catch (err) {
+        streamError = err;
+        console.error(`[stream-relay] agent stream threw after ${accumulated.length} char(s); flushing partial output: ${String(err)}`);
       }
       if (truncated) {
         console.warn(`[stream-relay] Response truncated at ${maxResponseChars} chars`);
@@ -265,6 +275,11 @@ export class StreamRelay {
         }
       }
       // If accumulated is empty, the agent produced no output — nothing to send.
+      // If the stream threw mid-way, we've now flushed whatever partial text was
+      // accumulated; re-throw so the caller's error handling still runs (it will
+      // not double-send — the partial was delivered here, the caller only logs /
+      // surfaces the failure).
+      if (streamError !== undefined) throw streamError;
     } finally {
       clearInterval(typingTimer);
     }

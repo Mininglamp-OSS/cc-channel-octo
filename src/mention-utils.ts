@@ -238,8 +238,17 @@ export function resolveMentions(
   entities.sort((a, b) => a.offset - b.offset);
   const mentionUids = entities.map(e => e.uid);
 
-  // @all / @所有人 detection.
-  const mentionAll = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i.test(finalContent);
+  // @all / @所有人 detection. The trailing boundary must be a NON-name char (or
+  // end-of-string), NOT a generic `[^\w]`. The old `[^\w]` treated `@all-members`
+  // / `@allen`… wait, `@allen` was already blocked by `[^\w]` (e is `\w`); the
+  // real false positive was `@all-foo` / `@all.x` (hyphen/dot are `[^\w]`),
+  // wrongly broadcasting to everyone in a large group. Excluding the name-char
+  // class (which includes `-` and `.`) fixes that while still matching a real
+  // standalone token followed by space, CJK punctuation (`@所有人，`), `!`, or EOS.
+  const mentionAll = new RegExp(
+    `(?:^|(?<=\\s))@(?:all|所有人)(?!${NAME_CHAR_RE.source})`,
+    'i',
+  ).test(finalContent);
 
   return { finalContent, mentionUids, mentionEntities: entities, mentionAll };
 }
