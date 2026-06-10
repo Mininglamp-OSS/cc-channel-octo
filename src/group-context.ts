@@ -392,24 +392,6 @@ export class GroupContext {
     return this.robotFlags.get(channelId)?.get(uid);
   }
 
-  /**
-   * A8 (#143): true iff `uid` is a current member of `channelId` per the live
-   * member list (refreshed on every inbound group message). Used by the outbound
-   * mention sanitizer to drop hallucinated @uids that aren't real members.
-   */
-  isMember(channelId: string, uid: string): boolean {
-    return this.memberMapByChannel.get(channelId)?.has(uid) ?? false;
-  }
-
-  /**
-   * A8 (#143): the channel's displayName→uid map, for v1 `@name` outbound
-   * resolution in StreamRelay.deliver. Returns the live map (empty if the
-   * channel has no cached members yet). Read-only use by callers.
-   */
-  getNameToUidMap(channelId: string): Map<string, string> {
-    return this.getNameToUid(channelId);
-  }
-
   loadMembersFromDb(channelId: string): void {
     try {
       const rows = this.selectMembers.all(channelId) as MemberRow[];

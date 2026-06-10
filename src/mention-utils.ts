@@ -203,20 +203,11 @@ export function buildEntitiesFromFallback(
  *
  * @param content Raw text possibly containing @[uid:name] and/or @name
  * @param memberMap Optional displayName→uid map for @name resolution
- * @param isValidUid Optional A8 (#143) membership predicate. When provided, a
- *   structured `@[uid:name]` whose uid fails the predicate (e.g. a hallucinated
- *   uid not in the group's live member list) is DOWNGRADED to plain text: the
- *   human-readable `@name` stays in the body (convertStructuredMentions already
- *   replaced `@[uid:name]` with `@name`), but no entity/uid is emitted, so no
- *   bogus notification is sent. Omit it (DMs, or to preserve legacy behavior) to
- *   trust every structured uid. v1 `@name` entities are inherently members (they
- *   come from memberMap) so they are not re-checked.
  * @returns finalContent (with @[uid:name] replaced by @name) + entities + uids + mentionAll
  */
 export function resolveMentions(
   content: string,
   memberMap?: Map<string, string>,
-  isValidUid?: (uid: string) => boolean,
 ): {
   finalContent: string;
   mentionUids: string[];
@@ -231,12 +222,7 @@ export function resolveMentions(
   if (structured.length > 0) {
     const converted = convertStructuredMentions(finalContent, structured);
     finalContent = converted.content;
-    // A8 (#143): drop entities for uids that aren't real members — the `@name`
-    // text is already in finalContent, so dropping the entity downgrades a
-    // hallucinated mention to harmless plain text instead of a bogus @ notify.
-    entities = isValidUid
-      ? converted.entities.filter((e) => isValidUid(e.uid))
-      : [...converted.entities];
+    entities = [...converted.entities];
   }
 
   // v1: @name fallback via memberMap (skip offsets already covered by v2)

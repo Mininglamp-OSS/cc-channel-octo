@@ -236,40 +236,6 @@ describe('resolveMentions', () => {
     expect(result.mentionEntities[1].uid).toBe('u1');
     expect(result.mentionUids).toEqual(['u2', 'u1']);
   });
-
-  // A8 (#143): membership validation of outbound structured @[uid:name]
-  describe('isValidUid membership guard', () => {
-    it('keeps a structured mention whose uid passes the predicate', () => {
-      const members = new Set(['u1']);
-      const result = resolveMentions('@[u1:Alice] hi', undefined, (uid) => members.has(uid));
-      expect(result.finalContent).toBe('@Alice hi');
-      expect(result.mentionUids).toEqual(['u1']);
-      expect(result.mentionEntities).toHaveLength(1);
-    });
-
-    it('downgrades a hallucinated uid to plain text (drops entity, keeps @name)', () => {
-      const members = new Set(['u1']);
-      const result = resolveMentions('@[deadbeef:Ghost] hi', undefined, (uid) => members.has(uid));
-      // @name text survives, but no entity/uid is emitted → no bogus notify.
-      expect(result.finalContent).toBe('@Ghost hi');
-      expect(result.mentionUids).toEqual([]);
-      expect(result.mentionEntities).toEqual([]);
-    });
-
-    it('keeps real members and drops hallucinated ones in the same message', () => {
-      const members = new Set(['u1']);
-      const result = resolveMentions('@[u1:Alice] and @[fake:Bob]', undefined, (uid) => members.has(uid));
-      expect(result.finalContent).toBe('@Alice and @Bob');
-      expect(result.mentionUids).toEqual(['u1']);
-      expect(result.mentionEntities).toHaveLength(1);
-      expect(result.mentionEntities[0].uid).toBe('u1');
-    });
-
-    it('without a predicate, trusts every structured uid (legacy behavior)', () => {
-      const result = resolveMentions('@[whatever:Ghost] hi');
-      expect(result.mentionUids).toEqual(['whatever']);
-    });
-  });
 });
 
 describe('patterns', () => {
