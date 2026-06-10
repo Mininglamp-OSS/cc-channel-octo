@@ -2,21 +2,28 @@ name: npm Publish
 
 # Publishes the package to the public npm registry.
 #
-# Trigger: when a GitHub Release is published (the release-publish workflow flips
-# the draft to published, which fires `release: published`), or manually via
-# workflow_dispatch with an explicit tag.
+# Trigger: on a pushed stable version tag `vX.Y.Z` (NOT pre-releases like
+# `vX.Y.Z-rc.1`), or manually via workflow_dispatch with an explicit tag.
+#
+# Why tag-push instead of `release: published`: the release-publish workflow
+# creates the GitHub Release with the built-in GITHUB_TOKEN, and GitHub does not
+# cascade workflow triggers from GITHUB_TOKEN-produced events (anti-recursion),
+# so a `release: published` trigger never fires automatically. A tag push is not
+# subject to that block.
 #
 # Auth: uses the NPM_TOKEN repository secret (an npm automation/granular token
 # with publish rights on the @mininglamp-oss scope). Provenance is attached via
 # OIDC (`id-token: write` + publishConfig.provenance:true in package.json), so
 # the published version carries a verifiable build-origin attestation.
 #
-# Safety: the job refuses to publish unless the tag's `vX.Y.Z` matches the
-# version in package.json, so a mismatched tag can never push a wrong version.
+# Safety: the job refuses to publish unless (a) the tag is strict semver, (b) the
+# tagged commit is an ancestor of origin/main (no publishing off-branch code),
+# and (c) the tag's `vX.Y.Z` matches the version in package.json.
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*.*.*'
   workflow_dispatch:
     inputs:
       tag:
@@ -38,13 +45,13 @@ jobs:
       - name: Resolve tag
         id: tag
         env:
-          EVENT_TAG: ${{ github.event.release.tag_name }}
+          REF_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          TAG="${EVENT_TAG:-$INPUT_TAG}"
+          TAG="${REF_TAG:-$INPUT_TAG}"
           if [ -z "$TAG" ]; then
-            echo "::error::No tag resolved from release event or dispatch input."
+            echo "::error::No tag resolved from tag push or dispatch input."
             exit 1
           fi
           # Strict semver tag (mirrors the org release-publish regex).
@@ -53,20 +60,46 @@ jobs:
             echo "::error::Tag '$TAG' is not strict semver (vMAJOR.MINOR.PATCH[-prerelease])"
             exit 1
           fi
+          # Skip pre-release tags on automatic (tag-push) runs so they never land
+          # on npm 'latest'. A maintainer can still force one via workflow_dispatch.
+          if printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-'; then
+            if [ "${{ github.event_name }}" = "push" ]; then
+              echo "::notice::Tag '$TAG' is a pre-release; skipping automatic npm publish. Use workflow_dispatch to publish a pre-release deliberately."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            fi
+          fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Resolved tag: $TAG"
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        if: steps.tag.outputs.skip != 'true'
         with:
           ref: ${{ steps.tag.outputs.tag }}
+          fetch-depth: 0 # need history for the ancestor check
+
+      - name: Verify tagged commit is on main
+        if: steps.tag.outputs.skip != 'true'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          TAG_SHA=$(git rev-list -n 1 "$TAG")
+          if ! git merge-base --is-ancestor "$TAG_SHA" origin/main; then
+            echo "::error::Tag '$TAG' ($TAG_SHA) is not an ancestor of origin/main. Refusing to publish off-branch code."
+            exit 1
+          fi
+          echo "Tag commit $TAG_SHA is reachable from origin/main ✓"
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: steps.tag.outputs.skip != 'true'
         with:
           node-version: '22'
           cache: 'npm'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Verify tag matches package.json version
+        if: steps.tag.outputs.skip != 'true'
         env:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
@@ -80,15 +113,19 @@ jobs:
           echo "Tag matches package.json: $EXPECTED"
 
       - name: Install dependencies
+        if: steps.tag.outputs.skip != 'true'
         run: npm ci
 
       - name: Build
+        if: steps.tag.outputs.skip != 'true'
         run: npm run build
 
       - name: Test
+        if: steps.tag.outputs.skip != 'true'
         run: npm test
 
       - name: Publish
+        if: steps.tag.outputs.skip != 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish
