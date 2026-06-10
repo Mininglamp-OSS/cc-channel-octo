@@ -36,9 +36,19 @@ export const MAX_DISPLAY_NAME_LEN = 128;
  * context header (`[Recent group messages]`), the trusted-instructions header
  * (`[Group instructions]`), and the truncation notices \u2014 so user content cannot
  * forge a boundary the model treats as real structure.
+ *
+ * `Current message[^\]]*` (not the bare `Current message`) matches the FULL
+ * anchor `[Current message \u2014 respond to this ONLY]` that assembleUserMessage
+ * (#132) prepends to the real request, the same way `Quoted message from [^\]]*`
+ * covers its variable suffix. The anchor is a PRIVILEGED marker \u2014 the system
+ * prompt tells the model to "respond ONLY to the text after it" \u2014 so a group
+ * member who typed it verbatim into a non-@ message (which lands in the
+ * [Recent group messages] read-only background) could otherwise forge a second
+ * "current message" and have their injected text treated as the request. The
+ * bare-`]` form alone left that gap open (#132 review).
  */
 const SECTION_MARKER_RE =
-  /^\[(Group context|Conversation history|Current message|Quoted message from [^\]]*|answered history|new messages|Recent group messages|Group instructions|older messages dropped|older turns dropped)\]/gim;
+  /^\[(Group context|Conversation history|Current message[^\]]*|Quoted message from [^\]]*|answered history|new messages|Recent group messages|Group instructions|older messages dropped|older turns dropped)\]/gim;
 
 /**
  * Line-leading turn label (`[user ...]:` / `[assistant ...]:`),
