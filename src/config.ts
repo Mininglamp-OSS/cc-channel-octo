@@ -174,6 +174,15 @@ export interface Config {
   };
   /** Maximum response length in chars before truncation (Q32). */
   maxResponseChars: number;
+  /**
+   * Per-message dispatch timeout in ms (#141). Bounds the full handler
+   * pipeline (agent query + stream) under the per-session lock. If a turn
+   * hangs past this, the session lock is released (a hung turn would otherwise
+   * block every subsequent message on that session forever) and the user gets
+   * a one-shot apology. Does NOT cancel the in-flight turn — only unblocks the
+   * queue. Default 5 minutes.
+   */
+  dispatchTimeoutMs: number;
   botBlocklist?: string[];
   /**
    * G14: Bots in this list are allowed to DM the bot even if their uid matches
@@ -247,6 +256,7 @@ type PartialConfig = {
   rateLimit?: Partial<Config['rateLimit']>;
   context?: Partial<Config['context']>;
   maxResponseChars?: number;
+  dispatchTimeoutMs?: number;
   botBlocklist?: string[];
   allowedBotUids?: string[];
   mentionFreeGroups?: string[];
@@ -282,6 +292,7 @@ function defaults(): Config {
       historyLimit: 40,
     },
     maxResponseChars: 524_288, // 512 KB (Q32)
+    dispatchTimeoutMs: 300_000, // 5 min (#141)
   };
 }
 
@@ -345,6 +356,7 @@ function mergeConfig(base: Config, override: PartialConfig): Config {
       ...(override.context ?? {}),
     },
     maxResponseChars: override.maxResponseChars ?? base.maxResponseChars,
+    dispatchTimeoutMs: override.dispatchTimeoutMs ?? base.dispatchTimeoutMs,
     botBlocklist: override.botBlocklist ?? base.botBlocklist,
     allowedBotUids: override.allowedBotUids ?? base.allowedBotUids,
     mentionFreeGroups: override.mentionFreeGroups ?? base.mentionFreeGroups,
