@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * cc-channel-octo — Entry point.
  * Bridge Claude Code (via Claude Agent SDK) to Octo IM.
@@ -30,8 +31,8 @@ import { CronScheduler } from './cron-scheduler.js';
 import { createCronToolServer, CRON_TOOL_SERVER_NAME, type CronSessionCoords } from './cron-tool.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes, assembleUserMessage, MAX_USER_LLM_BYTES } from './file-inline-wrap.js';
 import { join } from 'node:path';
-import { mkdirSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { mkdirSync, realpathSync } from 'node:fs';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 
 async function main(): Promise<void> {
   // --- Q8: Global unhandled rejection handler ---
@@ -982,12 +983,28 @@ function seedHistoryFromApi(
 }
 
 // Only auto-start the gateway when this module is run directly (production
-// entrypoint), NOT when it is imported (e.g. tests importing handleMessage).
+// entrypoint or the installed `cc-channel-octo` bin), NOT when it is imported
+// (e.g. tests importing handleMessage).
 // `process.argv[1]` is undefined under `node -e`/`--input-type`, so guard it.
+// When invoked via the bin, `process.argv[1]` is a symlink under
+// `node_modules/.bin/` whose href would NOT equal the resolved module url —
+// so canonicalize both sides with realpath before comparing.
 const entrypoint = process.argv[1];
-if (entrypoint && import.meta.url === pathToFileURL(entrypoint).href) {
+if (entrypoint && isMainModule(entrypoint)) {
   main().catch((err) => {
     console.error('[cc-channel-octo] Fatal error:', String(err));
     process.exit(1);
   });
+}
+
+function isMainModule(argvPath: string): boolean {
+  try {
+    const resolvedArgv = pathToFileURL(realpathSync(argvPath)).href;
+    const resolvedSelf = pathToFileURL(realpathSync(fileURLToPath(import.meta.url))).href;
+    return resolvedArgv === resolvedSelf;
+  } catch {
+    // Fall back to a direct href comparison if realpath fails (e.g. the file
+    // was unlinked after launch). Better to under-trigger than to crash.
+    return import.meta.url === pathToFileURL(argvPath).href;
+  }
 }
