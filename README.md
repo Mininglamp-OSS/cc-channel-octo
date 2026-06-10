@@ -38,6 +38,23 @@ Users talk to a bot in Octo (DM or group @mention). The bot sends messages to Cl
 
 ### Install & Run
 
+**Option A — install from npm (recommended):**
+
+```bash
+npm install -g @mininglamp-oss/cc-channel-octo
+# or run without installing:
+npx @mininglamp-oss/cc-channel-octo
+```
+
+This installs the `cc-channel-octo` command (prebuilt — no compile step). Skip
+straight to creating the config files below, then run `cc-channel-octo`.
+
+To use it as a library instead, `npm install @mininglamp-oss/cc-channel-octo`
+and import from it; the Claude Agent SDK is a peer dependency, so install
+`@anthropic-ai/claude-agent-sdk` alongside it.
+
+**Option B — build from source:**
+
 ```bash
 git clone https://github.com/Mininglamp-OSS/cc-channel-octo.git
 cd cc-channel-octo
@@ -94,7 +111,9 @@ Per-bot `~/.cc-channel-octo/default/config.json`:
 Start the gateway:
 
 ```bash
-npm start
+npm start                      # from source (Option B)
+# or, if installed from npm (Option A):
+cc-channel-octo
 ```
 
 The bot is now online. Send it a DM or @mention it in a group.

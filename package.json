@@ -1,11 +1,34 @@
 {
-  "name": "cc-channel-octo",
+  "name": "@mininglamp-oss/cc-channel-octo",
   "version": "1.0.0",
   "description": "Bridge Claude Code (via Claude Agent SDK) to Octo IM — independent Node.js gateway",
   "license": "Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "cc-channel-octo": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "config.example.json",
+    "config.bot.example.json"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mininglamp-OSS/cc-channel-octo.git"
+  },
+  "homepage": "https://github.com/Mininglamp-OSS/cc-channel-octo#readme",
+  "bugs": {
+    "url": "https://github.com/Mininglamp-OSS/cc-channel-octo/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
@@ -15,6 +38,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "prepublishOnly": "npm run build",
     "prepare": "husky || true"
   },
   "dependencies": {
