@@ -250,7 +250,6 @@ describe('resolveMentions', () => {
     it('downgrades a hallucinated uid to plain text (drops entity, keeps @name)', () => {
       const members = new Set(['u1']);
       const result = resolveMentions('@[deadbeef:Ghost] hi', undefined, (uid) => members.has(uid));
-      // @name text survives, but no entity/uid is emitted → no bogus notify.
       expect(result.finalContent).toBe('@Ghost hi');
       expect(result.mentionUids).toEqual([]);
       expect(result.mentionEntities).toEqual([]);

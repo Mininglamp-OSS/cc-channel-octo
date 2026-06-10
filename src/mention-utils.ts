@@ -205,12 +205,13 @@ export function buildEntitiesFromFallback(
  * @param memberMap Optional displayName→uid map for @name resolution
  * @param isValidUid Optional A8 (#143) membership predicate. When provided, a
  *   structured `@[uid:name]` whose uid fails the predicate (e.g. a hallucinated
- *   uid not in the group's live member list) is DOWNGRADED to plain text: the
+ *   uid not in the group's member list) is DOWNGRADED to plain text: the
  *   human-readable `@name` stays in the body (convertStructuredMentions already
  *   replaced `@[uid:name]` with `@name`), but no entity/uid is emitted, so no
  *   bogus notification is sent. Omit it (DMs, or to preserve legacy behavior) to
  *   trust every structured uid. v1 `@name` entities are inherently members (they
- *   come from memberMap) so they are not re-checked.
+ *   come from memberMap) so they are not re-checked. Best-effort: only as fresh
+ *   as the caller's member snapshot (see GroupContext.isMember).
  * @returns finalContent (with @[uid:name] replaced by @name) + entities + uids + mentionAll
  */
 export function resolveMentions(

@@ -36,6 +36,7 @@ export class GroupContext {
   private readonly maxWindowSize: number;
 
   private upsertMember!: PreparedStatement;
+  private deleteMember!: PreparedStatement;
   private selectMembers!: PreparedStatement;
   private insertMessage!: PreparedStatement;
   private selectRecentMessages!: PreparedStatement;
@@ -83,6 +84,9 @@ export class GroupContext {
 
     this.upsertMember = this.adapter.prepare(
       'INSERT INTO group_members (group_id, uid, name, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(group_id, uid) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at',
+    );
+    this.deleteMember = this.adapter.prepare(
+      'DELETE FROM group_members WHERE group_id = ? AND uid = ?',
     );
     this.selectMembers = this.adapter.prepare(
       'SELECT uid, name FROM group_members WHERE group_id = ?',
@@ -202,8 +206,23 @@ export class GroupContext {
       this.lastRefresh.set(channelId, now); // Record only on success
       const memberMap = this.getMemberMap(channelId);
       const nameMap = this.getNameToUid(channelId);
+
+      // A8 (#143, take 2): the server response is AUTHORITATIVE — it is the full
+      // current roster, not a delta. Upserting returned members WITHOUT pruning
+      // departed ones (the original #144 bug, Jerry-Xin's 🔴) left a user who
+      // left the group cached forever, so isMember() kept accepting them and the
+      // outbound mention guard let a stale @uid through. Track who the server
+      // returned, then drop anyone cached/persisted who is no longer present.
+      //
+      // Best-effort caveat: this is only as fresh as the last successful refresh,
+      // which is throttled to REFRESH_INTERVAL_MS (1h) and seeded from DB on
+      // restart. A membership change inside that window is not reflected until
+      // the next refresh — the outbound guard is defense-in-depth, not a
+      // real-time authority. The server still enforces real permissions.
+      const present = new Set<string>();
       for (const m of members) {
         if (!m.uid || !m.name) continue;
+        present.add(m.uid);
         const oldName = memberMap.get(m.uid);
         if (oldName && oldName !== m.name && nameMap.get(oldName) === m.uid) {
           nameMap.delete(oldName);
@@ -223,6 +242,39 @@ export class GroupContext {
           this.upsertMember.run(channelId, m.uid, m.name, now);
         } catch (err) {
           console.error(`group-context: upsert member failed: ${String(err)}`);
+        }
+      }
+
+      // Prune members no longer in the authoritative roster (memory + DB + robot
+      // flags). Iterate a snapshot of uids since we mutate the map in the loop.
+      //
+      // Guard: skip pruning when the roster came back EMPTY. getGroupMembers
+      // returns [] not only for a genuinely empty group but also for a
+      // malformed/unexpected-shape 200 response (data.members not an array →
+      // silently []). A group the bot is in always has ≥1 member, so an empty
+      // roster is far more likely a transient quirk than "everyone left".
+      // Mass-pruning on it would wipe the whole roster — and since lastRefresh
+      // was already set on this "success", it wouldn't re-fetch for an hour,
+      // downgrading every mention to plain text in that window. Keep the prior
+      // snapshot instead; a real emptying still prunes member-by-member as the
+      // roster shrinks across non-empty responses.
+      if (present.size > 0) {
+        const rfMap = this.robotFlags.get(channelId);
+        for (const uid of [...memberMap.keys()]) {
+          if (present.has(uid)) continue;
+          const staleName = memberMap.get(uid);
+          memberMap.delete(uid);
+          // Only remove the reverse entry if it still points at THIS uid (a rename
+          // may have already re-pointed the name to someone else).
+          if (staleName !== undefined && nameMap.get(staleName) === uid) {
+            nameMap.delete(staleName);
+          }
+          rfMap?.delete(uid);
+          try {
+            this.deleteMember.run(channelId, uid);
+          } catch (err) {
+            console.error(`group-context: delete stale member failed: ${String(err)}`);
+          }
         }
       }
     } catch (err) {
@@ -393,9 +445,13 @@ export class GroupContext {
   }
 
   /**
-   * A8 (#143): true iff `uid` is a current member of `channelId` per the live
-   * member list (refreshed on every inbound group message). Used by the outbound
-   * mention sanitizer to drop hallucinated @uids that aren't real members.
+   * A8 (#143): true iff `uid` is a current member of `channelId` per the cached
+   * member list. The list is kept authoritative by refreshMembers (it prunes
+   * departed members, not just upserts) — but it is only best-effort fresh:
+   * refresh is throttled to REFRESH_INTERVAL_MS and seeded from DB on restart,
+   * so a membership change inside that window may not be reflected yet. Used by
+   * the outbound mention guard as defense-in-depth (the server still enforces
+   * real permissions), NOT as a real-time authority.
    */
   isMember(channelId: string, uid: string): boolean {
     return this.memberMapByChannel.get(channelId)?.has(uid) ?? false;
