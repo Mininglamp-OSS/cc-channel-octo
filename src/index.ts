@@ -28,7 +28,7 @@ import { loadGroupConfig } from './group-config.js';
 import { CronStore } from './cron-store.js';
 import { CronScheduler } from './cron-scheduler.js';
 import { createCronToolServer, CRON_TOOL_SERVER_NAME, type CronSessionCoords } from './cron-tool.js';
-import { buildInlinedFileBody, truncateUtf8ByBytes, assembleUserMessage } from './file-inline-wrap.js';
+import { buildInlinedFileBody, truncateUtf8ByBytes, assembleUserMessage, MAX_USER_LLM_BYTES } from './file-inline-wrap.js';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -656,7 +656,6 @@ export async function handleMessage(
       // cursor was already advanced above, so dropping the delta here does not
       // strand messages — history covers them and they must not be re-shown.
       const injectedContext = firstTurnHistory ? firstTurnHistory : groupContextBlock;
-      const MAX_USER_LLM_BYTES = 98_304; // 96 KB
       const userContentForLLM = assembleUserMessage(
         injectedContext,
         userBody,
@@ -673,11 +672,11 @@ export async function handleMessage(
       // anchor, reviving #132 on the recovery path (PR #133 review: Jerry-Xin /
       // Steve / yujiawei, all reproduced). Assembled the same way as a first turn:
       // history is the context, userBody is the anchored body — one clean anchor.
-      const fallbackRetryPrompt = assembleUserMessage(
-        historyBlock,
-        userBody,
-        MAX_USER_LLM_BYTES,
-      );
+      // Only built when resuming — it's the sole consumer (sessionOpts below), so a
+      // first turn (no resume) would otherwise assemble it just to discard it.
+      const fallbackRetryPrompt = resume
+        ? assembleUserMessage(historyBlock, userBody, MAX_USER_LLM_BYTES)
+        : undefined;
 
       // --- Query agent with structural role separation (Q3 fix) ---
       // userContentForLLM → user role (prompt), history + context → system role (systemPrompt)

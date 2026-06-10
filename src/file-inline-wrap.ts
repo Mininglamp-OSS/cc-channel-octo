@@ -177,6 +177,14 @@ export function truncateUtf8ByBytes(input: string, maxBytes: number): {
 }
 
 /**
+ * Hard cap on the assembled user-role payload (96 KB). Lives next to
+ * `assembleUserMessage`, the function it governs, so callers import one shared
+ * value instead of re-declaring the literal (it previously appeared in both
+ * index.ts and agent-bridge.ts).
+ */
+export const MAX_USER_LLM_BYTES = 98_304; // 96 KB
+
+/**
  * Assemble a user-role message from injected `context` (first-turn history +
  * group-context delta, or a stale-resume fallback history block) and the current
  * message `body`, byte-capped at `maxBytes`.
@@ -188,10 +196,20 @@ export function truncateUtf8ByBytes(input: string, maxBytes: number): {
  * dropped entirely and the body is byte-capped as a last resort. This prevents a
  * large prior-history block from evicting the current message (PR #120 review).
  */
+/**
+ * Byte-cap the body alone as a last resort, appending a truncation notice when it
+ * was actually cut. Used by the two assembleUserMessage paths where context is
+ * dropped entirely (no context supplied, or the body alone fills the budget) so
+ * the current message still reaches the model.
+ */
+function capBodyToBudget(body: string, maxBytes: number): string {
+  const { truncated, wasTruncated } = truncateUtf8ByBytes(body, maxBytes);
+  return wasTruncated ? truncated + '\n[… user input truncated to cap]' : body;
+}
+
 export function assembleUserMessage(context: string, body: string, maxBytes: number): string {
   if (!context) {
-    const { truncated, wasTruncated } = truncateUtf8ByBytes(body, maxBytes);
-    return wasTruncated ? truncated + '\n[… user input truncated to cap]' : body;
+    return capBodyToBudget(body, maxBytes);
   }
   // Positive anchor (#132): the background context above is READ-ONLY; this line
   // demarcates the actual new request so the model responds to it ONLY and does
@@ -205,8 +223,7 @@ export function assembleUserMessage(context: string, body: string, maxBytes: num
   if (bodyBytes >= maxBytes) {
     // Pathological: the body alone fills/overflows the budget. Drop context
     // entirely and cap the body — the current message still gets through.
-    const { truncated, wasTruncated } = truncateUtf8ByBytes(body, maxBytes);
-    return wasTruncated ? truncated + '\n[… user input truncated to cap]' : body;
+    return capBodyToBudget(body, maxBytes);
   }
   const contextBudget = maxBytes - bodyBytes;
   const ctxBytes = Buffer.byteLength(context, 'utf-8');
