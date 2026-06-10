@@ -6,9 +6,9 @@
 
 <p align="center">
   <a href="https://github.com/Mininglamp-OSS/cc-channel-octo/actions"><img src="https://github.com/Mininglamp-OSS/cc-channel-octo/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://www.npmjs.com/package/cc-channel-octo"><img src="https://img.shields.io/npm/v/cc-channel-octo" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/@mininglamp-oss/cc-channel-octo"><img src="https://img.shields.io/npm/v/@mininglamp-oss/cc-channel-octo" alt="npm version"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
-  <img src="https://img.shields.io/node/v/cc-channel-octo" alt="Node.js version">
+  <img src="https://img.shields.io/node/v/@mininglamp-oss/cc-channel-octo" alt="Node.js version">
 </p>
 
 ---
