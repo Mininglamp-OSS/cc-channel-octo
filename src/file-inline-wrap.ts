@@ -192,7 +192,13 @@ export function assembleUserMessage(context: string, body: string, maxBytes: num
     const { truncated, wasTruncated } = truncateUtf8ByBytes(body, maxBytes);
     return wasTruncated ? truncated + '\n[… user input truncated to cap]' : body;
   }
-  const bodyBytes = Buffer.byteLength(body, 'utf-8');
+  // Positive anchor (#132): the background context above is READ-ONLY; this line
+  // demarcates the actual new request so the model responds to it ONLY and does
+  // not reply line-by-line to the [Recent group messages] / [Prior conversation
+  // history] background. Counted against the byte budget like any other prefix.
+  const anchor = '\n[Current message — respond to this ONLY]\n';
+  const anchored = anchor + body;
+  const bodyBytes = Buffer.byteLength(anchored, 'utf-8');
   if (bodyBytes >= maxBytes) {
     // Pathological: the body alone fills/overflows the budget. Drop context
     // entirely and cap the body — the current message still gets through.
@@ -202,7 +208,7 @@ export function assembleUserMessage(context: string, body: string, maxBytes: num
   const contextBudget = maxBytes - bodyBytes;
   const ctxBytes = Buffer.byteLength(context, 'utf-8');
   if (ctxBytes <= contextBudget) {
-    return context + body;
+    return context + anchored;
   }
   // Truncate context from the FRONT (keep the most-recent tail). A truncation
   // marker is prepended, so reserve its byte size from the budget too — otherwise
@@ -214,12 +220,12 @@ export function assembleUserMessage(context: string, body: string, maxBytes: num
   const tailBudget = contextBudget - markerBytes;
   if (tailBudget <= 0) {
     // No room for any context once the marker is accounted for — drop it entirely.
-    return body;
+    return anchored;
   }
   const ctxBuf = Buffer.from(context, 'utf-8');
   const tail = ctxBuf.subarray(ctxBuf.length - tailBudget);
   const decoded = new TextDecoder('utf-8').decode(tail).replace(/^�+/, '');
-  return marker + decoded + body;
+  return marker + decoded + anchored;
 }
 
 /** Exported for tests. */

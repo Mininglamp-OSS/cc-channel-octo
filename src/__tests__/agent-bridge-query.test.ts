@@ -502,11 +502,14 @@ describe('queryAgent', () => {
 
     expect(resumeFailed).toBe(true);
     expect(chunks).toEqual(['recovered']);
-    // The retry was made WITHOUT resume and WITH the fallback history prepended.
+    // The retry was made WITHOUT resume and WITH the fallback history prepended
+    // as read-only background, the current message anchored after it (#132).
     expect(mockQuery).toHaveBeenCalledTimes(2);
     expect(mockQuery.mock.calls[0][0].options.resume).toBe('stale-sid');
     expect(mockQuery.mock.calls[1][0].options).not.toHaveProperty('resume');
-    expect(mockQuery.mock.calls[1][0].prompt).toBe('[Prior conversation history]\nold turn\n---\nhi');
+    expect(mockQuery.mock.calls[1][0].prompt).toBe(
+      '[Prior conversation history]\nold turn\n---\n\n[Current message — respond to this ONLY]\nhi',
+    );
     // The fresh session id is still captured for next turn.
     expect(ids).toEqual(['fresh-sid']);
   });

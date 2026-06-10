@@ -275,9 +275,11 @@ describe('truncateUtf8ByBytes (PR#40 review nit fix — byte-safe truncation)', 
 // ─── assembleUserMessage — body always survives (PR #120 review) ─────────────
 
 describe('assembleUserMessage (PR #120: current message must always reach the model)', () => {
-  it('returns context + body unchanged when under budget', () => {
+  it('anchors the current message after the context when under budget', () => {
     const out = assembleUserMessage('[ctx]\nold\n', 'new request', 1000);
-    expect(out).toBe('[ctx]\nold\nnew request');
+    // #132: the body is introduced by a positive "respond to this ONLY" anchor
+    // so the read-only background context is not mistaken for live instructions.
+    expect(out).toBe('[ctx]\nold\n\n[Current message — respond to this ONLY]\nnew request');
   });
 
   it('preserves the body WHOLE and front-truncates oversized context', () => {
