@@ -11,6 +11,7 @@ import {
   safeSectioned,
   trustedText,
   MAX_DISPLAY_NAME_LEN,
+  CURRENT_MESSAGE_ANCHOR,
 } from '../prompt-safety.js';
 
 describe('sanitizeDisplayName', () => {
@@ -101,6 +102,16 @@ describe('escapeSectionMarkers', () => {
     );
     // Bare form still escapes (regression guard for the original branch).
     expect(escapeSectionMarkers('[Current message]')).toBe('\\[Current message]');
+  });
+
+  it('escapes the shared CURRENT_MESSAGE_ANCHOR constant (drift guard, #133 review)', () => {
+    // Single-source-of-truth invariant: whatever the emitter/system-prompt use as
+    // the anchor MUST be escaped by SECTION_MARKER_RE. If someone reworded the
+    // constant (e.g. dropped the em-dash) without widening the regex, this fails —
+    // catching the silent escape/instruction drift the reviewers warned about.
+    const escaped = escapeSectionMarkers(CURRENT_MESSAGE_ANCHOR);
+    expect(escaped).toBe('\\' + CURRENT_MESSAGE_ANCHOR);
+    expect(escaped.startsWith('\\[')).toBe(true);
   });
 
   it('escapes a marker forged after a NEL/VT/FF line break (finding #5)', () => {

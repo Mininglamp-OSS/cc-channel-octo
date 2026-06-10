@@ -635,9 +635,9 @@ export async function handleMessage(
           '\n---\n'
         : '';
       // First turn (no SDK session yet): inject history once for continuity. Later
-      // turns inject nothing — `resume` carries it. The SAME block is handed to
-      // queryAgent as `fallbackHistoryBlock` so a stale-resume recovery (retry
-      // without resume) can re-inject it instead of losing the conversation.
+      // turns inject nothing — `resume` carries it. The same history block is also
+      // pre-assembled (below) into `fallbackRetryPrompt` so a stale-resume recovery
+      // (retry without resume) can re-inject it instead of losing the conversation.
       const firstTurnHistory = isFirstTurn ? historyBlock : '';
 
       // Assemble the final user message: one-time history + group-context delta +
@@ -659,6 +659,22 @@ export async function handleMessage(
       const MAX_USER_LLM_BYTES = 98_304; // 96 KB
       const userContentForLLM = assembleUserMessage(
         injectedContext,
+        userBody,
+        MAX_USER_LLM_BYTES,
+      );
+
+      // Pre-assemble the stale-resume RETRY prompt here, where `historyBlock` and
+      // `userBody` are still SEPARATE. The retry recovers a dead SDK session, so
+      // (like a first turn) it reinjects the prior history as read-only background
+      // with the current message anchored ONCE after it. We must build it here and
+      // NOT let queryAgent re-run assembleUserMessage on the already-assembled
+      // `userContentForLLM` — doing so would double-anchor and, in a group turn,
+      // push the [Recent group messages] delta AFTER the first [Current message]
+      // anchor, reviving #132 on the recovery path (PR #133 review: Jerry-Xin /
+      // Steve / yujiawei, all reproduced). Assembled the same way as a first turn:
+      // history is the context, userBody is the anchored body — one clean anchor.
+      const fallbackRetryPrompt = assembleUserMessage(
+        historyBlock,
         userBody,
         MAX_USER_LLM_BYTES,
       );
@@ -703,14 +719,15 @@ export async function handleMessage(
       // turn. A first turn has resume===undefined → the SDK starts a fresh session
       // and reports its id here. If a stored id is stale/expired the SDK throws;
       // queryAgent recovers by calling onResumeFailed (clear the bad id) and
-      // retrying once with fallbackHistoryBlock so the conversation isn't lost.
-      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; memoryDir?: string; mcpServers?: Record<string, ReturnType<typeof createCronToolServer>>; onResumeFailed?: () => void; fallbackHistoryBlock?: string } | undefined = {
+      // retrying once with the pre-assembled fallbackRetryPrompt so the
+      // conversation isn't lost (and assembly happens exactly once — see above).
+      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; memoryDir?: string; mcpServers?: Record<string, ReturnType<typeof createCronToolServer>>; onResumeFailed?: () => void; fallbackRetryPrompt?: string } | undefined = {
         ...(resume ? { resume } : {}),
         onSessionId: (id: string) => store.setSdkSessionId(sessionKey, id),
         ...(resume
           ? {
               onResumeFailed: () => store.clearSdkSessionId(sessionKey),
-              fallbackHistoryBlock: historyBlock,
+              fallbackRetryPrompt,
             }
           : {}),
       };

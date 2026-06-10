@@ -46,9 +46,26 @@ export const MAX_DISPLAY_NAME_LEN = 128;
  * [Recent group messages] read-only background) could otherwise forge a second
  * "current message" and have their injected text treated as the request. The
  * bare-`]` form alone left that gap open (#132 review).
+ *
+ * The exact emitted form is exported as CURRENT_MESSAGE_ANCHOR (single source of
+ * truth \u2014 see below). The branch here is intentionally BROADER than that constant
+ * (any `[Current message\u2026]` variant is escaped), so the two cannot drift into a
+ * gap; a drift-guard test asserts the constant is matched by this regex.
  */
 const SECTION_MARKER_RE =
   /^\[(Group context|Conversation history|Current message[^\]]*|Quoted message from [^\]]*|answered history|new messages|Recent group messages|Group instructions|older messages dropped|older turns dropped)\]/gim;
+
+/**
+ * The privileged "current message" anchor, emitted by assembleUserMessage
+ * (file-inline-wrap.ts) to demarcate the real request from read-only background,
+ * and named in SECURITY_PROMPT_PREFIX (agent-bridge.ts) so the model knows to
+ * respond only to text after it (#132). SINGLE SOURCE OF TRUTH: both the emitter
+ * and the system-prompt reference import this, so the literal (note the em-dash
+ * U+2014, not a hyphen) can never silently diverge between the three sites. The
+ * SECTION_MARKER_RE above is deliberately broad enough to always escape it even
+ * if the suffix is reworded; a unit test pins that invariant.
+ */
+export const CURRENT_MESSAGE_ANCHOR = '[Current message \u2014 respond to this ONLY]';
 
 /**
  * Line-leading turn label (`[user ...]:` / `[assistant ...]:`),

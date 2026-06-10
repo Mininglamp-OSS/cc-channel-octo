@@ -33,6 +33,7 @@
  */
 
 import { Buffer } from 'node:buffer';
+import { CURRENT_MESSAGE_ANCHOR } from './prompt-safety.js';
 
 /**
  * Maximum total bytes for the wrapped file segment (base64 + framing).
@@ -196,7 +197,9 @@ export function assembleUserMessage(context: string, body: string, maxBytes: num
   // demarcates the actual new request so the model responds to it ONLY and does
   // not reply line-by-line to the [Recent group messages] / [Prior conversation
   // history] background. Counted against the byte budget like any other prefix.
-  const anchor = '\n[Current message — respond to this ONLY]\n';
+  // The literal is the shared CURRENT_MESSAGE_ANCHOR so the emitter, the system
+  // prompt, and the escape regex can never drift apart (#133 review).
+  const anchor = `\n${CURRENT_MESSAGE_ANCHOR}\n`;
   const anchored = anchor + body;
   const bodyBytes = Buffer.byteLength(anchored, 'utf-8');
   if (bodyBytes >= maxBytes) {
