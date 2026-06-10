@@ -413,4 +413,97 @@ describe('G23: robot flag', () => {
     expect(ctx.isRobot('ch1', 'shared')).toBe(true);
     expect(ctx.isRobot('ch2', 'shared')).toBe(false);
   });
+
+  // --- A8 (#143): authoritative membership + outbound validation getters ---
+
+  it('isMember / getNameToUidMap reflect a learned member', () => {
+    ctx.learnMember('ch1', 'u1', 'Alice');
+    expect(ctx.isMember('ch1', 'u1')).toBe(true);
+    expect(ctx.isMember('ch1', 'ghost')).toBe(false);
+    expect(ctx.isMember('ch2', 'u1')).toBe(false); // per-channel isolation
+    expect(ctx.getNameToUidMap('ch1').get('Alice')).toBe('u1');
+    expect(ctx.getNameToUidMap('nope').size).toBe(0);
+  });
+
+  it('refreshMembers prunes a departed member (Jerry-Xin 🔴): memory + reverse map', async () => {
+    // First authoritative refresh: u1 + u2 present.
+    (getGroupMembers as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce([
+        { uid: 'u1', name: 'Alice', role: 0 },
+        { uid: 'u2', name: 'Bob', role: 0 },
+      ])
+      .mockResolvedValueOnce([{ uid: 'u1', name: 'Alice', role: 0 }]); // u2 left
+    await ctx.refreshMembers('ch-prune', 'https://api', 'token');
+    expect(ctx.isMember('ch-prune', 'u1')).toBe(true);
+    expect(ctx.isMember('ch-prune', 'u2')).toBe(true);
+
+    // Bypass the 1h throttle so the second refresh is effective.
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 61 * 60 * 1000);
+    try {
+      await ctx.refreshMembers('ch-prune', 'https://api', 'token');
+    } finally {
+      vi.useRealTimers();
+    }
+    // Guard: the second refresh actually ran (not silently throttled).
+    expect(getGroupMembers).toHaveBeenCalledTimes(2);
+
+    // u2 left → must no longer be a member, and its reverse name entry is gone.
+    expect(ctx.isMember('ch-prune', 'u1')).toBe(true);
+    expect(ctx.isMember('ch-prune', 'u2')).toBe(false);
+    expect(ctx.getNameToUidMap('ch-prune').get('Bob')).toBeUndefined();
+    expect(ctx.getNameToUidMap('ch-prune').get('Alice')).toBe('u1');
+  });
+
+  it('refreshMembers pruning removes the persisted DB row for a departed member', async () => {
+    // Roster shrinks from {gone, keep} → {keep}. A non-empty response is trusted
+    // as authoritative, so `gone` is pruned from memory AND the DB.
+    (getGroupMembers as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce([
+        { uid: 'gone', name: 'Ghost', role: 0 },
+        { uid: 'keep', name: 'Keeper', role: 0 },
+      ])
+      .mockResolvedValueOnce([{ uid: 'keep', name: 'Keeper', role: 0 }]);
+    await ctx.refreshMembers('ch-db', 'https://api', 'token');
+    expect(ctx.isMember('ch-db', 'gone')).toBe(true);
+
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 61 * 60 * 1000);
+    try {
+      await ctx.refreshMembers('ch-db', 'https://api', 'token');
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(ctx.isMember('ch-db', 'gone')).toBe(false);
+    expect(ctx.isMember('ch-db', 'keep')).toBe(true);
+
+    // A fresh GroupContext loading from the same DB must NOT resurrect the row.
+    const ctx2 = new GroupContext(adapter, 6000);
+    ctx2.loadMembersFromDb('ch-db');
+    expect(ctx2.isMember('ch-db', 'gone')).toBe(false);
+    expect(ctx2.isMember('ch-db', 'keep')).toBe(true);
+  });
+
+  it('refreshMembers does NOT mass-prune on an empty roster response (transient-quirk guard)', async () => {
+    (getGroupMembers as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce([
+        { uid: 'u1', name: 'Alice', role: 0 },
+        { uid: 'u2', name: 'Bob', role: 0 },
+      ])
+      .mockResolvedValueOnce([]); // empty: treated as a quirk, not "everyone left"
+    await ctx.refreshMembers('ch-empty', 'https://api', 'token');
+    expect(ctx.isMember('ch-empty', 'u1')).toBe(true);
+
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 61 * 60 * 1000);
+    try {
+      await ctx.refreshMembers('ch-empty', 'https://api', 'token');
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(getGroupMembers).toHaveBeenCalledTimes(2);
+    // Prior roster is kept — an empty response does not wipe everyone.
+    expect(ctx.isMember('ch-empty', 'u1')).toBe(true);
+    expect(ctx.isMember('ch-empty', 'u2')).toBe(true);
+  });
 });

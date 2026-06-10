@@ -782,7 +782,17 @@ export async function handleMessage(
       }
 
       // --- Stream output to Octo ---
-      await streamRelay.deliver(channelId, channelType, teeChunks(), config.apiUrl, config.botToken, config.maxResponseChars);
+      // A8 (#143): in groups, resolve v1 @name against the member list and
+      // validate v2 @[uid:name] uids against membership — a hallucinated uid not
+      // in the group is downgraded to plain text (no bogus @ notify). The member
+      // list is kept authoritative by refreshMembers (prunes departed members),
+      // best-effort fresh (1h refresh throttle). DMs have no member list and no
+      // @ semantics, so both args stay undefined (skip).
+      const outboundNameToUid = isGroup ? groupContext.getNameToUidMap(channelId) : undefined;
+      const isValidMentionUid = isGroup
+        ? (uid: string): boolean => groupContext.isMember(channelId, uid)
+        : undefined;
+      await streamRelay.deliver(channelId, channelType, teeChunks(), config.apiUrl, config.botToken, config.maxResponseChars, outboundNameToUid, isValidMentionUid);
 
       // G8: Send read receipt after processing (fire-and-forget)
       if (msg.message_id && msg.channel_id && msg.channel_type !== undefined) {
