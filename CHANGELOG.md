@@ -8,110 +8,15 @@ While the major version is `0`, minor releases may carry breaking changes.
 
 ## [Unreleased]
 
-### Security
+## [1.0.0] - 2026-06-10
 
-- **WebSocket transport must be `wss://`** — the WuKongIM payload layer is
-  AES-CBC without an auth tag, so transport integrity is the only tamper guarantee.
-  `gateway.connect()` now refuses a plaintext `ws://` endpoint for any non-loopback
-  host (`isAllowedWsUrl` in `url-policy.ts`); `ws://localhost` stays allowed for
-  local dev / a co-located TLS-terminating proxy.
-- **Binary protocol decoder bounds-checked** — `Decoder` (`octo/socket.ts`) now
-  throws `RangeError` on any over-read (truncated packet, or a string length field
-  exceeding the remaining buffer) instead of silently reading `undefined`
-  (→ 0/NaN coercion → corrupt parses, wrong messageID/seq → ack mismatch). The
-  packet-decode loop already catches and reconnects, so a malformed packet now
-  fails cleanly.
-- **Partial agent output no longer lost on stream error** — if the agent stream
-  throws mid-delivery, `StreamRelay.deliver` now flushes the already-accumulated
-  text to the channel before re-throwing, instead of dropping a real partial reply.
-- **`@all` / `@所有人` broadcast detection tightened** — the trailing-boundary
-  check used `[^\w]`, so `@all-members` / `@all.foo` wrongly triggered a
-  broadcast-to-everyone. It now excludes name-continuation chars (`-`, `.`, CJK),
-  while still matching a standalone token followed by space, CJK punctuation, or
-  end-of-string.
-
-### Changed
-
-- **Frozen system prompt + SDK-session-owned history** — the bot's
-  `systemPrompt.append` now carries ONLY stable, operator-controlled content
-  (security prefix + SOUL + group instructions). Per-turn-variable content —
-  conversation history (B5) and group context (B4) — no longer sits inside the
-  SDK's cached system block, so the prompt-caching prefix is byte-identical
-  turn-to-turn and actually hits (previously every turn was a cache-write with zero
-  reads, because the changing history/context lived inside the `cache_control`
-  block). Follows Anthropic's own guidance ("keep the system prompt frozen; inject
-  dynamic context in a user message"). **Conversation history is now owned by the
-  SDK session:** cc always `resume`s the stored session id; only a session's FIRST
-  turn (or a migration from existing SQLite history) injects prior history ONCE as
-  a `[Prior conversation history]` block in the user message. **Group context** is
-  injected as a delta — only messages new since a per-channel consumption cursor
-  (`group_context_cursors`), not the whole window every turn. **`sdk.cron`-style
-  flag removed:** `sdk.persistentSession` is gone — SDK sessions are always on (with
-  the flag off and history out of the prompt, "off" would mean no memory at all).
-  **Stale-resume recovery:** an expired/invalid session id (the SDK throws "No
-  conversation found with session ID …") is caught, the bad id cleared, and the turn
-  retried once without resume — re-injecting history from SQLite so a conversation is
-  never silently lost. SQLite's role is now state/cursors/mappings + a durable record
-  (migration & recovery substrate), not live prompt-history reconstruction.
-  `buildSystemPrompt(customPrompt?, groupInstructions?)` and `queryAgent(userMessage,
-  config, sessionCtx?, onToolUse?, opts?)` lost their history/context params.
-  **Migration:** drop any `sdk.persistentSession` / `CC_OCTO_SDK_PERSISTENT_SESSION`
-  from config — it's ignored now; existing SQLite history is injected once on each
-  session's next turn, then carried by the SDK session.
-
-### Removed
-
-- **Dead Octo API functions** — removed `fetchBotGroups`, `getGroupInfo`,
-  `searchSpaceMembers` (originally G15/G16/G17) and their `BotGroup` / `GroupInfo`
-  / `SpaceMember` interfaces from `octo/api.ts`. They had **zero production callers**
-  (only tests referenced them) — these read-only group/space queries are covered by
-  the agent's octo-cli skill (`octo-cli group list` / `group get` / `bot space-members`).
-  No runtime behavior change.
-- **Dead media-upload pipeline + `cos-nodejs-sdk-v5`** — removed `media-upload.ts`
-  (`uploadAndSendMedia` / `sendRichTextCombined` / `uploadFileToCOS`) and the
-  `sendMediaMessage` / `sendRichTextMessage` API functions. This outbound media /
-  rich-text pipeline had **zero production callers** (born-dead) — outbound media is
-  handled by the agent's octo-cli skill (`octo-cli file upload` + `message send`)
-  under the skill-as-data model. Dropping it removes the direct dependency on
-  `cos-nodejs-sdk-v5`, which transitively pulled in the deprecated `request@2.88.2`
-  chain and an old `fast-xml-parser` — clearing **11 Dependabot alerts** (2 critical,
-  2 high incl. an unpatchable `request` SSRF) with no runtime behavior change.
-  Inbound media (`media-inbound.ts`) and the startup CDN-host probe
-  (`getUploadCredentials` in `index.ts`) are unaffected.
-- **Webhook transport** (#105) — removed; the Octo server does not POST to the
-  bot, so webhook mode was dead code. WebSocket is the only transport.
-
-### Fixed
-
-- **Cron robustness — review follow-ups** (#115) — four operational-hardening
-  fixes from the xhigh review: (1/5) cron fires now **bypass the rate limit**
-  (like the @mention gate) so an operator-scheduled task isn't silently dropped
-  when the owner's bucket is exhausted, and the scheduler **logs an async fire
-  failure attributed to the specific task** (delivery errors were previously
-  invisible); (2) a **startup warning** when `sdk.cron` is on but the bot has no
-  `owner_uid` (the owner-gate would otherwise reject every `cron_create` with no
-  hint why); (3) a synthetic cron fire's `message_seq=0` **no longer poisons the
-  history-segmentation cursor** (`setLastBotReplySeq` is skipped for non-positive
-  seq); (6) **strict ISO-8601 validation** for one-shot schedules
-  (`parseOneShot`) so a lenient rollover like `2026-13-13T…` is rejected instead
-  of silently firing at a shifted time.
-
-- **Router drops non-conversation channel types** (#68) — found in live
-  deployment: on connect the bot received a system message on `channel_type: 8`
-  (`systemcmdonline`) and replied to it. `SessionRouter` now allowlists only DM /
-  Group / CommunityTopic as repliable; any other (system/command) channel type is
-  dropped before the agent is invoked.
-
-### Changed
-
-- **Config is JSON-only — all environment-variable overrides removed** (#103).
-  The entire `CC_OCTO_*` env surface and the `ANTHROPIC_BASE_URL` env read are
-  gone; `applyEnv()` (and its `parseCsv`/`parseIntStrict` helpers) were deleted.
-  Configuration now comes solely from the two-layer config.json (global +
-  per-bot). `sdk.anthropicBaseUrl` remains a config.json field (still forwarded
-  to the SDK subprocess as `ANTHROPIC_BASE_URL`). **Migration:** move any
-  `CC_OCTO_*` / `ANTHROPIC_BASE_URL` values into `~/.cc-channel-octo/config.json`
-  (or the per-bot file). Old env vars are now silently ignored.
+First stable release. Consolidates everything merged since `0.2.0` — the v0.3
+line (slash commands, tool progress, multi-bot, v2 Session API), the v1.0 line
+(per-group `GROUP.md` instructions), scheduled tasks (cron), skill-as-data
+external tooling, the frozen-system-prompt / SDK-session-owned-history rework,
+and a large batch of security hardening. **Contains breaking changes** —
+configuration is now JSON-only and the `sdk.persistentSession` flag was removed
+(see Changed / Migration notes below).
 
 ### Added
 
@@ -210,8 +115,64 @@ While the major version is `0`, minor releases may carry breaking changes.
   cold-start backfill cannot resurrect the cleared history, even across a
   process restart. Commands are subject to the normal per-session rate limit.
 
+### Changed
+
+- **Frozen system prompt + SDK-session-owned history** — the bot's
+  `systemPrompt.append` now carries ONLY stable, operator-controlled content
+  (security prefix + SOUL + group instructions). Per-turn-variable content —
+  conversation history (B5) and group context (B4) — no longer sits inside the
+  SDK's cached system block, so the prompt-caching prefix is byte-identical
+  turn-to-turn and actually hits (previously every turn was a cache-write with zero
+  reads, because the changing history/context lived inside the `cache_control`
+  block). Follows Anthropic's own guidance ("keep the system prompt frozen; inject
+  dynamic context in a user message"). **Conversation history is now owned by the
+  SDK session:** cc always `resume`s the stored session id; only a session's FIRST
+  turn (or a migration from existing SQLite history) injects prior history ONCE as
+  a `[Prior conversation history]` block in the user message. **Group context** is
+  injected as a delta — only messages new since a per-channel consumption cursor
+  (`group_context_cursors`), not the whole window every turn. **`sdk.cron`-style
+  flag removed:** `sdk.persistentSession` is gone — SDK sessions are always on (with
+  the flag off and history out of the prompt, "off" would mean no memory at all).
+  **Stale-resume recovery:** an expired/invalid session id (the SDK throws "No
+  conversation found with session ID …") is caught, the bad id cleared, and the turn
+  retried once without resume — re-injecting history from SQLite so a conversation is
+  never silently lost. SQLite's role is now state/cursors/mappings + a durable record
+  (migration & recovery substrate), not live prompt-history reconstruction.
+  `buildSystemPrompt(customPrompt?, groupInstructions?)` and `queryAgent(userMessage,
+  config, sessionCtx?, onToolUse?, opts?)` lost their history/context params.
+  **Migration:** drop any `sdk.persistentSession` / `CC_OCTO_SDK_PERSISTENT_SESSION`
+  from config — it's ignored now; existing SQLite history is injected once on each
+  session's next turn, then carried by the SDK session.
+- **Config is JSON-only — all environment-variable overrides removed** (#103).
+  The entire `CC_OCTO_*` env surface and the `ANTHROPIC_BASE_URL` env read are
+  gone; `applyEnv()` (and its `parseCsv`/`parseIntStrict` helpers) were deleted.
+  Configuration now comes solely from the two-layer config.json (global +
+  per-bot). `sdk.anthropicBaseUrl` remains a config.json field (still forwarded
+  to the SDK subprocess as `ANTHROPIC_BASE_URL`). **Migration:** move any
+  `CC_OCTO_*` / `ANTHROPIC_BASE_URL` values into `~/.cc-channel-octo/config.json`
+  (or the per-bot file). Old env vars are now silently ignored.
+
 ### Removed
 
+- **Dead Octo API functions** — removed `fetchBotGroups`, `getGroupInfo`,
+  `searchSpaceMembers` (originally G15/G16/G17) and their `BotGroup` / `GroupInfo`
+  / `SpaceMember` interfaces from `octo/api.ts`. They had **zero production callers**
+  (only tests referenced them) — these read-only group/space queries are covered by
+  the agent's octo-cli skill (`octo-cli group list` / `group get` / `bot space-members`).
+  No runtime behavior change.
+- **Dead media-upload pipeline + `cos-nodejs-sdk-v5`** — removed `media-upload.ts`
+  (`uploadAndSendMedia` / `sendRichTextCombined` / `uploadFileToCOS`) and the
+  `sendMediaMessage` / `sendRichTextMessage` API functions. This outbound media /
+  rich-text pipeline had **zero production callers** (born-dead) — outbound media is
+  handled by the agent's octo-cli skill (`octo-cli file upload` + `message send`)
+  under the skill-as-data model. Dropping it removes the direct dependency on
+  `cos-nodejs-sdk-v5`, which transitively pulled in the deprecated `request@2.88.2`
+  chain and an old `fast-xml-parser` — clearing **11 Dependabot alerts** (2 critical,
+  2 high incl. an unpatchable `request` SSRF) with no runtime behavior change.
+  Inbound media (`media-inbound.ts`) and the startup CDN-host probe
+  (`getUploadCredentials` in `index.ts`) are unaffected.
+- **Webhook transport** (#105) — removed; the Octo server does not POST to the
+  bot, so webhook mode was dead code. WebSocket is the only transport.
 - **In-process Octo MCP tool server** (#87, never released) — the read-only
   `mcp__octo__*` tools (`list_groups`, `group_info`, `group_members`,
   `search_members`) and the `sdk.octoTools` toggle are removed in favor of the
@@ -222,6 +183,48 @@ While the major version is `0`, minor releases may carry breaking changes.
   seeding, and the `OCTO_API_BASE_URL`/`OCTO_BOT_ID` env injection are removed.
   They baked one CLI into cc's core; #100 replaces them with the generic,
   zero-CLI-name skill loader.
+
+### Fixed
+
+- **Cron robustness — review follow-ups** (#115) — four operational-hardening
+  fixes from the xhigh review: (1/5) cron fires now **bypass the rate limit**
+  (like the @mention gate) so an operator-scheduled task isn't silently dropped
+  when the owner's bucket is exhausted, and the scheduler **logs an async fire
+  failure attributed to the specific task** (delivery errors were previously
+  invisible); (2) a **startup warning** when `sdk.cron` is on but the bot has no
+  `owner_uid` (the owner-gate would otherwise reject every `cron_create` with no
+  hint why); (3) a synthetic cron fire's `message_seq=0` **no longer poisons the
+  history-segmentation cursor** (`setLastBotReplySeq` is skipped for non-positive
+  seq); (6) **strict ISO-8601 validation** for one-shot schedules
+  (`parseOneShot`) so a lenient rollover like `2026-13-13T…` is rejected instead
+  of silently firing at a shifted time.
+- **Router drops non-conversation channel types** (#68) — found in live
+  deployment: on connect the bot received a system message on `channel_type: 8`
+  (`systemcmdonline`) and replied to it. `SessionRouter` now allowlists only DM /
+  Group / CommunityTopic as repliable; any other (system/command) channel type is
+  dropped before the agent is invoked.
+
+### Security
+
+- **WebSocket transport must be `wss://`** — the WuKongIM payload layer is
+  AES-CBC without an auth tag, so transport integrity is the only tamper guarantee.
+  `gateway.connect()` now refuses a plaintext `ws://` endpoint for any non-loopback
+  host (`isAllowedWsUrl` in `url-policy.ts`); `ws://localhost` stays allowed for
+  local dev / a co-located TLS-terminating proxy.
+- **Binary protocol decoder bounds-checked** — `Decoder` (`octo/socket.ts`) now
+  throws `RangeError` on any over-read (truncated packet, or a string length field
+  exceeding the remaining buffer) instead of silently reading `undefined`
+  (→ 0/NaN coercion → corrupt parses, wrong messageID/seq → ack mismatch). The
+  packet-decode loop already catches and reconnects, so a malformed packet now
+  fails cleanly.
+- **Partial agent output no longer lost on stream error** — if the agent stream
+  throws mid-delivery, `StreamRelay.deliver` now flushes the already-accumulated
+  text to the channel before re-throwing, instead of dropping a real partial reply.
+- **`@all` / `@所有人` broadcast detection tightened** — the trailing-boundary
+  check used `[^\w]`, so `@all-members` / `@all.foo` wrongly triggered a
+  broadcast-to-everyone. It now excludes name-continuation chars (`-`, `.`, CJK),
+  while still matching a standalone token followed by space, CJK punctuation, or
+  end-of-string.
 
 ## [0.2.0] - 2026-06-07
 
@@ -310,5 +313,6 @@ hardening across the SSRF, prompt-injection, and protocol-DoS surfaces.
 Initial tagged baseline: text messaging, streaming output, SQLite session
 persistence, rate limiting, and the core security model.
 
+[1.0.0]: https://github.com/Mininglamp-OSS/cc-channel-octo/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/Mininglamp-OSS/cc-channel-octo/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Mininglamp-OSS/cc-channel-octo/releases/tag/v0.1.0
