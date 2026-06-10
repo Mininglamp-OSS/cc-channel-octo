@@ -18,7 +18,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { openSync, readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
+import { openSync, readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -239,8 +239,13 @@ export async function run(argv: string[], baseDir?: string): Promise<number> {
   }
 }
 
+// Run only when invoked as a script (production / linked bin), not when
+// imported (tests). When called via the `bin` symlink, Node resolves
+// import.meta.url to the real file but leaves process.argv[1] as the symlink
+// path — so resolve argv[1] to its realpath before comparing, or the linked
+// command would silently no-op.
 const entrypoint = process.argv[1];
-if (entrypoint && import.meta.url === pathToFileURL(entrypoint).href) {
+if (entrypoint && import.meta.url === pathToFileURL(realpathSync(entrypoint)).href) {
   run(process.argv.slice(2))
     .then((code) => process.exit(code))
     .catch((err) => {
