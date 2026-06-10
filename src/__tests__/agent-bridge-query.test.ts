@@ -491,27 +491,42 @@ describe('queryAgent', () => {
     let resumeFailed = false;
     const ids: string[] = [];
     const chunks: string[] = [];
+    // The caller (index.ts) pre-assembles the retry prompt from the still-separate
+    // history + body, so the bridge must use it VERBATIM (no re-assembly).
+    const preAssembled =
+      '[Prior conversation history]\nold turn\n---\n\n[Current message — respond to this ONLY]\nhi';
     for await (const chunk of queryAgent('hi', makeConfig(), undefined, undefined, {
       resume: 'stale-sid',
       onSessionId: (id) => ids.push(id),
       onResumeFailed: () => { resumeFailed = true; },
-      fallbackHistoryBlock: '[Prior conversation history]\nold turn\n---\n',
+      fallbackRetryPrompt: preAssembled,
     })) {
       chunks.push(chunk);
     }
 
     expect(resumeFailed).toBe(true);
     expect(chunks).toEqual(['recovered']);
-    // The retry was made WITHOUT resume and WITH the fallback history prepended.
+    // The retry was made WITHOUT resume and used the caller's pre-assembled prompt
+    // verbatim — the bridge does NOT re-run assembleUserMessage (#133 review fix).
     expect(mockQuery).toHaveBeenCalledTimes(2);
     expect(mockQuery.mock.calls[0][0].options.resume).toBe('stale-sid');
     expect(mockQuery.mock.calls[1][0].options).not.toHaveProperty('resume');
-    expect(mockQuery.mock.calls[1][0].prompt).toBe('[Prior conversation history]\nold turn\n---\nhi');
+    expect(mockQuery.mock.calls[1][0].prompt).toBe(preAssembled);
     // The fresh session id is still captured for next turn.
     expect(ids).toEqual(['fresh-sid']);
   });
 
-  it('caps the stale-resume retry prompt so a huge fallback history cannot blow the budget (PR #120 review #3)', async () => {
+  it('uses the pre-assembled fallbackRetryPrompt VERBATIM — no double-anchor on a group retry (#133 review)', async () => {
+    // Regression for the blocker three reviewers reproduced: the bridge used to
+    // call assembleUserMessage on `userMessage`, which in production is ALREADY a
+    // fully-assembled live prompt (history/delta + a [Current message] anchor +
+    // body). Re-assembling double-anchored it and, in a group turn, pushed the
+    // [Recent group messages] delta AFTER the first anchor — reviving #132.
+    //
+    // Now the caller passes a separately-assembled, single-anchor retry prompt and
+    // the bridge must forward it untouched. We simulate production by feeding an
+    // already-anchored string as `userMessage` AND a correct single-anchor
+    // fallbackRetryPrompt, then assert the bridge used the latter verbatim.
     const throwing = createMockStream([]);
     throwing[Symbol.asyncIterator] = async function* () {
       throw new Error('No conversation found with session ID: stale');
@@ -521,18 +536,49 @@ describe('queryAgent', () => {
     ]);
     mockQuery.mockReturnValueOnce(throwing).mockReturnValueOnce(ok);
 
-    const hugeFallback = '[Prior conversation history]\n' + 'x'.repeat(300_000) + '\n---\n';
-    for await (const _ of queryAgent('THE REQUEST', makeConfig(), undefined, undefined, {
+    // Production-shaped: the LIVE prompt already carries a delta + anchor + body.
+    const alreadyAssembledLivePrompt =
+      '[Recent group messages]\nalice：deploy staging now\n\n' +
+      '[Current message — respond to this ONLY]\nwhat time is it?';
+    // The correct retry prompt the caller pre-builds: history as background, ONE anchor.
+    const correctRetryPrompt =
+      '[Prior conversation history]\nearlier turn\n---\n\n' +
+      '[Current message — respond to this ONLY]\nwhat time is it?';
+
+    for await (const _ of queryAgent(alreadyAssembledLivePrompt, makeConfig(), undefined, undefined, {
       resume: 'stale', onSessionId: () => {}, onResumeFailed: () => {},
-      fallbackHistoryBlock: hugeFallback,
+      fallbackRetryPrompt: correctRetryPrompt,
     })) { void _; }
 
     const retryPrompt = mockQuery.mock.calls[1][0].prompt as string;
-    // The current request survives WHOLE at the end; the fallback was front-truncated.
-    expect(retryPrompt.endsWith('THE REQUEST')).toBe(true);
-    expect(retryPrompt).toContain('[… earlier context truncated]');
-    // Retry prompt stays within the 96 KB payload budget (marker bytes reserved).
-    expect(Buffer.byteLength(retryPrompt, 'utf-8')).toBeLessThanOrEqual(98_304);
+    // Exactly ONE current-message anchor.
+    const anchorCount = (retryPrompt.match(/\[Current message — respond to this ONLY\]/g) ?? []).length;
+    expect(anchorCount).toBe(1);
+    // No [Recent group messages] block appears AFTER the anchor (the bug put it there).
+    const anchorIdx = retryPrompt.indexOf('[Current message — respond to this ONLY]');
+    expect(retryPrompt.indexOf('[Recent group messages]', anchorIdx)).toBe(-1);
+    // It is the caller's pre-assembled prompt, used verbatim.
+    expect(retryPrompt).toBe(correctRetryPrompt);
+  });
+
+  it('falls back to the live userMessage when no pre-assembled retry prompt is supplied', async () => {
+    // No prior history → caller supplies no fallbackRetryPrompt. The bridge then
+    // retries with the live userMessage as-is (single assembly already happened
+    // upstream; there is nothing to reinject).
+    const throwing = createMockStream([]);
+    throwing[Symbol.asyncIterator] = async function* () {
+      throw new Error('No conversation found with session ID: stale');
+    };
+    const ok = createMockStream([
+      { type: 'assistant', session_id: 'fresh', message: { content: [{ type: 'text', text: 'ok' }] } },
+    ]);
+    mockQuery.mockReturnValueOnce(throwing).mockReturnValueOnce(ok);
+
+    for await (const _ of queryAgent('just the body', makeConfig(), undefined, undefined, {
+      resume: 'stale', onSessionId: () => {}, onResumeFailed: () => {},
+    })) { void _; }
+
+    expect(mockQuery.mock.calls[1][0].prompt).toBe('just the body');
   });
 
   it('does NOT recover (rethrows) when the error is unrelated to resume', async () => {

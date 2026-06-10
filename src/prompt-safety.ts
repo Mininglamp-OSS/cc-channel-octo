@@ -36,9 +36,45 @@ export const MAX_DISPLAY_NAME_LEN = 128;
  * context header (`[Recent group messages]`), the trusted-instructions header
  * (`[Group instructions]`), and the truncation notices \u2014 so user content cannot
  * forge a boundary the model treats as real structure.
+ *
+ * `Current message[^\]]*` (not the bare `Current message`) matches the FULL
+ * anchor `[Current message \u2014 respond to this ONLY]` that assembleUserMessage
+ * (#132) prepends to the real request, the same way `Quoted message from [^\]]*`
+ * covers its variable suffix. The anchor is a PRIVILEGED marker \u2014 the system
+ * prompt tells the model to "respond ONLY to the text after it" \u2014 so a group
+ * member who typed it verbatim into a non-@ message (which lands in the
+ * [Recent group messages] read-only background) could otherwise forge a second
+ * "current message" and have their injected text treated as the request. The
+ * bare-`]` form alone left that gap open (#132 review).
+ *
+ * The exact emitted form is exported as CURRENT_MESSAGE_ANCHOR (single source of
+ * truth \u2014 see below). The branch here is intentionally BROADER than that constant
+ * (any `[Current message\u2026]` variant is escaped), so the two cannot drift into a
+ * gap; a drift-guard test asserts the constant is matched by this regex.
+ *
+ * The leading `([^\S\r\n]*)` group absorbs indentation (spaces/tabs) before the
+ * `[`, mirroring ROLE_LABEL_RE. Without it `^\[` only matched COLUMN-0 markers, so
+ * a forged marker preceded by a single space/tab slipped through unescaped \u2014 and
+ * group-delta content can contain newlines (group-context.ts), so an attacker can
+ * plant an indented line. escapeSectionMarkers preserves the captured whitespace
+ * and backslash-escapes the `[` (#133 review: yujiawei P0). `Prior conversation
+ * history[^\]]*` is included so the first-turn/fallback history header
+ * (index.ts) is covered too \u2014 making the "cannot drift into a gap" claim hold.
  */
 const SECTION_MARKER_RE =
-  /^\[(Group context|Conversation history|Current message|Quoted message from [^\]]*|answered history|new messages|Recent group messages|Group instructions|older messages dropped|older turns dropped)\]/gim;
+  /^([^\S\r\n]*)\[(Group context|Conversation history|Prior conversation history[^\]]*|Current message[^\]]*|Quoted message from [^\]]*|answered history|new messages|Recent group messages|Group instructions|older messages dropped|older turns dropped)\]/gim;
+
+/**
+ * The privileged "current message" anchor, emitted by assembleUserMessage
+ * (file-inline-wrap.ts) to demarcate the real request from read-only background,
+ * and named in SECURITY_PROMPT_PREFIX (agent-bridge.ts) so the model knows to
+ * respond only to text after it (#132). SINGLE SOURCE OF TRUTH: both the emitter
+ * and the system-prompt reference import this, so the literal (note the em-dash
+ * U+2014, not a hyphen) can never silently diverge between the three sites. The
+ * SECTION_MARKER_RE above is deliberately broad enough to always escape it even
+ * if the suffix is reworded; a unit test pins that invariant.
+ */
+export const CURRENT_MESSAGE_ANCHOR = '[Current message \u2014 respond to this ONLY]';
 
 /**
  * Line-leading turn label (`[user ...]:` / `[assistant ...]:`),
@@ -97,7 +133,12 @@ export function escapeRoleLabels(content: string): string {
  * `sanitizeForSystemPrompt` in agent-bridge.)
  */
 export function escapeSectionMarkers(text: string): string {
-  return normalizeLineBreaks(text).replace(SECTION_MARKER_RE, (match) => `\\${match}`);
+  // ws = captured leading indentation (preserved); inner = marker name. Escaping
+  // the `[` after the whitespace neutralizes both column-0 and indented forgeries.
+  return normalizeLineBreaks(text).replace(
+    SECTION_MARKER_RE,
+    (_m, ws: string, inner: string) => `${ws}\\[${inner}]`,
+  );
 }
 
 /**
