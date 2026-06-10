@@ -170,6 +170,24 @@ describe('GroupContext', () => {
     expect(ctx.resolveMentions('@Alice and @Alice again', 'ch1')).toEqual(['u1']);
   });
 
+  // --- A8 (#143): outbound mention validation getters ---
+
+  it('isMember reflects the live member list per channel', () => {
+    ctx.learnMember('ch1', 'u1', 'Alice');
+    expect(ctx.isMember('ch1', 'u1')).toBe(true);
+    expect(ctx.isMember('ch1', 'ghost')).toBe(false);
+    // Isolation: a member of ch1 is not a member of ch2.
+    expect(ctx.isMember('ch2', 'u1')).toBe(false);
+  });
+
+  it('getNameToUidMap exposes the displayName→uid map for outbound @name', () => {
+    ctx.learnMember('ch1', 'u1', 'Alice');
+    const map = ctx.getNameToUidMap('ch1');
+    expect(map.get('Alice')).toBe('u1');
+    // Unknown channel → empty (not undefined).
+    expect(ctx.getNameToUidMap('nope').size).toBe(0);
+  });
+
   // --- refreshMembers ---
 
   it('refreshMembers throttles within 1h', async () => {
