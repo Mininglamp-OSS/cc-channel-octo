@@ -51,9 +51,18 @@ export const MAX_DISPLAY_NAME_LEN = 128;
  * truth \u2014 see below). The branch here is intentionally BROADER than that constant
  * (any `[Current message\u2026]` variant is escaped), so the two cannot drift into a
  * gap; a drift-guard test asserts the constant is matched by this regex.
+ *
+ * The leading `([^\S\r\n]*)` group absorbs indentation (spaces/tabs) before the
+ * `[`, mirroring ROLE_LABEL_RE. Without it `^\[` only matched COLUMN-0 markers, so
+ * a forged marker preceded by a single space/tab slipped through unescaped \u2014 and
+ * group-delta content can contain newlines (group-context.ts), so an attacker can
+ * plant an indented line. escapeSectionMarkers preserves the captured whitespace
+ * and backslash-escapes the `[` (#133 review: yujiawei P0). `Prior conversation
+ * history[^\]]*` is included so the first-turn/fallback history header
+ * (index.ts) is covered too \u2014 making the "cannot drift into a gap" claim hold.
  */
 const SECTION_MARKER_RE =
-  /^\[(Group context|Conversation history|Current message[^\]]*|Quoted message from [^\]]*|answered history|new messages|Recent group messages|Group instructions|older messages dropped|older turns dropped)\]/gim;
+  /^([^\S\r\n]*)\[(Group context|Conversation history|Prior conversation history[^\]]*|Current message[^\]]*|Quoted message from [^\]]*|answered history|new messages|Recent group messages|Group instructions|older messages dropped|older turns dropped)\]/gim;
 
 /**
  * The privileged "current message" anchor, emitted by assembleUserMessage
@@ -124,7 +133,12 @@ export function escapeRoleLabels(content: string): string {
  * `sanitizeForSystemPrompt` in agent-bridge.)
  */
 export function escapeSectionMarkers(text: string): string {
-  return normalizeLineBreaks(text).replace(SECTION_MARKER_RE, (match) => `\\${match}`);
+  // ws = captured leading indentation (preserved); inner = marker name. Escaping
+  // the `[` after the whitespace neutralizes both column-0 and indented forgeries.
+  return normalizeLineBreaks(text).replace(
+    SECTION_MARKER_RE,
+    (_m, ws: string, inner: string) => `${ws}\\[${inner}]`,
+  );
 }
 
 /**
