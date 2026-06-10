@@ -8,6 +8,36 @@ While the major version is `0`, minor releases may carry breaking changes.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-06-10
+
+The first npm-installable release. No runtime behavior change — packaging only.
+
+### Added
+
+- **Published to npm as `@mininglamp-oss/cc-channel-octo`** — install with
+  `npm install -g @mininglamp-oss/cc-channel-octo` or run via
+  `npx @mininglamp-oss/cc-channel-octo`. A new GitHub Actions workflow
+  (`npm-publish.yml`) publishes on a released tag (and via manual dispatch),
+  with OIDC build provenance; it refuses to publish unless the tag matches
+  `package.json`.
+- **`cc-channel-octo` CLI bin** — the package now exposes a `bin`, so a global
+  install / `npx` starts the gateway directly (no clone + build needed).
+
+### Fixed
+
+- **Gateway auto-start when launched via the installed bin** — the main-module
+  guard compared `import.meta.url` against `process.argv[1]` verbatim, but the
+  installed bin is a symlink under `node_modules/.bin/`, so the paths never
+  matched and `main()` never fired (the command exited silently). The guard now
+  canonicalizes both sides with `realpath`.
+
+### Changed
+
+- **`package.json` packaging metadata** — scoped name, a `files` allowlist
+  (so the compiled `dist/` is actually shipped despite being `.gitignore`d),
+  `publishConfig` (public + provenance), `repository` / `bugs` / `homepage`,
+  and a `prepublishOnly` build hook.
+
 ## [1.0.0] - 2026-06-10
 
 First stable release. Consolidates everything merged since `0.2.0` — the v0.3
@@ -313,6 +343,7 @@ hardening across the SSRF, prompt-injection, and protocol-DoS surfaces.
 Initial tagged baseline: text messaging, streaming output, SQLite session
 persistence, rate limiting, and the core security model.
 
+[1.0.1]: https://github.com/Mininglamp-OSS/cc-channel-octo/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Mininglamp-OSS/cc-channel-octo/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/Mininglamp-OSS/cc-channel-octo/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Mininglamp-OSS/cc-channel-octo/releases/tag/v0.1.0

@@ -1,6 +1,6 @@
 {
   "name": "@mininglamp-oss/cc-channel-octo",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Bridge Claude Code (via Claude Agent SDK) to Octo IM — independent Node.js gateway",
   "license": "Apache-2.0",
   "type": "module",
