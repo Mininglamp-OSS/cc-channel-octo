@@ -469,6 +469,112 @@ describe('routeAndHandle concurrency', () => {
   });
 });
 
+// ─── #141: Dispatch timeout ────────────────────────────────────────────────
+
+describe('dispatch timeout (#141)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('a hung handler does not block the next message on the same session', async () => {
+    const router = new SessionRouter(
+      makeConfig({ rateLimit: { maxPerMinute: 100 }, dispatchTimeoutMs: 50 }),
+      ROBOT_ID,
+    );
+    const completed: number[] = [];
+
+    // Message 1: handler never resolves (simulates a hung agent turn).
+    const p1 = router.routeAndHandle(
+      makeMsg({ message_id: '1', channel_type: ChannelType.DM, from_uid: 'same-user' }),
+      () => new Promise<void>(() => { /* never resolves */ }),
+    );
+
+    // Message 2: a normal fast handler on the SAME session. Without the
+    // timeout it would be blocked forever behind message 1's session lock.
+    const p2 = router.routeAndHandle(
+      makeMsg({ message_id: '2', channel_type: ChannelType.DM, from_uid: 'same-user' }),
+      async () => { completed.push(2); },
+    );
+
+    await Promise.all([p1, p2]);
+
+    // Message 2 ran — the lock was released after message 1 timed out.
+    expect(completed).toEqual([2]);
+  });
+
+  it('sends a single bounded apology on timeout', async () => {
+    const router = new SessionRouter(
+      makeConfig({ rateLimit: { maxPerMinute: 100 }, dispatchTimeoutMs: 30 }),
+      ROBOT_ID,
+    );
+
+    await router.routeAndHandle(
+      makeMsg({ message_id: '1', channel_type: ChannelType.DM, from_uid: 'u1' }),
+      () => new Promise<void>(() => { /* never resolves */ }),
+    );
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(sendMessage).mock.calls[0][0]).toMatchObject({
+      content: expect.stringContaining('处理超时'),
+    });
+  });
+
+  it('does not fire for a normal fast handler', async () => {
+    const router = new SessionRouter(
+      makeConfig({ rateLimit: { maxPerMinute: 100 }, dispatchTimeoutMs: 1000 }),
+      ROBOT_ID,
+    );
+    let ran = false;
+
+    await router.routeAndHandle(
+      makeMsg({ message_id: '1', channel_type: ChannelType.DM, from_uid: 'u1' }),
+      async () => { ran = true; },
+    );
+
+    expect(ran).toBe(true);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('disabled (0) runs the handler unguarded', async () => {
+    const router = new SessionRouter(
+      makeConfig({ rateLimit: { maxPerMinute: 100 }, dispatchTimeoutMs: 0 }),
+      ROBOT_ID,
+    );
+    let ran = false;
+
+    await router.routeAndHandle(
+      makeMsg({ message_id: '1', channel_type: ChannelType.DM, from_uid: 'u1' }),
+      async () => { ran = true; },
+    );
+
+    expect(ran).toBe(true);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('a rejecting handler does not wedge the session (next message still runs)', async () => {
+    const router = new SessionRouter(
+      makeConfig({ rateLimit: { maxPerMinute: 100 }, dispatchTimeoutMs: 1000 }),
+      ROBOT_ID,
+    );
+    const completed: number[] = [];
+
+    // Message 1: handler rejects fast (a real handler error, not a timeout).
+    await router.routeAndHandle(
+      makeMsg({ message_id: '1', channel_type: ChannelType.DM, from_uid: 'same-user' }),
+      async () => { throw new Error('boom'); },
+    );
+    // Message 2: same session — must still run (lock released, no timeout apology).
+    await router.routeAndHandle(
+      makeMsg({ message_id: '2', channel_type: ChannelType.DM, from_uid: 'same-user' }),
+      async () => { completed.push(2); },
+    );
+
+    expect(completed).toEqual([2]);
+    // A non-timeout error must NOT trigger the timeout apology.
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+});
+
 // ─── Q10: Message length limit ─────────────────────────────────────────────
 
 describe('Message length limit (Q10)', () => {
