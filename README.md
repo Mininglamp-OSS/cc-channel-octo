@@ -6,9 +6,9 @@
 
 <p align="center">
   <a href="https://github.com/Mininglamp-OSS/cc-channel-octo/actions"><img src="https://github.com/Mininglamp-OSS/cc-channel-octo/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://www.npmjs.com/package/cc-channel-octo"><img src="https://img.shields.io/npm/v/cc-channel-octo" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/@mininglamp-oss/cc-channel-octo"><img src="https://img.shields.io/npm/v/@mininglamp-oss/cc-channel-octo" alt="npm version"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
-  <img src="https://img.shields.io/node/v/cc-channel-octo" alt="Node.js version">
+  <img src="https://img.shields.io/node/v/@mininglamp-oss/cc-channel-octo" alt="Node.js version">
 </p>
 
 ---
@@ -37,6 +37,23 @@ Users talk to a bot in Octo (DM or group @mention). The bot sends messages to Cl
 - `ANTHROPIC_API_KEY` set in your environment
 
 ### Install & Run
+
+**Option A — install from npm (recommended):**
+
+```bash
+npm install -g @mininglamp-oss/cc-channel-octo
+# or run without installing:
+npx @mininglamp-oss/cc-channel-octo
+```
+
+This installs the `cc-channel-octo` command (prebuilt — no compile step). Skip
+straight to creating the config files below, then run `cc-channel-octo`.
+
+To use it as a library instead, `npm install @mininglamp-oss/cc-channel-octo`
+and import from it; the Claude Agent SDK is a peer dependency, so install
+`@anthropic-ai/claude-agent-sdk` alongside it.
+
+**Option B — build from source:**
 
 ```bash
 git clone https://github.com/Mininglamp-OSS/cc-channel-octo.git
@@ -94,7 +111,9 @@ Per-bot `~/.cc-channel-octo/default/config.json`:
 Start the gateway:
 
 ```bash
-npm start
+npm start                      # from source (Option B)
+# or, if installed from npm (Option A):
+cc-channel-octo
 ```
 
 The bot is now online. Send it a DM or @mention it in a group.
@@ -532,7 +551,7 @@ src/
     └── types.ts        # Protocol type definitions
 ```
 
-## Known Limitations (v0.2)
+## Known Limitations (v1.0)
 
 - **Per-session workspace isolation** — Each session gets its own SHA-256 hex sandbox under the bot's `workspace/` (`<baseDir>/<botId>/workspace`), partitioned by the same key as conversation history — **per DM peer** and **per group channel** (a whole group shares one sandbox by design). Idle sandboxes (>7d) are auto-cleaned every 6h. Note: it separates sessions from each other but does not confine a session to its directory (absolute-path reads via Bash/Read remain possible) — see the Security Model section.
 - **Groups are a shared workspace** — All members of a group share one history, one sandbox, and one auto-memory store (the session key is the channel id). There is **no member-to-member isolation within a group**; DM sessions remain private per peer.
@@ -544,9 +563,8 @@ src/
 | Version | Scope |
 |---------|-------|
 | **v0.1** | Text messaging, streaming, session persistence, rate limiting, security model |
-| **v0.2** *(released)* | Media reception & sending (image/file/RichText), @mention, group context, per-session `cwdBase` isolation, self-hosted gateway, SSRF/prompt-injection hardening |
-| **v0.3** *(merged, unreleased)* | Slash commands, tool progress, multi-bot, v2 Session API |
-| **v1.0** *(merged, unreleased)* | GROUP.md per-group instructions |
+| **v0.2** | Media reception & sending (image/file/RichText), @mention, group context, per-session `cwdBase` isolation, self-hosted gateway, SSRF/prompt-injection hardening |
+| **v1.0** *(current)* | Slash commands, tool progress, multi-bot, SDK-session-owned history, GROUP.md per-group instructions, scheduled tasks (cron), skill-as-data external tooling, JSON-only config |
 
 ## Contributing
 

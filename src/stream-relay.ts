@@ -165,6 +165,7 @@ export class StreamRelay {
     botToken: string,
     maxResponseChars: number = DEFAULT_MAX_RESPONSE_CHARS,
     memberMap?: Map<string, string>,
+    isValidUid?: (uid: string) => boolean,
   ): Promise<void> {
     // --- Typing heartbeat ---
     const typingParams = { apiUrl, botToken, channelId, channelType };
@@ -219,7 +220,7 @@ export class StreamRelay {
           finalContent,
           mentionEntities: globalEntities,
           mentionAll,
-        } = resolveMentions(accumulated, memberMap);
+        } = resolveMentions(accumulated, memberMap, isValidUid);
 
         const protectedRanges = globalEntities.map(e => ({
           start: e.offset,

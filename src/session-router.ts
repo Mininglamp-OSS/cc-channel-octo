@@ -128,10 +128,76 @@ export class SessionRouter {
     return this.withSessionLock(key, async () => {
       const result = await this.processMessage(msg, key);
       if (result && result.shouldProcess) {
-        await handler(result);
+        await this.runHandlerWithTimeout(result, handler);
       }
       return result;
     });
+  }
+
+  /**
+   * #141: Run the handler under a dispatch timeout so a hung turn (a stuck SDK
+   * query, a wedged tool subprocess, a stalled stream) cannot block the session
+   * forever. The handler runs inside withSessionLock — if it never returns, the
+   * lock's gate never resolves and EVERY subsequent message for this session is
+   * stuck permanently (silent). Racing the handler against a timeout guarantees
+   * the lock releases.
+   *
+   * Scope (mirrors openclaw #75): we do NOT cancel the in-flight turn — the SDK
+   * query keeps running to completion in the background; we only unblock the
+   * queue. Worst case is a delayed real reply arriving after the apology.
+   *
+   * `timeoutError` is a per-invocation Error so the catch identifies OUR timeout
+   * by reference equality, never by string comparison (a same-text upstream
+   * error must not be misclassified).
+   */
+  private async runHandlerWithTimeout(
+    result: RouteResult,
+    handler: (result: RouteResult) => Promise<void>,
+  ): Promise<void> {
+    const timeoutMs = this.config.dispatchTimeoutMs;
+    if (!timeoutMs || timeoutMs <= 0) {
+      // Timeout disabled — run unguarded.
+      await handler(result);
+      return;
+    }
+
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const timeoutError = new Error(`dispatch timed out after ${timeoutMs}ms`);
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => reject(timeoutError), timeoutMs);
+    });
+
+    // The handler keeps running after a timeout (we don't cancel the in-flight
+    // turn — see scope note above). Once the race settles on timeoutError, that
+    // orphaned promise is no longer awaited; attach a no-op catch so a late
+    // rejection from a handler that doesn't self-contain its errors can't surface
+    // as an unhandledRejection. Today's caller (index.ts) is fully try/caught, so
+    // this is defense-in-depth for future callers.
+    const handlerPromise = handler(result);
+    handlerPromise.catch(() => { /* swallow late rejection after timeout */ });
+
+    try {
+      await Promise.race([handlerPromise, timeoutPromise]);
+    } catch (err) {
+      if (err === timeoutError) {
+        console.warn(
+          `session-router: dispatch hung past ${timeoutMs}ms, releasing session lock (session=${result.sessionKey})`,
+        );
+        // Bounded apology — replySafe swallows its own errors, and the
+        // underlying sendMessage in octo/api.ts is itself time-bounded, so a
+        // sick Octo API can't re-hang us here.
+        await this.replySafe(result.message, '⚠️ 处理超时，请稍后重试。');
+        return; // swallow: the lock releases, the queue advances
+      }
+      // A real handler error — index.ts's handler already catches and replies
+      // internally, so reaching here is unexpected. Swallow to keep the lock
+      // release path identical (never let an error wedge the queue).
+      console.error(
+        `session-router: handler error (session=${result.sessionKey}): ${String(err)}`,
+      );
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+    }
   }
 
   async route(msg: BotMessage): Promise<RouteResult | null> {
