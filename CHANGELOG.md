@@ -8,6 +8,15 @@ While the major version is `0`, minor releases may carry breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- **Process-supervisor CLI** — `cc-channel-octo start|stop|restart|status`
+  backgrounds the gateway, tracks a process-wide PID file, and stops it
+  gracefully (SIGTERM → SIGKILL on timeout). The `bin` now points at the
+  supervisor (`dist/cli.js`). Backward compatible: a bare `cc-channel-octo`
+  (or `npx @mininglamp-oss/cc-channel-octo`) still starts the gateway in the
+  foreground, same as before.
+
 ## [1.0.1] - 2026-06-10
 
 The first npm-installable release. No runtime behavior change — packaging only.

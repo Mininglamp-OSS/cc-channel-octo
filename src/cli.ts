@@ -230,8 +230,12 @@ export async function run(argv: string[], baseDir?: string): Promise<number> {
       console.log(USAGE);
       return 0;
     case '':
-      console.error(USAGE);
-      return 2;
+      // Backward compat: bare `cc-channel-octo` (e.g. `npx cc-channel-octo`)
+      // runs the gateway in the foreground, matching the pre-supervisor bin
+      // (`dist/index.js`) behavior documented in README/CHANGELOG. Daemon-style
+      // process management is opt-in via the `start`/`stop`/`restart`/`status`
+      // subcommands.
+      return cmdStart(paths, true);
     default:
       console.error(`cc-channel-octo: unknown command '${cmd}'\n`);
       console.error(USAGE);
