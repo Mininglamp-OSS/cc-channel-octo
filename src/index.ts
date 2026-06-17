@@ -206,8 +206,9 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   // shutdown.
   let cronStore: CronStore | undefined;
   let cronScheduler: CronScheduler | undefined;
-  // Set once register() has acquired the gateway lock; the failure-cleanup catch
-  // calls it to release that lock if a later step throws before return.
+  // Set right after gateway construction; releaseLock is nonce-guarded so it is
+  // a no-op until register() actually acquires the lock, and the catch can call
+  // it to release that lock if a later step throws before return.
   let releaseGatewayLock: (() => void) | undefined;
 
   // Multi-bot mode no longer exits the process when one bot fails to start, so
