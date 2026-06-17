@@ -28,34 +28,53 @@
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `export function readVersion(): string` — returns the package version string, or `'unknown'` if `package.json` can't be read/parsed or has no string `version`.
+- Produces:
+  - `export function parseVersion(raw: string): string` — pure (no I/O); extracts the version from raw package.json text, returns `'unknown'` if the text is malformed or has no non-empty string `version`.
+  - `export function readVersion(): string` — reads the package's own `package.json` and delegates to `parseVersion`; returns `'unknown'` if the file can't be read.
 
 **Why this resolves correctly:** both `src/cli.ts` and `dist/cli.js` are direct children of the package root, so `new URL('../package.json', import.meta.url)` points at the real `package.json` in test (vitest runs the TS source) and in production (compiled `dist`).
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `src/__tests__/cli.test.ts`. First extend the import line:
+Add to `src/__tests__/cli.test.ts`. First extend the existing `from 'node:fs'` import to include `readFileSync`, and the `from '../cli.js'` import to include `readVersion` and `parseVersion` (do NOT import `run` yet — it's unused until Task 2, and `eslint --max-warnings 0` fails on an unused import):
 
 ```ts
+// node:fs import becomes:
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+// cli.js import adds readVersion, parseVersion:
 import {
-  parseArgs, isAlive, readPid, writePid, removePid, resolveSupervisorPaths, readVersion, run,
+  parseArgs, isAlive, readPid, writePid, removePid, resolveSupervisorPaths,
+  readVersion, parseVersion,
 } from '../cli.js';
-import { readFileSync } from 'node:fs';
 ```
 
 Then append:
 
 ```ts
+describe('parseVersion', () => {
+  it('extracts a string version', () => {
+    expect(parseVersion('{"version":"1.2.3"}')).toBe('1.2.3');
+  });
+  it('falls back to "unknown" on malformed JSON', () => {
+    expect(parseVersion('not json')).toBe('unknown');
+  });
+  it('falls back to "unknown" when version is missing', () => {
+    expect(parseVersion('{"name":"x"}')).toBe('unknown');
+  });
+  it('falls back to "unknown" when version is not a string', () => {
+    expect(parseVersion('{"version":123}')).toBe('unknown');
+  });
+  it('falls back to "unknown" on an empty version string', () => {
+    expect(parseVersion('{"version":""}')).toBe('unknown');
+  });
+});
+
 describe('readVersion', () => {
-  it('returns the version from package.json', () => {
+  it('returns the version from the real package.json', () => {
     const pkg = JSON.parse(
       readFileSync(new URL('../../package.json', import.meta.url), 'utf-8'),
     ) as { version: string };
     expect(readVersion()).toBe(pkg.version);
-  });
-
-  it('returns a non-empty semver-shaped string', () => {
-    expect(readVersion()).toMatch(/^\d+\.\d+\.\d+/);
   });
 });
 ```
@@ -64,22 +83,21 @@ describe('readVersion', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx vitest run src/__tests__/cli.test.ts -t readVersion`
-Expected: FAIL — `readVersion is not exported` / `is not a function`.
+Run: `npx vitest run src/__tests__/cli.test.ts -t "parseVersion|readVersion"`
+Expected: FAIL — `parseVersion`/`readVersion` not exported.
 
 - [ ] **Step 3: Write minimal implementation**
 
-In `src/cli.ts`, add `readFileSync` is already imported. Add after `resolveSupervisorPaths`:
+In `src/cli.ts`, `readFileSync` is already imported. Add after `resolveSupervisorPaths`:
 
 ```ts
 /**
- * The package version, read at runtime from package.json (a sibling of the
- * package root, one level up from this module in both src/ and dist/). Returns
- * 'unknown' rather than throwing if the file is missing or malformed.
+ * Extract a package version from raw package.json text. Returns 'unknown'
+ * rather than throwing if the text is malformed or has no non-empty string
+ * `version`. Pure (no I/O) so the fallback paths are unit-testable.
  */
-export function readVersion(): string {
+export function parseVersion(raw: string): string {
   try {
-    const raw = readFileSync(new URL('../package.json', import.meta.url), 'utf-8');
     const pkg: unknown = JSON.parse(raw);
     if (pkg && typeof pkg === 'object' && 'version' in pkg) {
       const v = (pkg as { version: unknown }).version;
@@ -90,12 +108,25 @@ export function readVersion(): string {
   }
   return 'unknown';
 }
+
+/**
+ * The package version, read at runtime from package.json — which lives at the
+ * package root, one level up from this module in both src/ (src/cli.ts) and the
+ * compiled output (dist/cli.js). Returns 'unknown' if the file can't be read.
+ */
+export function readVersion(): string {
+  try {
+    return parseVersion(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
+  } catch {
+    return 'unknown';
+  }
+}
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx vitest run src/__tests__/cli.test.ts -t readVersion`
-Expected: PASS (both cases).
+Run: `npx vitest run src/__tests__/cli.test.ts -t "parseVersion|readVersion"`
+Expected: PASS (all six cases).
 
 - [ ] **Step 5: Commit**
 
@@ -118,11 +149,10 @@ git commit -m "feat(cli): add readVersion helper reading package.json at runtime
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `src/__tests__/cli.test.ts`:
+In `src/__tests__/cli.test.ts`, add `run` to the `from '../cli.js'` import and `vi` to the existing `from 'vitest'` import, then append the block:
 
 ```ts
-import { vi } from 'vitest';
-
+// from '../cli.js' adds run; from 'vitest' adds vi.
 describe('run version command', () => {
   it.each(['version', '--version', '-v'])('prints bare version and exits 0 for %s', async (arg) => {
     const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -261,7 +291,7 @@ git commit -m "docs(changelog): note version command"
 
 ## Self-Review
 
-- **Spec coverage:** bare-version output (Task 2 Step 1 asserts `console.log` called with bare `readVersion()`), three triggers `version`/`--version`/`-v` (Task 2 `it.each`), runtime read of package.json (Task 1), `'unknown'` fallback (Task 1 implementation), USAGE banner carries version (Task 2 Step 3). All covered.
+- **Spec coverage:** bare-version output (Task 2 Step 1 asserts `console.log` called with bare `readVersion()`), three triggers `version`/`--version`/`-v` (Task 2 `it.each`), runtime read of package.json (Task 1 `readVersion`), `'unknown'` fallback (Task 1 `parseVersion` tests cover malformed/missing/non-string/empty), USAGE banner carries version (Task 2 Step 3). All covered.
 - **Placeholder scan:** no TBD/TODO; all code shown in full.
-- **Type consistency:** `readVersion(): string` defined Task 1, consumed Task 2 — signature matches. JSON parsed as `unknown` then narrowed (no `any`).
+- **Type consistency:** `parseVersion(raw: string): string` and `readVersion(): string` defined Task 1, consumed Task 2 — signatures match. JSON parsed as `unknown` then narrowed (no `any`). `run` imported in Task 2 (not Task 1) to avoid an unused-import lint failure.
 - **Path note:** `../package.json` inside `cli.ts` (src/ or dist/ → root); `../../package.json` inside the test file (src/__tests__/ → root). Both verified against the package layout.
