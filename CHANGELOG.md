@@ -16,6 +16,9 @@ While the major version is `0`, minor releases may carry breaking changes.
   supervisor (`dist/cli.js`). Backward compatible: a bare `cc-channel-octo`
   (or `npx @mininglamp-oss/cc-channel-octo`) still starts the gateway in the
   foreground, same as before.
+- **`version` / `--version` / `-v`** — prints the package version (read at
+  runtime from `package.json`), and the `--help` banner now carries the version
+  on its first line.
 
 ## [1.0.1] - 2026-06-10
 

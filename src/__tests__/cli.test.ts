@@ -6,11 +6,14 @@
  * exercised here — they fork a real process and belong in an integration test.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseArgs, isAlive, readPid, writePid, removePid, resolveSupervisorPaths } from '../cli.js';
+import {
+  parseArgs, isAlive, readPid, writePid, removePid, resolveSupervisorPaths,
+  readVersion, parseVersion, run,
+} from '../cli.js';
 
 describe('parseArgs', () => {
   it('defaults: no flags', () => {
@@ -100,5 +103,45 @@ describe('resolveSupervisorPaths', () => {
   it('defaults baseDir to the global config directory', () => {
     const p = resolveSupervisorPaths();
     expect(p.pidFile).toMatch(/\.cc-channel-octo\/cc-channel-octo\.pid$/);
+  });
+});
+
+describe('parseVersion', () => {
+  it('extracts a string version', () => {
+    expect(parseVersion('{"version":"1.2.3"}')).toBe('1.2.3');
+  });
+  it('falls back to "unknown" on malformed JSON', () => {
+    expect(parseVersion('not json')).toBe('unknown');
+  });
+  it('falls back to "unknown" when version is missing', () => {
+    expect(parseVersion('{"name":"x"}')).toBe('unknown');
+  });
+  it('falls back to "unknown" when version is not a string', () => {
+    expect(parseVersion('{"version":123}')).toBe('unknown');
+  });
+  it('falls back to "unknown" on an empty version string', () => {
+    expect(parseVersion('{"version":""}')).toBe('unknown');
+  });
+});
+
+describe('readVersion', () => {
+  it('returns the version from the real package.json', () => {
+    const pkg = JSON.parse(
+      readFileSync(new URL('../../package.json', import.meta.url), 'utf-8'),
+    ) as { version: string };
+    expect(readVersion()).toBe(pkg.version);
+  });
+});
+
+describe('run version command', () => {
+  it.each(['version', '--version', '-v'])('prints bare version and exits 0 for %s', async (arg) => {
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const code = await run([arg]);
+      expect(code).toBe(0);
+      expect(spy).toHaveBeenCalledWith(readVersion());
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
