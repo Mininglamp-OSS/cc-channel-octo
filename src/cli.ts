@@ -50,6 +50,8 @@ export interface ParsedArgs {
   cmd: string;
   foreground: boolean;
   timeoutMs: number;
+  /** Positional version target for `upgrade` (e.g. `upgrade 1.2.3`); undefined → latest. */
+  version?: string;
 }
 
 /**
@@ -87,15 +89,19 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const [cmd = '', ...rest] = argv;
   let foreground = false;
   let timeoutSec = 10;
+  let version: string | undefined;
   for (const a of rest) {
     if (a === '--foreground' || a === '-f') {
       foreground = true;
     } else if (a.startsWith('--timeout=')) {
       const n = Number.parseInt(a.slice('--timeout='.length), 10);
       if (Number.isFinite(n) && n > 0) timeoutSec = n;
+    } else if (!a.startsWith('-') && version === undefined) {
+      // First positional token (e.g. `upgrade 1.2.3`).
+      version = a;
     }
   }
-  return { cmd, foreground, timeoutMs: timeoutSec * 1000 };
+  return { cmd, foreground, timeoutMs: timeoutSec * 1000, version };
 }
 
 /**
@@ -228,6 +234,60 @@ function cmdStatus(paths: SupervisorPaths): number {
   return 0;
 }
 
+/** npm package name installed globally for the gateway. */
+const NPM_PKG = '@mininglamp-oss/cc-channel-octo';
+/**
+ * Semantic-version whitelist. The version reaches us from the daemon → fleet
+ * upgrade order (an untrusted boundary) and is interpolated into an npm spec,
+ * so reject anything outside `[0-9A-Za-z.-+]` to prevent argument/shell
+ * injection even though we spawn npm without a shell.
+ */
+const VERSION_RE = /^[0-9A-Za-z.\-+]+$/;
+
+/**
+ * Build the `npm install -g <pkg>@<version>` argument vector. A blank/omitted
+ * version installs `@latest`. Pure (no I/O) so the injection guard is unit
+ * testable. Throws on an unsafe version string.
+ */
+export function buildUpgradeArgs(version?: string): string[] {
+  const v = version && version.trim() ? version.trim() : 'latest';
+  if (v !== 'latest' && !VERSION_RE.test(v)) {
+    throw new Error(`unsafe version: ${v}`);
+  }
+  return ['install', '-g', `${NPM_PKG}@${v}`];
+}
+
+/**
+ * Self-update: `npm install -g @mininglamp-oss/cc-channel-octo@<version>` then
+ * restart the gateway so the new code is live. Invoked by the daemon to drive
+ * a fleet upgrade order (mirrors openclaw's daemon-driven plugin install).
+ */
+async function cmdUpgrade(paths: SupervisorPaths, timeoutMs: number, version?: string): Promise<number> {
+  let args: string[];
+  try {
+    args = buildUpgradeArgs(version);
+  } catch (err) {
+    console.error(`cc-channel-octo: ${(err as Error).message}`);
+    return 2;
+  }
+  console.log(`cc-channel-octo: upgrading via npm ${args.join(' ')}`);
+  const code = await new Promise<number>((resolve) => {
+    const child = spawn('npm', args, { stdio: 'inherit', env: process.env });
+    child.on('error', (err) => {
+      console.error(`cc-channel-octo: failed to spawn npm: ${err.message}`);
+      resolve(1);
+    });
+    child.on('exit', (c) => resolve(c ?? 1));
+  });
+  if (code !== 0) {
+    console.error(`cc-channel-octo: npm install failed (exit ${code})`);
+    return code;
+  }
+  // Restart so the freshly installed code is running.
+  await cmdStop(paths, timeoutMs);
+  return cmdStart(paths, false);
+}
+
 function usage(): string {
   return `cc-channel-octo ${readVersion()} — gateway process supervisor
 
@@ -236,6 +296,7 @@ Usage:
   cc-channel-octo stop [--timeout=<s>]   gracefully stop (SIGTERM, then SIGKILL)
   cc-channel-octo restart                stop (if running) then start
   cc-channel-octo status                 show running state
+  cc-channel-octo upgrade [<version>]    npm install -g the gateway (default latest) then restart
   cc-channel-octo version                print the version
 
 Paths (under ~/.cc-channel-octo):
@@ -246,7 +307,7 @@ POSIX only (macOS/Linux). On Windows, run under a service manager.`;
 }
 
 export async function run(argv: string[], baseDir?: string): Promise<number> {
-  const { cmd, foreground, timeoutMs } = parseArgs(argv);
+  const { cmd, foreground, timeoutMs, version } = parseArgs(argv);
   const paths = resolveSupervisorPaths(baseDir);
   switch (cmd) {
     case 'start':
@@ -258,6 +319,8 @@ export async function run(argv: string[], baseDir?: string): Promise<number> {
       return cmdStart(paths, false);
     case 'status':
       return cmdStatus(paths);
+    case 'upgrade':
+      return cmdUpgrade(paths, timeoutMs, version);
     case 'version':
     case '--version':
     case '-v':
