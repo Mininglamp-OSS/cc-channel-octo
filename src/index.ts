@@ -58,12 +58,7 @@ async function main(): Promise<void> {
   // ready: startBot() registers over REST (gets botId) and installs the message
   // handler, but does NOT open the socket. We then cross-register sibling bot
   // ids, and only AFTER that connect every socket.
-  // Start each bot's pipeline. startBot() acquires the gateway.lock, opens the
-  // SQLite store, and arms the cwd-cleanup interval BEFORE any socket connects —
-  // so if one bot's startBot() rejects (bad token, taken lock), the bots that
-  // already succeeded must be torn down, or their locks/stores/intervals leak.
-  // Promise.all would discard the resolved stacks on first rejection, so settle
-  // all and clean up the successful ones before rethrowing.
+  //
   // startBot() acquires the gateway.lock, opens the SQLite store, and arms the
   // cwd-cleanup interval; on its own failure it releases those (see startBot's
   // try/catch), so a rejected bot leaves nothing behind. Settle all, then apply
@@ -98,9 +93,17 @@ async function main(): Promise<void> {
   }
 
   // Handlers are wired and siblings registered — now open every socket. From
-  // this point inbound messages are dispatched, never ACK'd-and-dropped. Same
-  // resilience policy as the register phase: a bot whose socket fails to open is
-  // shut down and dropped, the rest keep running; only fatal when none connect.
+  // this point inbound messages are dispatched, never ACK'd-and-dropped.
+  //
+  // connect() is synchronous: it opens the WebSocket (fire-and-forget) and
+  // starts services. The try/catch here isolates a *synchronous* connect
+  // failure (e.g. an insecure ws:// URL rejected by isAllowedWsUrl, or a
+  // createSocket error) to that one bot — the others keep running. A *later*
+  // async WS drop is NOT surfaced here; it's handled by the gateway's own
+  // reconnect loop and never kills the process. The real auth gate is the
+  // register phase above (bad bot tokens fail there over REST and are isolated);
+  // by here every bot holds a freshly minted im_token, so connect failures are
+  // transport/transient, not per-bot auth.
   const connected: BotStack[] = [];
   for (const s of stacks) {
     try {
@@ -203,12 +206,15 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   // shutdown.
   let cronStore: CronStore | undefined;
   let cronScheduler: CronScheduler | undefined;
+  // Set once register() has acquired the gateway lock; the failure-cleanup catch
+  // calls it to release that lock if a later step throws before return.
+  let releaseGatewayLock: (() => void) | undefined;
 
   // Multi-bot mode no longer exits the process when one bot fails to start, so
   // a failed startBot() must release the durable resources it already acquired
-  // (the cwd-cleanup timer + the sqlite handle) instead of leaking them for the
-  // lifetime of the surviving bots. The gateway releases its own lock in
-  // register()'s failure path, so it isn't repeated here.
+  // (the cwd-cleanup timer, the sqlite handle, and — once register() acquired
+  // it — the per-bot gateway lock) instead of leaking them for the lifetime of
+  // the surviving bots.
   try {
     store.init();
     const cleaned = store.cleanExpired();
@@ -236,6 +242,7 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
     // --- Gateway. In multi-bot mode main() owns shutdown signals, so the gateway
     // must NOT register its own (N gateways racing process.exit). ---
     const gateway = new OctoGateway(config, { handleSignals: !multi });
+    releaseGatewayLock = () => gateway.releaseLock();
     // Phase 1: register over REST (gets botId) — does NOT open the socket yet, so
     // no message can arrive before the handler below is installed.
     await gateway.register();
@@ -345,6 +352,9 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
     // them in multi-bot mode (the surviving bots keep the process alive).
     clearInterval(cwdCleanupTimer);
     cronScheduler?.stop();
+    // register() releases its own lock when IT fails; this covers the window
+    // where register() succeeded (lock held) but a later step threw.
+    releaseGatewayLock?.();
     try {
       store.close();
     } catch {

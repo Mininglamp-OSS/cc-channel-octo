@@ -269,7 +269,12 @@ export class OctoGateway {
     }
   }
 
-  private releaseLock(): void {
+  /**
+   * Release the per-bot startup lock if we still hold it. Best-effort and
+   * idempotent (nonce-guarded), so it is safe to call from a partial-startup
+   * cleanup path even if connect()/services were never started.
+   */
+  releaseLock(): void {
     try {
       if (existsSync(this.lockFilePath)) {
         const content = readFileSync(this.lockFilePath, 'utf-8').trim();
