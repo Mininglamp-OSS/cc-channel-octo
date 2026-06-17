@@ -228,19 +228,22 @@ function cmdStatus(paths: SupervisorPaths): number {
   return 0;
 }
 
-const USAGE = `cc-channel-octo — gateway process supervisor
+function usage(): string {
+  return `cc-channel-octo ${readVersion()} — gateway process supervisor
 
 Usage:
   cc-channel-octo start [--foreground]   start the gateway in the background
   cc-channel-octo stop [--timeout=<s>]   gracefully stop (SIGTERM, then SIGKILL)
   cc-channel-octo restart                stop (if running) then start
   cc-channel-octo status                 show running state
+  cc-channel-octo version                print the version
 
 Paths (under ~/.cc-channel-octo):
   pid : cc-channel-octo.pid
   log : logs/gateway.log
 
 POSIX only (macOS/Linux). On Windows, run under a service manager.`;
+}
 
 export async function run(argv: string[], baseDir?: string): Promise<number> {
   const { cmd, foreground, timeoutMs } = parseArgs(argv);
@@ -255,10 +258,15 @@ export async function run(argv: string[], baseDir?: string): Promise<number> {
       return cmdStart(paths, false);
     case 'status':
       return cmdStatus(paths);
+    case 'version':
+    case '--version':
+    case '-v':
+      console.log(readVersion());
+      return 0;
     case 'help':
     case '--help':
     case '-h':
-      console.log(USAGE);
+      console.log(usage());
       return 0;
     case '':
       // Backward compat: bare `cc-channel-octo` (e.g. `npx cc-channel-octo`)
@@ -269,7 +277,7 @@ export async function run(argv: string[], baseDir?: string): Promise<number> {
       return cmdStart(paths, true);
     default:
       console.error(`cc-channel-octo: unknown command '${cmd}'\n`);
-      console.error(USAGE);
+      console.error(usage());
       return 2;
   }
 }

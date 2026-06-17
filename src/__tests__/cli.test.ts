@@ -6,13 +6,13 @@
  * exercised here — they fork a real process and belong in an integration test.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   parseArgs, isAlive, readPid, writePid, removePid, resolveSupervisorPaths,
-  readVersion, parseVersion,
+  readVersion, parseVersion, run,
 } from '../cli.js';
 
 describe('parseArgs', () => {
@@ -130,5 +130,18 @@ describe('readVersion', () => {
       readFileSync(new URL('../../package.json', import.meta.url), 'utf-8'),
     ) as { version: string };
     expect(readVersion()).toBe(pkg.version);
+  });
+});
+
+describe('run version command', () => {
+  it.each(['version', '--version', '-v'])('prints bare version and exits 0 for %s', async (arg) => {
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const code = await run([arg]);
+      expect(code).toBe(0);
+      expect(spy).toHaveBeenCalledWith(readVersion());
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
