@@ -196,9 +196,12 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   cwdCleanupTimer.unref();
 
   // --- Database (per-bot dataDir → no cross-bot history) ---
+  // createAdapter / new SessionStore are created INSIDE the try below, so a
+  // SQLite open failure (inaccessible dataDir, locked db, …) is caught and the
+  // cwd-cleanup timer is released — otherwise a skipped bot would leak the
+  // interval for the surviving gateway's lifetime.
   const dbPath = join(config.dataDir, 'cc-octo.db');
-  const adapter = createAdapter(dbPath);
-  const store = new SessionStore(adapter);
+  let storeForCleanup: SessionStore | undefined;
 
   // #115: cron handles (hoisted so the failure-cleanup catch below can stop the
   // scheduler). Store is shared by the per-turn cron tool (writes) and the
@@ -217,6 +220,9 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   // it — the per-bot gateway lock) instead of leaking them for the lifetime of
   // the surviving bots.
   try {
+    const adapter = createAdapter(dbPath);
+    const store = new SessionStore(adapter);
+    storeForCleanup = store;
     store.init();
     const cleaned = store.cleanExpired();
     if (cleaned > 0) {
@@ -357,7 +363,7 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
     // where register() succeeded (lock held) but a later step threw.
     releaseGatewayLock?.();
     try {
-      store.close();
+      storeForCleanup?.close();
     } catch {
       /* best effort — store may not have opened */
     }
