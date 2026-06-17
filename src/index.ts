@@ -64,17 +64,24 @@ async function main(): Promise<void> {
   // already succeeded must be torn down, or their locks/stores/intervals leak.
   // Promise.all would discard the resolved stacks on first rejection, so settle
   // all and clean up the successful ones before rethrowing.
+  // startBot() acquires the gateway.lock, opens the SQLite store, and arms the
+  // cwd-cleanup interval; on its own failure it releases those (see startBot's
+  // try/catch), so a rejected bot leaves nothing behind. Settle all, then apply
+  // the multi-bot resilience policy: skip the bots that failed, keep the ones
+  // that came up, and only treat startup as fatal when NONE start. (Single-bot
+  // mode has one entry, so "none started" == that bot failed → fatal, same as
+  // the old fail-fast behavior.) This stops one bot's bad token / held lock from
+  // taking the whole gateway — and every sibling bot — offline.
   const startResults = await Promise.allSettled(botConfigs.map((c) => startBot(c, multi)));
-  const stacks: BotStack[] = [];
-  let startError: unknown;
-  for (const r of startResults) {
-    if (r.status === 'fulfilled') stacks.push(r.value);
-    else startError = startError ?? r.reason;
+  const { stacks, failures } = partitionStartResults(startResults, botConfigs);
+  for (const f of failures) {
+    const reason = f.reason instanceof Error ? f.reason.message : String(f.reason);
+    console.error(`[cc-channel-octo] bot "${f.id}" failed to start, skipping: ${reason}`);
   }
-  if (startError) {
-    console.error('[cc-channel-octo] Startup failed; cleaning up bots that did start...');
-    await Promise.allSettled(stacks.map((s) => s.shutdown()));
-    throw startError;
+  if (stacks.length === 0) {
+    // Nothing came up — surface the first failure and exit (process supervisor
+    // / operator restarts once the underlying cause is fixed).
+    throw failures[0]?.reason ?? new Error('no bots started');
   }
 
   // Multi-bot loop guard: make every router aware of ALL bot ids in this
@@ -91,43 +98,74 @@ async function main(): Promise<void> {
   }
 
   // Handlers are wired and siblings registered — now open every socket. From
-  // this point inbound messages are dispatched, never ACK'd-and-dropped. Awaited
-  // so a connection failure surfaces as a startup error. On a partial failure
-  // (e.g. one bot's lock is held), shut down the stacks that did start so we
-  // don't leave open sockets / stores dangling before the fatal exit.
+  // this point inbound messages are dispatched, never ACK'd-and-dropped. Same
+  // resilience policy as the register phase: a bot whose socket fails to open is
+  // shut down and dropped, the rest keep running; only fatal when none connect.
   const connected: BotStack[] = [];
-  try {
-    for (const s of stacks) {
+  for (const s of stacks) {
+    try {
       await s.connect();
       connected.push(s);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      console.error(`[cc-channel-octo] bot "${s.botId}" failed to connect, skipping: ${reason}`);
+      await s.shutdown().catch(() => {});
     }
-  } catch (err) {
-    console.error('[cc-channel-octo] Startup failed during socket connect; cleaning up...');
-    await Promise.allSettled(connected.map((s) => s.shutdown()));
-    throw err;
+  }
+  if (connected.length === 0) {
+    throw new Error('no bots connected');
   }
 
-  // Wire a single process-wide shutdown that drains every bot, so N gateways
-  // don't each call process.exit. The per-gateway signal handlers are disabled
-  // in multi-bot mode (handleSignals=false); we own the signals here.
+  // Wire a single process-wide shutdown that drains every LIVE bot, so N
+  // gateways don't each call process.exit. The per-gateway signal handlers are
+  // disabled in multi-bot mode (handleSignals=false); we own the signals here.
   if (multi) {
     const shutdownAll = async (signal: string): Promise<void> => {
-      console.log(`[cc-channel-octo] Received ${signal}, shutting down ${stacks.length} bots...`);
-      await Promise.allSettled(stacks.map((s) => s.shutdown()));
+      console.log(`[cc-channel-octo] Received ${signal}, shutting down ${connected.length} bots...`);
+      await Promise.allSettled(connected.map((s) => s.shutdown()));
       process.exit(0);
     };
     process.once('SIGINT', () => void shutdownAll('SIGINT'));
     process.once('SIGTERM', () => void shutdownAll('SIGTERM'));
   }
 
-  console.log('[cc-channel-octo] Ready — listening for messages');
+  console.log(`[cc-channel-octo] Ready — listening for messages (${connected.length} bot(s))`);
 }
 
-interface BotStack {
+export interface BotStack {
   botId: string;
   router: SessionRouter;
   connect: () => Promise<void>;
   shutdown: () => Promise<void>;
+}
+
+export interface StartFailure {
+  /** The failed bot's id (or a positional `#<index>` fallback). */
+  id: string;
+  reason: unknown;
+}
+
+/**
+ * Split the settled results of starting every bot into the stacks that came up
+ * and the ones that failed. Pure (no I/O) so the multi-bot resilience policy —
+ * skip failed bots, keep the rest, only fatal when none start — is unit
+ * testable. A failed bot's own partial resources are released inside startBot's
+ * failure path (see its try/catch); this function never touches a stack.
+ */
+export function partitionStartResults(
+  results: PromiseSettledResult<BotStack>[],
+  configs: { botId?: string }[],
+): { stacks: BotStack[]; failures: StartFailure[] } {
+  const stacks: BotStack[] = [];
+  const failures: StartFailure[] = [];
+  results.forEach((r, i) => {
+    if (r.status === 'fulfilled') {
+      stacks.push(r.value);
+    } else {
+      failures.push({ id: configs[i]?.botId ?? `#${i}`, reason: r.reason });
+    }
+  });
+  return { stacks, failures };
 }
 
 /**
@@ -158,140 +196,162 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   const dbPath = join(config.dataDir, 'cc-octo.db');
   const adapter = createAdapter(dbPath);
   const store = new SessionStore(adapter);
-  store.init();
-  const cleaned = store.cleanExpired();
-  if (cleaned > 0) {
-    console.log(`[cc-channel-octo] ${label}Cleaned ${cleaned} expired session(s)`);
-  }
 
-  // --- Auto-memory base (create eagerly so a deleted/unmounted memory volume
-  // fails loudly at boot instead of silently disabling recall at message time). ---
-  const memoryBase = config.memoryBase ?? join(config.dataDir, 'memory');
-  mkdirSync(memoryBase, { recursive: true });
-
-  // --- Group context ---
-  const groupContext = new GroupContext(adapter, config.context.maxContextChars);
-  groupContext.loadAllFromDb();
-
-  // --- #115: cron (opt-in). Store is shared by the per-turn cron tool (writes)
-  // and the scheduler (reads + fires). Scheduler is armed after the handler is
-  // installed (see below), stopped in shutdown. ---
+  // #115: cron handles (hoisted so the failure-cleanup catch below can stop the
+  // scheduler). Store is shared by the per-turn cron tool (writes) and the
+  // scheduler (reads + fires); armed after the handler is installed, stopped in
+  // shutdown.
   let cronStore: CronStore | undefined;
   let cronScheduler: CronScheduler | undefined;
-  if (config.sdk.cron && config.botId) {
-    cronStore = new CronStore(join(config.baseDir, config.botId, 'cron.json'));
-  }
 
-  // --- Stream relay ---
-  const streamRelay = new StreamRelay();
-
-  // --- Gateway. In multi-bot mode main() owns shutdown signals, so the gateway
-  // must NOT register its own (N gateways racing process.exit). ---
-  const gateway = new OctoGateway(config, { handleSignals: !multi });
-  // Phase 1: register over REST (gets botId) — does NOT open the socket yet, so
-  // no message can arrive before the handler below is installed.
-  await gateway.register();
-  console.log(`[cc-channel-octo] ${label}Bot registered: id=${gateway.botId}`);
-
-  // #115: cron creation/deletion is owner-gated on gateway.ownerUid. If the
-  // registration didn't return an owner_uid, the gate can never pass and the
-  // cron tool is silently unusable — warn loudly so the operator isn't left
-  // wondering why every cron_create is rejected.
-  if (config.sdk.cron && !gateway.ownerUid) {
-    console.warn(
-      `[cc-channel-octo] ${label}sdk.cron is enabled but the bot has no owner_uid ` +
-      `(registration returned none) — cron_create/delete will be rejected for everyone. ` +
-      `The cron tool is effectively disabled until the bot has an owner.`,
-    );
-  }
-
-  // #86: prefetch the media CDN host (best-effort). Octo serves media from a
-  // separate CDN than apiUrl; without this, inbound image URLs on the CDN host
-  // are rejected by buildMediaUrl and the agent can't see them. The STS
-  // upload-credentials response carries cdnBaseUrl; we only need its host. A
-  // failure leaves mediaCdnHost undefined (same-host-only media), never fatal.
+  // Multi-bot mode no longer exits the process when one bot fails to start, so
+  // a failed startBot() must release the durable resources it already acquired
+  // (the cwd-cleanup timer + the sqlite handle) instead of leaking them for the
+  // lifetime of the surviving bots. The gateway releases its own lock in
+  // register()'s failure path, so it isn't repeated here.
   try {
-    const creds = await getUploadCredentials({
-      apiUrl: config.apiUrl,
-      botToken: config.botToken,
-      // The credentials endpoint validates the filename's type; use an image
-      // name so the probe isn't rejected (file_type_unsupported). We only read
-      // cdnBaseUrl from the response — nothing is uploaded.
-      filename: 'probe.png',
-    });
-    if (creds.cdnBaseUrl) {
-      config.mediaCdnHost = new URL(creds.cdnBaseUrl).host;
-      console.log(`[cc-channel-octo] ${label}Media CDN host: ${config.mediaCdnHost}`);
+    store.init();
+    const cleaned = store.cleanExpired();
+    if (cleaned > 0) {
+      console.log(`[cc-channel-octo] ${label}Cleaned ${cleaned} expired session(s)`);
     }
-  } catch (err) {
-    console.warn(`[cc-channel-octo] ${label}Could not prefetch media CDN host (inbound media limited to apiUrl host): ${err instanceof Error ? err.message : String(err)}`);
-  }
 
-  // --- Session router ---
-  const router = new SessionRouter(config, gateway.botId, gateway.ownerUid);
+    // --- Auto-memory base (create eagerly so a deleted/unmounted memory volume
+    // fails loudly at boot instead of silently disabling recall at message time). ---
+    const memoryBase = config.memoryBase ?? join(config.dataDir, 'memory');
+    mkdirSync(memoryBase, { recursive: true });
 
-  // --- Active handler tracking (Q6: in-flight drain on shutdown) ---
-  const activeHandlers = new Set<Promise<void>>();
+    // --- Group context ---
+    const groupContext = new GroupContext(adapter, config.context.maxContextChars);
+    groupContext.loadAllFromDb();
 
-  // Install the message handler NOW (before the socket opens). The socket is
-  // opened later via connect(), after main() has cross-registered sibling bot
-  // ids — so there is no window where a message is ACK'd and dropped, nor one
-  // where a sibling bot's message slips through unrecognized.
-  const onInbound = (msg: BotMessage): void => {
-    if (gateway.draining) return;
-    // Drop self-authored messages. OctoGateway.handleMessage() already filters
-    // these on the WS path; guard here too for safety (otherwise a bot's own
-    // group message could be cached into group context as un-processed chatter).
-    if (msg.from_uid === gateway.botId) return;
-    const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore)
-      .catch((err) => {
-        console.error(`[cc-channel-octo] ${label}Unhandled message handler error:`, err instanceof Error ? err.message : err);
-      })
-      .finally(() => {
-        activeHandlers.delete(p);
+    // --- #115: cron (opt-in). ---
+    if (config.sdk.cron && config.botId) {
+      cronStore = new CronStore(join(config.baseDir, config.botId, 'cron.json'));
+    }
+
+    // --- Stream relay ---
+    const streamRelay = new StreamRelay();
+
+    // --- Gateway. In multi-bot mode main() owns shutdown signals, so the gateway
+    // must NOT register its own (N gateways racing process.exit). ---
+    const gateway = new OctoGateway(config, { handleSignals: !multi });
+    // Phase 1: register over REST (gets botId) — does NOT open the socket yet, so
+    // no message can arrive before the handler below is installed.
+    await gateway.register();
+    console.log(`[cc-channel-octo] ${label}Bot registered: id=${gateway.botId}`);
+
+    // #115: cron creation/deletion is owner-gated on gateway.ownerUid. If the
+    // registration didn't return an owner_uid, the gate can never pass and the
+    // cron tool is silently unusable — warn loudly so the operator isn't left
+    // wondering why every cron_create is rejected.
+    if (config.sdk.cron && !gateway.ownerUid) {
+      console.warn(
+        `[cc-channel-octo] ${label}sdk.cron is enabled but the bot has no owner_uid ` +
+        `(registration returned none) — cron_create/delete will be rejected for everyone. ` +
+        `The cron tool is effectively disabled until the bot has an owner.`,
+      );
+    }
+
+    // #86: prefetch the media CDN host (best-effort). Octo serves media from a
+    // separate CDN than apiUrl; without this, inbound image URLs on the CDN host
+    // are rejected by buildMediaUrl and the agent can't see them. The STS
+    // upload-credentials response carries cdnBaseUrl; we only need its host. A
+    // failure leaves mediaCdnHost undefined (same-host-only media), never fatal.
+    try {
+      const creds = await getUploadCredentials({
+        apiUrl: config.apiUrl,
+        botToken: config.botToken,
+        // The credentials endpoint validates the filename's type; use an image
+        // name so the probe isn't rejected (file_type_unsupported). We only read
+        // cdnBaseUrl from the response — nothing is uploaded.
+        filename: 'probe.png',
       });
-    activeHandlers.add(p);
-  };
-  gateway.setMessageHandler(onInbound);
+      if (creds.cdnBaseUrl) {
+        config.mediaCdnHost = new URL(creds.cdnBaseUrl).host;
+        console.log(`[cc-channel-octo] ${label}Media CDN host: ${config.mediaCdnHost}`);
+      }
+    } catch (err) {
+      console.warn(`[cc-channel-octo] ${label}Could not prefetch media CDN host (inbound media limited to apiUrl host): ${err instanceof Error ? err.message : String(err)}`);
+    }
 
-  // #115: arm the cron scheduler now that onInbound exists. Fired tasks go
-  // through the exact same pipeline as real inbound messages. The fire callback
-  // returns a tracked promise that REJECTS on handler error (distinct from
-  // onInbound, which swallows) so the scheduler can attribute a delivery failure
-  // to the specific task. Still tracked in activeHandlers for shutdown drain.
-  if (cronStore) {
-    cronScheduler = new CronScheduler({
-      cronStore,
-      onFire: (msg: BotMessage): Promise<void> => {
-        if (gateway.draining) return Promise.resolve();
-        const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore)
-          .finally(() => { activeHandlers.delete(p); });
-        activeHandlers.add(p);
-        return p;
-      },
-      label,
-    });
-    cronScheduler.start();
-  }
+    // --- Session router ---
+    const router = new SessionRouter(config, gateway.botId, gateway.ownerUid);
 
-  // Phase 2 (called by main() after cross-registration): open the WebSocket.
-  // Async + awaited so a connection failure fails startup instead of leaving
-  // the process "ready" with no inbound endpoint.
-  const connect = async (): Promise<void> => {
-    gateway.connect();
-    console.log(`[cc-channel-octo] ${label}Bot connected: id=${gateway.botId}`);
-  };
+    // --- Active handler tracking (Q6: in-flight drain on shutdown) ---
+    const activeHandlers = new Set<Promise<void>>();
 
-  const shutdown = async (): Promise<void> => {
+    // Install the message handler NOW (before the socket opens). The socket is
+    // opened later via connect(), after main() has cross-registered sibling bot
+    // ids — so there is no window where a message is ACK'd and dropped, nor one
+    // where a sibling bot's message slips through unrecognized.
+    const onInbound = (msg: BotMessage): void => {
+      if (gateway.draining) return;
+      // Drop self-authored messages. OctoGateway.handleMessage() already filters
+      // these on the WS path; guard here too for safety (otherwise a bot's own
+      // group message could be cached into group context as un-processed chatter).
+      if (msg.from_uid === gateway.botId) return;
+      const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore)
+        .catch((err) => {
+          console.error(`[cc-channel-octo] ${label}Unhandled message handler error:`, err instanceof Error ? err.message : err);
+        })
+        .finally(() => {
+          activeHandlers.delete(p);
+        });
+      activeHandlers.add(p);
+    };
+    gateway.setMessageHandler(onInbound);
+
+    // #115: arm the cron scheduler now that onInbound exists. Fired tasks go
+    // through the exact same pipeline as real inbound messages. The fire callback
+    // returns a tracked promise that REJECTS on handler error (distinct from
+    // onInbound, which swallows) so the scheduler can attribute a delivery failure
+    // to the specific task. Still tracked in activeHandlers for shutdown drain.
+    if (cronStore) {
+      cronScheduler = new CronScheduler({
+        cronStore,
+        onFire: (msg: BotMessage): Promise<void> => {
+          if (gateway.draining) return Promise.resolve();
+          const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore)
+            .finally(() => { activeHandlers.delete(p); });
+          activeHandlers.add(p);
+          return p;
+        },
+        label,
+      });
+      cronScheduler.start();
+    }
+
+    // Phase 2 (called by main() after cross-registration): open the WebSocket.
+    // Async + awaited so a connection failure fails startup instead of leaving
+    // the process "ready" with no inbound endpoint.
+    const connect = async (): Promise<void> => {
+      gateway.connect();
+      console.log(`[cc-channel-octo] ${label}Bot connected: id=${gateway.botId}`);
+    };
+
+    const shutdown = async (): Promise<void> => {
+      clearInterval(cwdCleanupTimer);
+      cronScheduler?.stop();
+      await gateway.stop(activeHandlers);
+      store.close();
+    };
+    // Single-bot: the gateway's own SIGINT/SIGTERM handler invokes this.
+    gateway.setShutdownCallback(shutdown);
+
+    return { botId: gateway.botId, router, connect, shutdown };
+  } catch (err) {
+    // Release the durable resources acquired above so a failed bot doesn't leak
+    // them in multi-bot mode (the surviving bots keep the process alive).
     clearInterval(cwdCleanupTimer);
     cronScheduler?.stop();
-    await gateway.stop(activeHandlers);
-    store.close();
-  };
-  // Single-bot: the gateway's own SIGINT/SIGTERM handler invokes this.
-  gateway.setShutdownCallback(shutdown);
-
-  return { botId: gateway.botId, router, connect, shutdown };
+    try {
+      store.close();
+    } catch {
+      /* best effort — store may not have opened */
+    }
+    throw err;
+  }
 }
 
 
