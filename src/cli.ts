@@ -52,6 +52,37 @@ export interface ParsedArgs {
   timeoutMs: number;
 }
 
+/**
+ * Extract a package version from raw package.json text. Returns 'unknown'
+ * rather than throwing if the text is malformed or has no non-empty string
+ * `version`. Pure (no I/O) so the fallback paths are unit-testable.
+ */
+export function parseVersion(raw: string): string {
+  try {
+    const pkg: unknown = JSON.parse(raw);
+    if (pkg && typeof pkg === 'object' && 'version' in pkg) {
+      const v = (pkg as { version: unknown }).version;
+      if (typeof v === 'string' && v.length > 0) return v;
+    }
+  } catch {
+    /* fall through to 'unknown' */
+  }
+  return 'unknown';
+}
+
+/**
+ * The package version, read at runtime from package.json — which lives at the
+ * package root, one level up from this module in both src/ (src/cli.ts) and the
+ * compiled output (dist/cli.js). Returns 'unknown' if the file can't be read.
+ */
+export function readVersion(): string {
+  try {
+    return parseVersion(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
+  } catch {
+    return 'unknown';
+  }
+}
+
 export function parseArgs(argv: string[]): ParsedArgs {
   const [cmd = '', ...rest] = argv;
   let foreground = false;
