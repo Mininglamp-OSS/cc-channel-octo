@@ -116,21 +116,38 @@ interface ApiCall {
   args: Record<string, unknown>;
 }
 
-const mockState = vi.hoisted(() => {
+const { mockState, OctoApiError } = vi.hoisted(() => {
+  class OctoApiError extends Error {
+    status: number;
+    constructor(message: string, status: number) {
+      super(message);
+      this.name = "OctoApiError";
+      this.status = status;
+    }
+  }
   const calls: ApiCall[] = [];
   let sendMessageFail = false;
-  return {
+  // Default 404 → stream routes "not advertised", so the bulk of the suite
+  // exercises the fallback (plain sendMessage) path unchanged. Stream-path
+  // tests set this to 200.
+  let streamStartStatus = 404;
+  const mockState = {
     calls,
     get sendMessageFail() { return sendMessageFail; },
     set sendMessageFail(v: boolean) { sendMessageFail = v; },
+    get streamStartStatus() { return streamStartStatus; },
+    set streamStartStatus(v: number) { streamStartStatus = v; },
     reset() {
       calls.length = 0;
       sendMessageFail = false;
+      streamStartStatus = 404;
     },
   };
+  return { mockState, OctoApiError };
 });
 
 vi.mock("../octo/api.js", () => ({
+  OctoApiError,
   sendTyping: vi.fn(async (params: Record<string, unknown>) => {
     mockState.calls.push({ fn: "sendTyping", args: params });
   }),
@@ -138,6 +155,19 @@ vi.mock("../octo/api.js", () => ({
     mockState.calls.push({ fn: "sendMessage", args: params });
     if (mockState.sendMessageFail) throw new Error("sendMessage failed");
     return { message_id: "msg_1", client_msg_no: "c1", message_seq: 1 };
+  }),
+  streamStart: vi.fn(async (params: Record<string, unknown>) => {
+    mockState.calls.push({ fn: "streamStart", args: params });
+    if (mockState.streamStartStatus !== 200) {
+      throw new OctoApiError(
+        `Octo API /v1/bot/stream/start failed (${mockState.streamStartStatus})`,
+        mockState.streamStartStatus,
+      );
+    }
+    return { stream_no: "stream_001" };
+  }),
+  streamEnd: vi.fn(async (params: Record<string, unknown>) => {
+    mockState.calls.push({ fn: "streamEnd", args: params });
   }),
 }));
 
@@ -212,8 +242,12 @@ describe("StreamRelay", () => {
     await vi.runAllTimersAsync();
     await promise;
 
-    const nonTyping = mockState.calls.filter((c) => c.fn !== "sendTyping");
-    expect(nonTyping.length).toBe(0);
+    // No message is delivered for empty output (a streamStart capability probe
+    // may be recorded, but nothing is sent and no stream is left open).
+    const delivered = mockState.calls.filter(
+      (c) => c.fn === "sendMessage" || c.fn === "streamEnd",
+    );
+    expect(delivered.length).toBe(0);
   });
 
   it("cleans up typing timer on completion", async () => {
@@ -493,3 +527,196 @@ describe("StreamRelay", () => {
     }
   });
 });
+
+// ─── Stream path (OCT-37) ────────────────────────────────────────────────────
+//
+// When the server advertises /v1/bot/stream/{start,end} (mock streamStartStatus
+// === 200), deliver() streams each agent chunk incrementally under a stream_no
+// and ALWAYS emits a terminal stream/end. A 404 on start falls back cleanly to
+// the plain sendMessage path.
+
+describe("StreamRelay — incremental stream path", () => {
+  let relay: StreamRelay;
+
+  const CH_ID = "test_channel";
+  const CH_TYPE = 2; // Group
+  const API_URL = "https://api.test";
+  const BOT_TOKEN = "***";
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mockState.reset();
+    mockState.streamStartStatus = 200; // stream routes available
+    relay = new StreamRelay();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("happy path: start → per-chunk sendMessage(stream_no) → end, in order", async () => {
+    const chunks = asyncChunks(["Hello", " world", "!"]);
+    const promise = relay.deliver(CH_ID, CH_TYPE, chunks, API_URL, BOT_TOKEN);
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const seq = mockState.calls
+      .filter((c) => ["streamStart", "sendMessage", "streamEnd"].includes(c.fn))
+      .map((c) => c.fn);
+    expect(seq[0]).toBe("streamStart");
+    expect(seq[seq.length - 1]).toBe("streamEnd");
+
+    // One incremental sendMessage per chunk, each carrying the stream_no.
+    const sendCalls = mockState.calls.filter((c) => c.fn === "sendMessage");
+    expect(sendCalls.length).toBe(3);
+    expect(sendCalls.map((c) => (c.args as { content: string }).content)).toEqual([
+      "Hello", " world", "!",
+    ]);
+    for (const c of sendCalls) {
+      expect((c.args as { streamNo?: string }).streamNo).toBe("stream_001");
+    }
+
+    // Exactly one terminal END, carrying the stream_no + channel.
+    const endCalls = mockState.calls.filter((c) => c.fn === "streamEnd");
+    expect(endCalls.length).toBe(1);
+    expect(endCalls[0].args).toMatchObject({
+      streamNo: "stream_001",
+      channelId: CH_ID,
+      channelType: CH_TYPE,
+    });
+  });
+
+  it("forces a terminal END when the agent stream throws mid-stream, then re-throws", async () => {
+    async function* throwingChunks(): AsyncIterable<string> {
+      yield "partial";
+      throw new Error("source exploded");
+    }
+
+    const promise = relay.deliver(CH_ID, CH_TYPE, throwingChunks(), API_URL, BOT_TOKEN);
+    const guarded = promise.catch(() => {});
+    await vi.runAllTimersAsync();
+    await guarded;
+
+    // Source error still propagates so the caller's error path runs.
+    await expect(promise).rejects.toThrow("source exploded");
+
+    // The partial chunk was streamed…
+    const sendCalls = mockState.calls.filter((c) => c.fn === "sendMessage");
+    expect(sendCalls.length).toBe(1);
+    expect((sendCalls[0].args as { content: string }).content).toBe("partial");
+
+    // …and END fired despite the error (otherwise the bubble sticks "streaming").
+    expect(mockState.calls.filter((c) => c.fn === "streamEnd").length).toBe(1);
+  });
+
+  it("emits END even when a chunk send fails (per-chunk failures are swallowed)", async () => {
+    mockState.sendMessageFail = true;
+
+    const promise = relay.deliver(CH_ID, CH_TYPE, asyncChunks(["a", "b"]), API_URL, BOT_TOKEN);
+    await vi.runAllTimersAsync();
+    // Chunk-send failures do not reject the turn.
+    await expect(promise).resolves.toBeUndefined();
+
+    // Both chunk sends attempted, END still fired.
+    expect(mockState.calls.filter((c) => c.fn === "sendMessage").length).toBe(2);
+    expect(mockState.calls.filter((c) => c.fn === "streamEnd").length).toBe(1);
+  });
+
+  it("truncates an over-limit stream and still emits END", async () => {
+    const big = "x".repeat(50);
+    const promise = relay.deliver(
+      CH_ID, CH_TYPE, asyncChunks([big, big, big]), API_URL, BOT_TOKEN, 60,
+    );
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const sent = mockState.calls
+      .filter((c) => c.fn === "sendMessage")
+      .map((c) => (c.args as { content: string }).content)
+      .join("");
+    // Total streamed content is bounded by maxResponseChars (+ suffix).
+    expect(sent).toContain("[response truncated]");
+    expect(sent.replace("\n\n[response truncated]", "").length).toBeLessThanOrEqual(60);
+    expect(mockState.calls.filter((c) => c.fn === "streamEnd").length).toBe(1);
+  });
+
+  it("does not resolve mentions on the stream path (raw chunks)", async () => {
+    // Mentions are a fallback-path feature; the stream path sends raw chunks.
+    const chunks = asyncChunks(["hello @[u1:Alice]"]);
+    const promise = relay.deliver(CH_ID, CH_TYPE, chunks, API_URL, BOT_TOKEN);
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const sendCalls = mockState.calls.filter((c) => c.fn === "sendMessage");
+    const args = sendCalls[0].args as { content: string; mentionUids?: string[] };
+    expect(args.content).toBe("hello @[u1:Alice]"); // unresolved
+    expect(args.mentionUids).toBeUndefined();
+  });
+
+  it("falls back to plain sendMessage (with mentions) when start returns 404", async () => {
+    mockState.streamStartStatus = 404;
+
+    const chunks = asyncChunks(["hello @[u1:Alice]"]);
+    const promise = relay.deliver(CH_ID, CH_TYPE, chunks, API_URL, BOT_TOKEN);
+    await vi.runAllTimersAsync();
+    await promise;
+
+    // No END (stream never opened); plain path resolved the mention.
+    expect(mockState.calls.filter((c) => c.fn === "streamEnd").length).toBe(0);
+    const sendCalls = mockState.calls.filter((c) => c.fn === "sendMessage");
+    expect(sendCalls.length).toBe(1);
+    const args = sendCalls[0].args as { content: string; mentionUids?: string[]; streamNo?: string };
+    expect(args.content).toBe("hello @Alice");
+    expect(args.mentionUids).toEqual(["u1"]);
+    expect(args.streamNo).toBeUndefined();
+  });
+
+  it("caches a 404 capability result and does not re-probe on later turns", async () => {
+    mockState.streamStartStatus = 404;
+
+    await (async () => {
+      const p = relay.deliver(CH_ID, CH_TYPE, asyncChunks(["one"]), API_URL, BOT_TOKEN);
+      await vi.runAllTimersAsync();
+      await p;
+    })();
+
+    const startCallsAfterFirst = mockState.calls.filter((c) => c.fn === "streamStart").length;
+    expect(startCallsAfterFirst).toBe(1);
+
+    // Even if the server "comes back", the relay stays on the fallback path.
+    mockState.streamStartStatus = 200;
+    await (async () => {
+      const p = relay.deliver(CH_ID, CH_TYPE, asyncChunks(["two"]), API_URL, BOT_TOKEN);
+      await vi.runAllTimersAsync();
+      await p;
+    })();
+
+    // No new streamStart probe after the cached 404.
+    expect(mockState.calls.filter((c) => c.fn === "streamStart").length).toBe(1);
+    expect(mockState.calls.filter((c) => c.fn === "streamEnd").length).toBe(0);
+  });
+
+  it("a transient (non-404) start failure falls back without disabling streaming", async () => {
+    mockState.streamStartStatus = 503;
+
+    await (async () => {
+      const p = relay.deliver(CH_ID, CH_TYPE, asyncChunks(["one"]), API_URL, BOT_TOKEN);
+      await vi.runAllTimersAsync();
+      await p;
+    })();
+    // Fell back to plain send this turn.
+    expect(mockState.calls.filter((c) => c.fn === "sendMessage").length).toBe(1);
+
+    // Routes recover → next turn streams (capability was NOT cached as false).
+    mockState.streamStartStatus = 200;
+    mockState.calls.length = 0;
+    await (async () => {
+      const p = relay.deliver(CH_ID, CH_TYPE, asyncChunks(["two"]), API_URL, BOT_TOKEN);
+      await vi.runAllTimersAsync();
+      await p;
+    })();
+    expect(mockState.calls.filter((c) => c.fn === "streamStart").length).toBe(1);
+    expect(mockState.calls.filter((c) => c.fn === "streamEnd").length).toBe(1);
+  });
+});
+

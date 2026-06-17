@@ -2,16 +2,32 @@
 // Source: https://github.com/Mininglamp-OSS/openclaw-channel-octo
 // Removed: COS upload, GROUP.md API, OBO, rich text, media, thread/group management,
 //          read receipts, bot groups list, group info, mention prefs, space members.
+// Re-added (OCT-37): stream start/end API functions (server side landed in OCT-31).
 
 import {
   ChannelType,
   MessageType,
   type MentionEntity,
   type SendMessageResult,
+  type BotStreamStartResp,
 } from "./types.js";
 import { randomUUID } from "node:crypto";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+
+/**
+ * Error carrying the HTTP status of a failed Octo API call.
+ *
+ * Used by the stream relay to distinguish "route not advertised" (404 on
+ * stream/start → capability fallback) from genuine failures. Extends Error so
+ * existing `catch (err)` / `instanceof Error` callers are unaffected.
+ */
+export class OctoApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "OctoApiError";
+  }
+}
 
 /**
  * Maximum base64-encoded payload length accepted from /v1/bot/messages/sync.
@@ -73,7 +89,10 @@ export async function postJson<T>(
 
   if (!response.ok) {
     const text = await response.text().catch(() => "");
-    throw new Error(`Octo API ${path} failed (${response.status}): ${text || response.statusText}`);
+    throw new OctoApiError(
+      `Octo API ${path} failed (${response.status}): ${text || response.statusText}`,
+      response.status,
+    );
   }
 
   const text = await response.text();
@@ -98,6 +117,13 @@ export async function sendMessage(params: {
   mentionAll?: boolean;
   replyMsgId?: string;
   clientMsgNo?: string;
+  /**
+   * OCT-37: when set, this message is an incremental chunk of an open stream
+   * (opened via streamStart). The server forwards `stream_no` to MsgSendReq so
+   * octo-web appends it to the live "streaming" bubble instead of rendering a
+   * standalone message.
+   */
+  streamNo?: string;
   signal?: AbortSignal;
 }): Promise<SendMessageResult | undefined> {
   const payload: Record<string, unknown> = {
@@ -124,12 +150,87 @@ export async function sendMessage(params: {
   if (params.replyMsgId) {
     payload.reply = { message_id: params.replyMsgId };
   }
-  return await postJson<SendMessageResult>(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
+  const body: Record<string, unknown> = {
     channel_id: params.channelId,
     channel_type: params.channelType,
     payload,
     client_msg_no: params.clientMsgNo ?? generateClientMsgNo(),
-  }, params.signal);
+  };
+  // stream_no is a top-level field on the server's BotSendMessageReq (not inside
+  // payload); only include it when streaming so non-stream sends are unchanged.
+  if (params.streamNo) {
+    body.stream_no = params.streamNo;
+  }
+  return await postJson<SendMessageResult>(params.apiUrl, params.botToken, "/v1/bot/sendMessage", body, params.signal);
+}
+
+// ─── Stream API (OCT-31 / OCT-37) ───────────────────────────────────────────
+
+/**
+ * Open a streaming message. POST /v1/bot/stream/start → { stream_no }.
+ *
+ * The returned stream_no is passed to sendMessage() for each incremental chunk
+ * and to streamEnd() to terminate the live bubble. The server forces the
+ * sender to the authenticated bot and ignores any client from_uid.
+ *
+ * Throws OctoApiError on failure; a 404 status means the server does not
+ * advertise the stream routes — the relay treats this as "fall back to plain
+ * sendMessage", not a turn error.
+ */
+export async function streamStart(params: {
+  apiUrl: string;
+  botToken: string;
+  channelId: string;
+  channelType: ChannelType;
+  clientMsgNo?: string;
+  payload?: string;
+  signal?: AbortSignal;
+}): Promise<BotStreamStartResp> {
+  const body: Record<string, unknown> = {
+    channel_id: params.channelId,
+    channel_type: params.channelType,
+  };
+  if (params.clientMsgNo) body.client_msg_no = params.clientMsgNo;
+  if (params.payload) body.payload = params.payload;
+  const result = await postJson<BotStreamStartResp>(
+    params.apiUrl,
+    params.botToken,
+    "/v1/bot/stream/start",
+    body,
+    params.signal,
+  );
+  if (!result?.stream_no) {
+    throw new Error("streamStart: no stream_no in response");
+  }
+  return result;
+}
+
+/**
+ * Close a stream. POST /v1/bot/stream/end → 200.
+ *
+ * Emits the terminal END (streamFlag == END) that octo-web waits on to stop
+ * the live "streaming" bubble. MUST be called in a finally so END always fires
+ * — a missing END leaves the client bubble stuck "streaming" indefinitely.
+ */
+export async function streamEnd(params: {
+  apiUrl: string;
+  botToken: string;
+  streamNo: string;
+  channelId: string;
+  channelType: ChannelType;
+  signal?: AbortSignal;
+}): Promise<void> {
+  await postJson(
+    params.apiUrl,
+    params.botToken,
+    "/v1/bot/stream/end",
+    {
+      stream_no: params.streamNo,
+      channel_id: params.channelId,
+      channel_type: params.channelType,
+    },
+    params.signal,
+  );
 }
 
 /**
