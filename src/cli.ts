@@ -312,7 +312,7 @@ Usage:
   cc-channel-octo restart                stop (if running) then start
   cc-channel-octo status                 show running state
   cc-channel-octo upgrade [<version>]    npm install -g the gateway (default latest) then restart
-  cc-channel-octo configure --gateway-url <url> --api-key <key>   write LLM gateway + key to config
+  cc-channel-octo configure --gateway-url <url> [--api-key <key>]   write LLM gateway + key to config (or set CC_OCTO_CONFIGURE_API_KEY)
   cc-channel-octo version                print the version
 
 Paths (under ~/.cc-channel-octo):
@@ -337,15 +337,18 @@ export async function run(argv: string[], baseDir?: string): Promise<number> {
       return cmdStatus(paths);
     case 'upgrade':
       return cmdUpgrade(paths, timeoutMs, version);
-    case 'configure':
+    case 'configure': {
+      const resolvedApiKey = apiKey ?? process.env.CC_OCTO_CONFIGURE_API_KEY ?? '';
+      const configPath = baseDir ? join(baseDir, 'config.json') : undefined;
       try {
-        configure(gatewayUrl ?? '', apiKey ?? '');
+        configure(gatewayUrl ?? '', resolvedApiKey, configPath);
         console.log('cc-channel-octo: configured gateway + api key');
         return 0;
       } catch (err) {
         console.error(`cc-channel-octo: ${(err as Error).message}`);
         return 2;
       }
+    }
     case 'version':
     case '--version':
     case '-v':
