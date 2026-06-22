@@ -11,7 +11,8 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  parseArgs, isAlive, readPid, writePid, removePid, resolveSupervisorPaths,
+  parseArgs, isAlive, readPid, readPidRecord, writePid, removePid,
+  resolveOwnedPid, resolveSupervisorPaths,
   readVersion, parseVersion, run,
 } from '../cli.js';
 
@@ -70,8 +71,19 @@ describe('PID file helpers', () => {
   });
 
   it('writePid → readPid round-trips', () => {
-    writePid(pidFile, 12345);
+    writePid(pidFile, 12345, null);
     expect(readPid(pidFile)).toBe(12345);
+  });
+
+  it('writePid → readPidRecord preserves the owner identity', () => {
+    writePid(pidFile, 12345, 'Tue Jun 17 18:35:01 2026');
+    expect(readPidRecord(pidFile)).toEqual({ pid: 12345, id: 'Tue Jun 17 18:35:01 2026' });
+  });
+
+  it('readPidRecord reads a legacy bare-integer file as a null identity', () => {
+    writeFileSync(pidFile, '4242\n');
+    expect(readPidRecord(pidFile)).toEqual({ pid: 4242, id: null });
+    expect(readPid(pidFile)).toBe(4242);
   });
 
   it('readPid returns null when the file is missing', () => {
@@ -81,13 +93,60 @@ describe('PID file helpers', () => {
   it('readPid returns null for garbage content', () => {
     writeFileSync(pidFile, 'not-a-pid\n');
     expect(readPid(pidFile)).toBeNull();
+    expect(readPidRecord(pidFile)).toBeNull();
   });
 
   it('removePid deletes the file and is a no-op when absent', () => {
-    writePid(pidFile, 999);
+    writePid(pidFile, 999, null);
     removePid(pidFile);
     expect(existsSync(pidFile)).toBe(false);
     expect(() => removePid(pidFile)).not.toThrow();
+  });
+});
+
+describe('resolveOwnedPid (PID-reuse guard)', () => {
+  let dir: string;
+  let paths: ReturnType<typeof resolveSupervisorPaths>;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'cc-cli-own-'));
+    paths = resolveSupervisorPaths(dir);
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('returns the PID when alive and the identity matches', () => {
+    writePid(paths.pidFile, process.pid, 'IDENT-A');
+    expect(resolveOwnedPid(paths, () => 'IDENT-A')).toBe(process.pid);
+  });
+
+  it('returns null and clears the file when the identity mismatches (PID reused)', () => {
+    writePid(paths.pidFile, process.pid, 'IDENT-A');
+    expect(resolveOwnedPid(paths, () => 'IDENT-B')).toBeNull();
+    expect(existsSync(paths.pidFile)).toBe(false);
+  });
+
+  it('falls back to liveness only for a legacy file (null identity)', () => {
+    writeFileSync(paths.pidFile, `${process.pid}\n`);
+    // procId would say "mismatch", but a legacy file has nothing to verify.
+    expect(resolveOwnedPid(paths, () => 'anything')).toBe(process.pid);
+  });
+
+  it('falls back to liveness only when the live identity is unreadable', () => {
+    writePid(paths.pidFile, process.pid, 'IDENT-A');
+    expect(resolveOwnedPid(paths, () => null)).toBe(process.pid);
+  });
+
+  it('returns null and clears the file when the PID is dead', () => {
+    writePid(paths.pidFile, 2_147_483_647, 'IDENT-A');
+    expect(resolveOwnedPid(paths, () => 'IDENT-A')).toBeNull();
+    expect(existsSync(paths.pidFile)).toBe(false);
+  });
+
+  it('returns null when there is no PID file', () => {
+    expect(resolveOwnedPid(paths, () => 'IDENT-A')).toBeNull();
   });
 });
 
@@ -209,6 +268,19 @@ describe('run configure with env var fallback', () => {
       const code = await run(['configure', '--gateway-url', 'https://gw'], dir);
       expect(code).toBe(2);
       expect(spy).toHaveBeenCalledWith(expect.stringContaining('required'));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('exits 2 (not an unhandled throw) when a flag is missing its value', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      // parseArgs throws on `--gateway-url` with no value; run() must map that
+      // to a usage exit code rather than letting it escape to the top-level catch.
+      const code = await run(['configure', '--gateway-url'], dir);
+      expect(code).toBe(2);
+      expect(spy).toHaveBeenCalledWith(expect.stringContaining('requires a value'));
     } finally {
       spy.mockRestore();
     }

@@ -52,18 +52,24 @@ export function configure(gatewayUrl: string, apiKey: string, configPath?: strin
   mkdirSync(dirname(path), { recursive: true })
 
   // Atomic write: temp file in same directory with 0600 mode, then rename.
+  // `wx` (exclusive create) refuses to write through a pre-existing file or a
+  // symlink prepositioned at the temp path — important for a secret-bearing
+  // writer. The pid+timestamp name makes a real collision practically impossible.
   const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`
   try {
-    writeFileSync(tmpPath, JSON.stringify(merged, null, 2) + '\n', { mode: 0o600 })
+    writeFileSync(tmpPath, JSON.stringify(merged, null, 2) + '\n', { mode: 0o600, flag: 'wx' })
     renameSync(tmpPath, path)
     // Belt-and-suspenders: force 0600 on the final file too.
     chmodSync(path, 0o600)
   } catch (err) {
-    // Best-effort cleanup of the temp file on error.
-    try {
-      unlinkSync(tmpPath)
-    } catch {
-      /* already gone or never created — fine */
+    // Best-effort cleanup of OUR temp file — but if the failure was EEXIST, the
+    // path already existed and is not ours to delete.
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+      try {
+        unlinkSync(tmpPath)
+      } catch {
+        /* already gone or never created — fine */
+      }
     }
     throw new Error(`configure: failed to write ${path}: ${err instanceof Error ? err.message : String(err)}`)
   }

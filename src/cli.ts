@@ -17,7 +17,7 @@
  * gateway under a service manager instead — Node has no SIGTERM semantics there.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { openSync, readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -141,14 +141,74 @@ export function isAlive(pid: number): boolean {
   }
 }
 
-export function readPid(pidFile: string): number | null {
-  if (!existsSync(pidFile)) return null;
-  const pid = Number.parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
-  return Number.isInteger(pid) && pid > 0 ? pid : null;
+/** The gateway's PID plus the OS identity recorded when we started it. */
+export interface PidRecord {
+  pid: number;
+  /** Owner identity (process start time); null for a legacy bare-PID file. */
+  id: string | null;
 }
 
-export function writePid(pidFile: string, pid: number): void {
-  writeFileSync(pidFile, `${pid}\n`, { mode: 0o600 });
+/**
+ * Probe for a process's OS identity, used to detect PID reuse. A PID file by
+ * itself is not enough: if the gateway crashes uncleanly and the OS later
+ * recycles its PID for an unrelated process, signaling that PID would hit the
+ * wrong process. The start time is a cheap, POSIX-portable discriminator — a
+ * recycled PID belongs to a process that started later, so its start time
+ * differs. Injectable so tests can simulate reuse without real processes.
+ *
+ * Returns null when the identity can't be read (process gone, `ps` absent);
+ * callers treat null as "unverifiable" and fall back to liveness only.
+ */
+export type ProcIdentityFn = (pid: number) => string | null;
+
+export function procStartTime(pid: number): string | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    const out = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return out.length > 0 ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read the PID record. Accepts the current JSON form (`{"pid":N,"id":"…"}`) and
+ * the legacy bare-integer form (written by pre-ownership-token releases), which
+ * yields a null identity so callers fall back to liveness-only handling.
+ */
+export function readPidRecord(pidFile: string): PidRecord | null {
+  if (!existsSync(pidFile)) return null;
+  const raw = readFileSync(pidFile, 'utf-8').trim();
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) {
+    const pid = Number.parseInt(raw, 10);
+    return Number.isInteger(pid) && pid > 0 ? { pid, id: null } : null;
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && 'pid' in parsed) {
+      const pidVal = (parsed as { pid: unknown }).pid;
+      const idVal = (parsed as { id?: unknown }).id;
+      if (typeof pidVal === 'number' && Number.isInteger(pidVal) && pidVal > 0) {
+        return { pid: pidVal, id: typeof idVal === 'string' ? idVal : null };
+      }
+    }
+  } catch {
+    /* fall through to null */
+  }
+  return null;
+}
+
+/** The numeric PID from the file (no ownership check), or null. */
+export function readPid(pidFile: string): number | null {
+  return readPidRecord(pidFile)?.pid ?? null;
+}
+
+export function writePid(pidFile: string, pid: number, id: string | null): void {
+  writeFileSync(pidFile, `${JSON.stringify({ pid, id })}\n`, { mode: 0o600 });
 }
 
 export function removePid(pidFile: string): void {
@@ -159,15 +219,31 @@ export function removePid(pidFile: string): void {
   }
 }
 
-/** PID of the running gateway, or null. Cleans up a stale (dead-PID) file. */
-function readRunningPid(paths: SupervisorPaths): number | null {
-  const pid = readPid(paths.pidFile);
-  if (pid !== null && isAlive(pid)) return pid;
-  if (pid !== null) removePid(paths.pidFile);
+/**
+ * PID of the running gateway we own, or null. A process counts as ours only if
+ * it is alive AND its current OS identity matches the one recorded at start —
+ * the guard that stops `stop`/`restart`/`upgrade` from signaling a process that
+ * merely inherited the PID after an unclean crash + reuse. Identity mismatch
+ * means the file is stale (PID recycled), so it is removed. Legacy files (no
+ * recorded identity) and unreadable live identities fall back to liveness only,
+ * matching the pre-ownership-token behavior rather than refusing to stop.
+ */
+export function resolveOwnedPid(paths: SupervisorPaths, procId: ProcIdentityFn): number | null {
+  const rec = readPidRecord(paths.pidFile);
+  if (rec === null) return null;
+  if (!isAlive(rec.pid)) {
+    removePid(paths.pidFile);
+    return null;
+  }
+  if (rec.id === null) return rec.pid; // legacy file — nothing to verify against
+  const liveId = procId(rec.pid);
+  if (liveId === null) return rec.pid; // identity unreadable — don't refuse to act
+  if (liveId === rec.id) return rec.pid; // verified ours
+  removePid(paths.pidFile); // PID was recycled by an unrelated process
   return null;
 }
 
-async function cmdStart(paths: SupervisorPaths, foreground: boolean): Promise<number> {
+async function cmdStart(paths: SupervisorPaths, foreground: boolean, procId: ProcIdentityFn): Promise<number> {
   if (foreground) {
     const child = spawn(process.execPath, [paths.indexEntry], {
       stdio: 'inherit',
@@ -178,7 +254,7 @@ async function cmdStart(paths: SupervisorPaths, foreground: boolean): Promise<nu
     });
   }
 
-  const running = readRunningPid(paths);
+  const running = resolveOwnedPid(paths, procId);
   if (running !== null) {
     console.log(`cc-channel-octo: already running (pid ${running})`);
     return 0;
@@ -197,7 +273,9 @@ async function cmdStart(paths: SupervisorPaths, foreground: boolean): Promise<nu
     console.error('cc-channel-octo: failed to spawn gateway');
     return 1;
   }
-  writePid(paths.pidFile, child.pid);
+  // Record the child's start-time identity alongside its PID so a later
+  // stop/restart can confirm it's still our process and not a PID-reuse victim.
+  writePid(paths.pidFile, child.pid, procId(child.pid));
 
   // Confirm it didn't exit immediately (bad config, taken lock, …).
   await sleep(400);
@@ -211,10 +289,10 @@ async function cmdStart(paths: SupervisorPaths, foreground: boolean): Promise<nu
   return 0;
 }
 
-async function cmdStop(paths: SupervisorPaths, timeoutMs: number): Promise<number> {
-  const pid = readPid(paths.pidFile);
-  if (pid === null || !isAlive(pid)) {
-    removePid(paths.pidFile);
+async function cmdStop(paths: SupervisorPaths, timeoutMs: number, procId: ProcIdentityFn): Promise<number> {
+  const pid = resolveOwnedPid(paths, procId);
+  if (pid === null) {
+    // resolveOwnedPid already removed a stale/recycled file.
     console.log('cc-channel-octo: not running');
     return 0;
   }
@@ -247,8 +325,8 @@ async function cmdStop(paths: SupervisorPaths, timeoutMs: number): Promise<numbe
   return 0;
 }
 
-function cmdStatus(paths: SupervisorPaths): number {
-  const pid = readRunningPid(paths);
+function cmdStatus(paths: SupervisorPaths, procId: ProcIdentityFn): number {
+  const pid = resolveOwnedPid(paths, procId);
   if (pid !== null) {
     console.log(`cc-channel-octo: running (pid ${pid}), logs at ${paths.logFile}`);
   } else {
@@ -285,7 +363,7 @@ export function buildUpgradeArgs(version?: string): string[] {
  * restart the gateway so the new code is live. Invoked by the daemon to drive
  * a fleet upgrade order (mirrors openclaw's daemon-driven plugin install).
  */
-async function cmdUpgrade(paths: SupervisorPaths, timeoutMs: number, version?: string): Promise<number> {
+async function cmdUpgrade(paths: SupervisorPaths, timeoutMs: number, procId: ProcIdentityFn, version?: string): Promise<number> {
   let args: string[];
   try {
     args = buildUpgradeArgs(version);
@@ -307,8 +385,8 @@ async function cmdUpgrade(paths: SupervisorPaths, timeoutMs: number, version?: s
     return code;
   }
   // Restart so the freshly installed code is running.
-  await cmdStop(paths, timeoutMs);
-  return cmdStart(paths, false);
+  await cmdStop(paths, timeoutMs, procId);
+  return cmdStart(paths, false, procId);
 }
 
 function usage(): string {
@@ -330,21 +408,30 @@ Paths (under ~/.cc-channel-octo):
 POSIX only (macOS/Linux). On Windows, run under a service manager.`;
 }
 
-export async function run(argv: string[], baseDir?: string): Promise<number> {
-  const { cmd, foreground, timeoutMs, version, gatewayUrl, apiKey } = parseArgs(argv);
+export async function run(argv: string[], baseDir?: string, procId: ProcIdentityFn = procStartTime): Promise<number> {
+  let parsed: ParsedArgs;
+  try {
+    parsed = parseArgs(argv);
+  } catch (err) {
+    // Usage error (e.g. a flag missing its value): report it as a usage
+    // failure (exit 2), not an unhandled internal error from the top-level catch.
+    console.error(`cc-channel-octo: ${(err as Error).message}`);
+    return 2;
+  }
+  const { cmd, foreground, timeoutMs, version, gatewayUrl, apiKey } = parsed;
   const paths = resolveSupervisorPaths(baseDir);
   switch (cmd) {
     case 'start':
-      return cmdStart(paths, foreground);
+      return cmdStart(paths, foreground, procId);
     case 'stop':
-      return cmdStop(paths, timeoutMs);
+      return cmdStop(paths, timeoutMs, procId);
     case 'restart':
-      await cmdStop(paths, timeoutMs);
-      return cmdStart(paths, false);
+      await cmdStop(paths, timeoutMs, procId);
+      return cmdStart(paths, false, procId);
     case 'status':
-      return cmdStatus(paths);
+      return cmdStatus(paths, procId);
     case 'upgrade':
-      return cmdUpgrade(paths, timeoutMs, version);
+      return cmdUpgrade(paths, timeoutMs, procId, version);
     case 'configure': {
       const resolvedApiKey = apiKey ?? process.env.CC_OCTO_CONFIGURE_API_KEY ?? '';
       const configPath = baseDir ? join(baseDir, 'config.json') : undefined;
@@ -373,7 +460,7 @@ export async function run(argv: string[], baseDir?: string): Promise<number> {
       // (`dist/index.js`) behavior documented in README/CHANGELOG. Daemon-style
       // process management is opt-in via the `start`/`stop`/`restart`/`status`
       // subcommands.
-      return cmdStart(paths, true);
+      return cmdStart(paths, true, procId);
     default:
       console.error(`cc-channel-octo: unknown command '${cmd}'\n`);
       console.error(usage());
