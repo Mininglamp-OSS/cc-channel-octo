@@ -23,6 +23,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { DEFAULT_CONFIG_PATH } from './config.js';
+import { configure } from './configure.js';
 
 export interface SupervisorPaths {
   baseDir: string;
@@ -52,6 +53,10 @@ export interface ParsedArgs {
   timeoutMs: number;
   /** Positional version target for `upgrade` (e.g. `upgrade 1.2.3`); undefined → latest. */
   version?: string;
+  /** `configure --gateway-url <url>`. */
+  gatewayUrl?: string;
+  /** `configure --api-key <key>`. */
+  apiKey?: string;
 }
 
 /**
@@ -90,18 +95,36 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let foreground = false;
   let timeoutSec = 10;
   let version: string | undefined;
-  for (const a of rest) {
+  let gatewayUrl: string | undefined;
+  let apiKey: string | undefined;
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
     if (a === '--foreground' || a === '-f') {
       foreground = true;
     } else if (a.startsWith('--timeout=')) {
       const n = Number.parseInt(a.slice('--timeout='.length), 10);
       if (Number.isFinite(n) && n > 0) timeoutSec = n;
+    } else if (a === '--gateway-url') {
+      const next = rest[++i];
+      if (next === undefined || next.startsWith('--')) {
+        throw new Error('configure: --gateway-url requires a value')
+      }
+      gatewayUrl = next;
+    } else if (a.startsWith('--gateway-url=')) {
+      gatewayUrl = a.slice('--gateway-url='.length);
+    } else if (a === '--api-key') {
+      const next = rest[++i];
+      if (next === undefined || next.startsWith('--')) {
+        throw new Error('configure: --api-key requires a value')
+      }
+      apiKey = next;
+    } else if (a.startsWith('--api-key=')) {
+      apiKey = a.slice('--api-key='.length);
     } else if (!a.startsWith('-') && version === undefined) {
-      // First positional token (e.g. `upgrade 1.2.3`).
       version = a;
     }
   }
-  return { cmd, foreground, timeoutMs: timeoutSec * 1000, version };
+  return { cmd, foreground, timeoutMs: timeoutSec * 1000, version, gatewayUrl, apiKey };
 }
 
 /**
@@ -297,6 +320,7 @@ Usage:
   cc-channel-octo restart                stop (if running) then start
   cc-channel-octo status                 show running state
   cc-channel-octo upgrade [<version>]    npm install -g the gateway (default latest) then restart
+  cc-channel-octo configure --gateway-url <url> [--api-key <key>]   write LLM gateway + key to config (or set CC_OCTO_CONFIGURE_API_KEY)
   cc-channel-octo version                print the version
 
 Paths (under ~/.cc-channel-octo):
@@ -307,7 +331,7 @@ POSIX only (macOS/Linux). On Windows, run under a service manager.`;
 }
 
 export async function run(argv: string[], baseDir?: string): Promise<number> {
-  const { cmd, foreground, timeoutMs, version } = parseArgs(argv);
+  const { cmd, foreground, timeoutMs, version, gatewayUrl, apiKey } = parseArgs(argv);
   const paths = resolveSupervisorPaths(baseDir);
   switch (cmd) {
     case 'start':
@@ -321,6 +345,18 @@ export async function run(argv: string[], baseDir?: string): Promise<number> {
       return cmdStatus(paths);
     case 'upgrade':
       return cmdUpgrade(paths, timeoutMs, version);
+    case 'configure': {
+      const resolvedApiKey = apiKey ?? process.env.CC_OCTO_CONFIGURE_API_KEY ?? '';
+      const configPath = baseDir ? join(baseDir, 'config.json') : undefined;
+      try {
+        configure(gatewayUrl ?? '', resolvedApiKey, configPath);
+        console.log('cc-channel-octo: configured gateway + api key');
+        return 0;
+      } catch (err) {
+        console.error(`cc-channel-octo: ${(err as Error).message}`);
+        return 2;
+      }
+    }
     case 'version':
     case '--version':
     case '-v':

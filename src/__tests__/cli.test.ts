@@ -133,6 +133,88 @@ describe('readVersion', () => {
   });
 });
 
+describe('parseArgs configure', () => {
+  it('parses --gateway-url and --api-key (space form)', () => {
+    const a = parseArgs(['configure', '--gateway-url', 'https://gw', '--api-key', 'sk-1'])
+    expect(a.cmd).toBe('configure'); expect(a.gatewayUrl).toBe('https://gw'); expect(a.apiKey).toBe('sk-1')
+  })
+  it('parses = form', () => {
+    const a = parseArgs(['configure', '--gateway-url=https://gw', '--api-key=sk-2'])
+    expect(a.gatewayUrl).toBe('https://gw'); expect(a.apiKey).toBe('sk-2')
+  })
+  it('throws when --gateway-url value is missing', () => {
+    expect(() => parseArgs(['configure', '--gateway-url'])).toThrow(/requires a value/)
+  })
+  it('throws when --gateway-url value is another flag', () => {
+    expect(() => parseArgs(['configure', '--gateway-url', '--api-key', 'sk'])).toThrow(/requires a value/)
+  })
+  it('throws when --api-key value is missing', () => {
+    expect(() => parseArgs(['configure', '--api-key'])).toThrow(/requires a value/)
+  })
+  it('throws when --api-key value is another flag', () => {
+    expect(() => parseArgs(['configure', '--api-key', '--gateway-url', 'https://gw'])).toThrow(/requires a value/)
+  })
+})
+
+describe('run configure with env var fallback', () => {
+  let dir: string;
+  let cfgPath: string;
+  const originalEnv = process.env.CC_OCTO_CONFIGURE_API_KEY;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'cc-cli-cfg-'));
+    cfgPath = join(dir, 'config.json');
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    if (originalEnv === undefined) {
+      delete process.env.CC_OCTO_CONFIGURE_API_KEY;
+    } else {
+      process.env.CC_OCTO_CONFIGURE_API_KEY = originalEnv;
+    }
+  });
+
+  it('reads API key from CC_OCTO_CONFIGURE_API_KEY when --api-key is absent', async () => {
+    process.env.CC_OCTO_CONFIGURE_API_KEY = 'sk-from-env';
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const code = await run(['configure', '--gateway-url', 'https://gw'], dir);
+      expect(code).toBe(0);
+      const parsed = JSON.parse(readFileSync(cfgPath, 'utf-8'));
+      expect(parsed.sdk.apiKey).toBe('sk-from-env');
+      expect(parsed.sdk.anthropicBaseUrl).toBe('https://gw');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('CLI --api-key flag takes precedence over env var', async () => {
+    process.env.CC_OCTO_CONFIGURE_API_KEY = 'sk-from-env';
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const code = await run(['configure', '--gateway-url', 'https://gw', '--api-key', 'sk-from-cli'], dir);
+      expect(code).toBe(0);
+      const parsed = JSON.parse(readFileSync(cfgPath, 'utf-8'));
+      expect(parsed.sdk.apiKey).toBe('sk-from-cli');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('exits 2 when both --api-key and env var are missing', async () => {
+    delete process.env.CC_OCTO_CONFIGURE_API_KEY;
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const code = await run(['configure', '--gateway-url', 'https://gw'], dir);
+      expect(code).toBe(2);
+      expect(spy).toHaveBeenCalledWith(expect.stringContaining('required'));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
 describe('run version command', () => {
   it.each(['version', '--version', '-v'])('prints bare version and exits 0 for %s', async (arg) => {
     const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
