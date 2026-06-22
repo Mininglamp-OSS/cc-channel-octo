@@ -135,6 +135,13 @@ export interface Config {
      */
     anthropicBaseUrl?: string;
     /**
+     * Q1b: Anthropic API key for the upstream gateway. When set, forwarded to
+     * the SDK subprocess via the standard `ANTHROPIC_API_KEY` env var (same
+     * mechanism as `anthropicBaseUrl`). Written by the `configure` subcommand
+     * during daemon-driven one-click install; persisted in the global config.
+     */
+    apiKey?: string;
+    /**
      * #107: extra environment variables injected verbatim into the agent's SDK
      * subprocess (on top of the inherited process.env). Generic and declarative
      * — cc knows nothing about what they mean. Use it to give a bot's skills the
