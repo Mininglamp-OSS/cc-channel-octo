@@ -13,6 +13,16 @@ import { dirname } from 'node:path'
 import { DEFAULT_CONFIG_PATH } from './config.js'
 import { isAllowedApiUrl } from './url-policy.js'
 
+/**
+ * The Anthropic SDK appends `/v1/messages` to ANTHROPIC_BASE_URL. A gateway
+ * pasted with a trailing `/v1` would otherwise yield `/v1/v1/messages` (404,
+ * misreported as a model error). Strip a trailing `/v1` (optionally with a
+ * slash) so the stored base is the host root. Pure for unit testing.
+ */
+export function normalizeGatewayUrl(raw: string): string {
+  return raw.replace(/\/v1\/?$/, '')
+}
+
 export function configure(gatewayUrl: string, apiKey: string, configPath?: string): void {
   if (!gatewayUrl) throw new Error('configure: --gateway-url is required')
   if (!apiKey) throw new Error('configure: --api-key is required')
@@ -21,6 +31,7 @@ export function configure(gatewayUrl: string, apiKey: string, configPath?: strin
   if (!isAllowedApiUrl(gatewayUrl)) {
     throw new Error(`configure: unsafe --gateway-url ${gatewayUrl} (must be https:// or http://localhost)`)
   }
+  const normalizedUrl = normalizeGatewayUrl(gatewayUrl)
   const path = configPath ?? DEFAULT_CONFIG_PATH
   let existing: Record<string, unknown> = {}
   if (existsSync(path)) {
@@ -47,7 +58,7 @@ export function configure(gatewayUrl: string, apiKey: string, configPath?: strin
       : {}
   const merged = {
     ...existing,
-    sdk: { ...existingSdk, anthropicBaseUrl: gatewayUrl, apiKey },
+    sdk: { ...existingSdk, anthropicBaseUrl: normalizedUrl, apiKey },
   }
   mkdirSync(dirname(path), { recursive: true })
 

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { configure } from '../configure.js'
+import { configure, normalizeGatewayUrl } from '../configure.js'
 
 let dir: string
 let cfgPath: string
@@ -61,5 +61,23 @@ describe('configure', () => {
   it('throws a clear error when existing config root is a number', () => {
     writeFileSync(cfgPath, JSON.stringify(42))
     expect(() => configure('https://gw', 'sk', cfgPath)).toThrow(/is not a JSON object/)
+  })
+  it('strips a trailing /v1 from the stored gateway url', () => {
+    configure('https://gw.test/v1', 'sk-test', cfgPath)
+    expect(JSON.parse(readFileSync(cfgPath, 'utf-8')).sdk.anthropicBaseUrl).toBe('https://gw.test')
+  })
+})
+
+describe('normalizeGatewayUrl', () => {
+  it('strips a trailing /v1 or /v1/', () => {
+    expect(normalizeGatewayUrl('https://gw.test/v1')).toBe('https://gw.test')
+    expect(normalizeGatewayUrl('https://gw.test/v1/')).toBe('https://gw.test')
+  })
+  it('leaves a bare host or non-version path intact', () => {
+    expect(normalizeGatewayUrl('https://gw.test')).toBe('https://gw.test')
+    expect(normalizeGatewayUrl('https://gw.test/api')).toBe('https://gw.test/api')
+  })
+  it('does not strip a mid-path v1', () => {
+    expect(normalizeGatewayUrl('https://gw.test/v1/foo')).toBe('https://gw.test/v1/foo')
   })
 })
