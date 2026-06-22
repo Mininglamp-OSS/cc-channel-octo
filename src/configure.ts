@@ -8,7 +8,7 @@
  * before any bot exists. So this does a raw read-merge-write of the JSON file,
  * touching only sdk.anthropicBaseUrl + sdk.apiKey.
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, renameSync, unlinkSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DEFAULT_CONFIG_PATH } from './config.js'
 import { isAllowedApiUrl } from './url-policy.js'
@@ -25,8 +25,17 @@ export function configure(gatewayUrl: string, apiKey: string, configPath?: strin
   let existing: Record<string, unknown> = {}
   if (existsSync(path)) {
     try {
-      existing = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>
+      const parsed = JSON.parse(readFileSync(path, 'utf-8')) as unknown
+      // Validate that the root is a plain object before treating it as one.
+      if (!(parsed && typeof parsed === 'object' && !Array.isArray(parsed))) {
+        throw new Error(`configure: existing config at ${path} is not a JSON object`)
+      }
+      existing = parsed as Record<string, unknown>
     } catch (err) {
+      // Re-throw the clear "not a JSON object" error as-is; wrap parse errors.
+      if (err instanceof Error && err.message.includes('is not a JSON object')) {
+        throw err
+      }
       throw new Error(`configure: failed to parse ${path}: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
@@ -41,7 +50,21 @@ export function configure(gatewayUrl: string, apiKey: string, configPath?: strin
     sdk: { ...existingSdk, anthropicBaseUrl: gatewayUrl, apiKey },
   }
   mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, JSON.stringify(merged, null, 2) + '\n', { mode: 0o600 })
-  // writeFileSync mode only applies on create; force 600 on an existing file too.
-  chmodSync(path, 0o600)
+
+  // Atomic write: temp file in same directory with 0600 mode, then rename.
+  const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`
+  try {
+    writeFileSync(tmpPath, JSON.stringify(merged, null, 2) + '\n', { mode: 0o600 })
+    renameSync(tmpPath, path)
+    // Belt-and-suspenders: force 0600 on the final file too.
+    chmodSync(path, 0o600)
+  } catch (err) {
+    // Best-effort cleanup of the temp file on error.
+    try {
+      unlinkSync(tmpPath)
+    } catch {
+      /* already gone or never created — fine */
+    }
+    throw new Error(`configure: failed to write ${path}: ${err instanceof Error ? err.message : String(err)}`)
+  }
 }

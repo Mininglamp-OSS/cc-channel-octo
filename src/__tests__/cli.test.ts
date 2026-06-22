@@ -142,6 +142,18 @@ describe('parseArgs configure', () => {
     const a = parseArgs(['configure', '--gateway-url=https://gw', '--api-key=sk-2'])
     expect(a.gatewayUrl).toBe('https://gw'); expect(a.apiKey).toBe('sk-2')
   })
+  it('throws when --gateway-url value is missing', () => {
+    expect(() => parseArgs(['configure', '--gateway-url'])).toThrow(/requires a value/)
+  })
+  it('throws when --gateway-url value is another flag', () => {
+    expect(() => parseArgs(['configure', '--gateway-url', '--api-key', 'sk'])).toThrow(/requires a value/)
+  })
+  it('throws when --api-key value is missing', () => {
+    expect(() => parseArgs(['configure', '--api-key'])).toThrow(/requires a value/)
+  })
+  it('throws when --api-key value is another flag', () => {
+    expect(() => parseArgs(['configure', '--api-key', '--gateway-url', 'https://gw'])).toThrow(/requires a value/)
+  })
 })
 
 describe('run configure with env var fallback', () => {

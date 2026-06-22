@@ -105,11 +105,19 @@ export function parseArgs(argv: string[]): ParsedArgs {
       const n = Number.parseInt(a.slice('--timeout='.length), 10);
       if (Number.isFinite(n) && n > 0) timeoutSec = n;
     } else if (a === '--gateway-url') {
-      gatewayUrl = rest[++i];
+      const next = rest[++i];
+      if (next === undefined || next.startsWith('--')) {
+        throw new Error('configure: --gateway-url requires a value')
+      }
+      gatewayUrl = next;
     } else if (a.startsWith('--gateway-url=')) {
       gatewayUrl = a.slice('--gateway-url='.length);
     } else if (a === '--api-key') {
-      apiKey = rest[++i];
+      const next = rest[++i];
+      if (next === undefined || next.startsWith('--')) {
+        throw new Error('configure: --api-key requires a value')
+      }
+      apiKey = next;
     } else if (a.startsWith('--api-key=')) {
       apiKey = a.slice('--api-key='.length);
     } else if (!a.startsWith('-') && version === undefined) {
