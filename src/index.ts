@@ -34,6 +34,15 @@ import { join } from 'node:path';
 import { mkdirSync, realpathSync } from 'node:fs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
+/**
+ * True when there are no bots to run — the gateway should idle (stay alive and
+ * online, with no sockets) until the first bot is provisioned. Pure for unit
+ * testing. See the idle branch in main().
+ */
+export function shouldRunIdle(botConfigs: { botId?: string }[]): boolean {
+  return botConfigs.length === 0;
+}
+
 async function main(): Promise<void> {
   // --- Q8: Global unhandled rejection handler ---
   process.on('unhandledRejection', (reason) => {
@@ -45,6 +54,26 @@ async function main(): Promise<void> {
   // v0.3 multi-bot: expand into one concrete Config per bot. Single-bot configs
   // resolve to a 1-element array, so the loop below is the same code path.
   const botConfigs = resolveBotConfigs(config);
+  if (shouldRunIdle(botConfigs)) {
+    console.log('[cc-channel-octo] idle (no bots configured) — awaiting provision');
+    // A pending Promise alone does NOT keep Node's event loop alive — the
+    // process would exit immediately and the supervisor would report "stopped"
+    // (claude runtime offline). Hold an explicit ref'd timer as keepalive and
+    // clear it on signal so shutdown stays clean. The first provision runs
+    // `cc-channel-octo restart`, respawning this process with a non-empty bots
+    // list, so the gateway transitions from idle to serving without manual steps.
+    await new Promise<void>((resolve) => {
+      const keepalive = setInterval(() => {}, 60_000); // ref'd (not unref'd) → keeps loop alive
+      const bye = (sig: string): void => {
+        console.log(`[cc-channel-octo] Received ${sig}, idle shutdown`);
+        clearInterval(keepalive);
+        resolve();
+      };
+      process.once('SIGINT', () => bye('SIGINT'));
+      process.once('SIGTERM', () => bye('SIGTERM'));
+    });
+    return;
+  }
   const multi = botConfigs.length > 1;
   if (multi) {
     console.log(`[cc-channel-octo] Multi-bot mode: starting ${botConfigs.length} bots`);
