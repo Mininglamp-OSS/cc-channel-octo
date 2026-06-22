@@ -133,6 +133,17 @@ describe('readVersion', () => {
   });
 });
 
+describe('parseArgs configure', () => {
+  it('parses --gateway-url and --api-key (space form)', () => {
+    const a = parseArgs(['configure', '--gateway-url', 'https://gw', '--api-key', 'sk-1'])
+    expect(a.cmd).toBe('configure'); expect(a.gatewayUrl).toBe('https://gw'); expect(a.apiKey).toBe('sk-1')
+  })
+  it('parses = form', () => {
+    const a = parseArgs(['configure', '--gateway-url=https://gw', '--api-key=sk-2'])
+    expect(a.gatewayUrl).toBe('https://gw'); expect(a.apiKey).toBe('sk-2')
+  })
+})
+
 describe('run version command', () => {
   it.each(['version', '--version', '-v'])('prints bare version and exits 0 for %s', async (arg) => {
     const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
