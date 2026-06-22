@@ -7,7 +7,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "cc-channel-octo": "dist/index.js"
+    "cc-channel-octo": "dist/cli.js"
   },
   "files": [
     "dist",

@@ -19,6 +19,32 @@ import { trustedText, escapeSectionMarkers, CURRENT_MESSAGE_ANCHOR } from './pro
 import type { SafeText } from './prompt-safety.js';
 
 
+/**
+ * Build the SDK subprocess env overlay. The SDK's `env` option REPLACES the
+ * subprocess environment, so we spread the base env first to keep
+ * PATH/HOME/etc., then layer operator-declared vars and gateway routing.
+ * Returns undefined when there is nothing to add (subprocess just inherits).
+ * Pure (base env injected) so the injection matrix is unit-testable.
+ *
+ * Param is narrowed to the fields it reads (not the whole Config['sdk']) so
+ * tests pass plain literals — repo lint is `--max-warnings 0` with
+ * no-explicit-any, so an `as any` cast in the test would fail the build.
+ */
+export function buildSdkEnv(
+  sdk: Pick<Config['sdk'], 'apiKey' | 'anthropicBaseUrl' | 'env'>,
+  baseEnv: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv | undefined {
+  const extraEnv = sdk.env;
+  const hasExtraEnv = extraEnv !== undefined && Object.keys(extraEnv).length > 0;
+  if (!sdk.anthropicBaseUrl && !sdk.apiKey && !hasExtraEnv) return undefined;
+  return {
+    ...baseEnv,
+    ...(hasExtraEnv ? extraEnv : {}),
+    ...(sdk.anthropicBaseUrl ? { ANTHROPIC_BASE_URL: sdk.anthropicBaseUrl } : {}),
+    ...(sdk.apiKey ? { ANTHROPIC_API_KEY: sdk.apiKey } : {}),
+  };
+}
+
 const VALID_PERMISSION_MODES: Set<string> = new Set([
   'default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto',
 ]);
@@ -225,25 +251,7 @@ export async function* queryAgent(
     if (sources.length > 0) linkSkillsIntoSandbox(cwd, sources);
   }
 
-  // Q1: forward scoped env to the SDK subprocess via the `env` option instead
-  // of mutating the gateway's global process.env. The SDK's `env` REPLACES the
-  // subprocess environment entirely, so spread process.env first to preserve
-  // PATH/HOME/ANTHROPIC_API_KEY. Scoping here means overrides never leak across
-  // requests. When nothing needs adding, omit `env` so the subprocess simply
-  // inherits process.env.
-  //   - sdk.env (#107): operator-declared extra vars (e.g. OCTO_BOT_ID so a
-  //     multi-bot deploy's octo-cli picks the right profile). Generic — cc does
-  //     not interpret them.
-  //   - ANTHROPIC_BASE_URL: model-gateway routing (set last so it wins).
-  const extraEnv = config.sdk.env;
-  const hasExtraEnv = extraEnv !== undefined && Object.keys(extraEnv).length > 0;
-  const env = config.sdk.anthropicBaseUrl || hasExtraEnv
-    ? {
-        ...process.env,
-        ...(hasExtraEnv ? extraEnv : {}),
-        ...(config.sdk.anthropicBaseUrl ? { ANTHROPIC_BASE_URL: config.sdk.anthropicBaseUrl } : {}),
-      }
-    : undefined;
+  const env = buildSdkEnv(config.sdk, process.env)
 
   // Build + iterate the SDK stream for a given resume id and prompt. Extracted so
   // a stale/expired `resume` (the SDK throws "No conversation found with session
