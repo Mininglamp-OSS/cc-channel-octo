@@ -1,0 +1,102 @@
+name: npm Publish Dev
+
+# Auto-publish a dev version to npm when changes land on main (typically via a
+# merged PR). Dev versions go to the npm dist-tag `dev`.
+#
+# Version pattern: <package.json version>-dev.<short-sha>
+# Example: package.json `1.0.1` + sha abc1234 → `1.0.1-dev.abc1234`
+#
+# Each merge produces a unique version (sha differs), so re-publish conflicts
+# are impossible. Stable / pre-release publishes use npm-publish.yml (tag-driven).
+#
+# Auth: NPM_TOKEN repository secret (publish rights on the @mininglamp-oss
+# scope). Provenance is attached via OIDC (`id-token: write` +
+# publishConfig.provenance:true in package.json).
+#
+# Install dev with:
+#   npm install -g @mininglamp-oss/cc-channel-octo@dev
+#   # or: npx @mininglamp-oss/cc-channel-octo@dev
+
+on:
+  push:
+    branches:
+      - main
+  # Manual override (e.g. force a dev publish without a code change, or dry-run).
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run npm publish with --dry-run (no actual upload)"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: npm-publish-dev
+  # Don't cancel in-flight publishes; npm version bump + publish is short and
+  # cancelling mid-publish can leave the registry in a weird state.
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run type-check
+      - run: npm run lint
+      - run: npm test
+
+  publish_dev:
+    name: Publish @dev
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write # required for npm provenance (OIDC)
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Resolve dev version
+        id: version
+        run: |
+          set -euo pipefail
+          BASE_VERSION=$(node -p "require('./package.json').version")
+          SHORT_SHA="${GITHUB_SHA::7}"
+          DEV_VERSION="${BASE_VERSION}-dev.${SHORT_SHA}"
+          DRY="${{ inputs.dry_run && '--dry-run' || '' }}"
+          {
+            echo "VERSION=$DEV_VERSION"
+            echo "DRY_RUN=$DRY"
+          } >> "$GITHUB_OUTPUT"
+          echo "[publish_dev] base=$BASE_VERSION sha=$SHORT_SHA → $DEV_VERSION dry='$DRY'"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Set dev version
+        # --allow-same-version is defensive; the per-sha suffix normally differs
+        # from package.json. The version is read at runtime from package.json
+        # (readVersion in cli.ts), so it must be set before publish.
+        run: npm version "${{ steps.version.outputs.VERSION }}" --no-git-tag-version --allow-same-version
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --tag dev ${{ steps.version.outputs.DRY_RUN }}
