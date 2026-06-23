@@ -20,7 +20,7 @@ import { isAllowedApiUrl } from './url-policy.js'
  * slash) so the stored base is the host root. Pure for unit testing.
  */
 export function normalizeGatewayUrl(raw: string): string {
-  return raw.replace(/\/v1\/?$/, '')
+  return raw.trim().replace(/\/v1\/?$/i, '')
 }
 
 export function configure(

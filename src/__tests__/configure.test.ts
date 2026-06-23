@@ -96,4 +96,8 @@ describe('normalizeGatewayUrl', () => {
   it('does not strip a mid-path v1', () => {
     expect(normalizeGatewayUrl('https://gw.test/v1/foo')).toBe('https://gw.test/v1/foo')
   })
+  it('strips a trailing /v1 case-insensitively and trims surrounding whitespace', () => {
+    expect(normalizeGatewayUrl('https://gw.test/V1')).toBe('https://gw.test')
+    expect(normalizeGatewayUrl('  https://gw.test/v1/  ')).toBe('https://gw.test')
+  })
 })
