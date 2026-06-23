@@ -13,7 +13,22 @@ import { dirname } from 'node:path'
 import { DEFAULT_CONFIG_PATH } from './config.js'
 import { isAllowedApiUrl } from './url-policy.js'
 
-export function configure(gatewayUrl: string, apiKey: string, configPath?: string): void {
+/**
+ * The Anthropic SDK appends `/v1/messages` to ANTHROPIC_BASE_URL. A gateway
+ * pasted with a trailing `/v1` would otherwise yield `/v1/v1/messages` (404,
+ * misreported as a model error). Strip a trailing `/v1` (optionally with a
+ * slash) so the stored base is the host root. Pure for unit testing.
+ */
+export function normalizeGatewayUrl(raw: string): string {
+  return raw.trim().replace(/\/v1\/?$/i, '')
+}
+
+export function configure(
+  gatewayUrl: string,
+  apiKey: string,
+  configPath?: string,
+  opts?: { model?: string; apiUrl?: string },
+): void {
   if (!gatewayUrl) throw new Error('configure: --gateway-url is required')
   if (!apiKey) throw new Error('configure: --api-key is required')
   // The gateway receives the API key + all prompt/response content, so it gets
@@ -21,6 +36,13 @@ export function configure(gatewayUrl: string, apiKey: string, configPath?: strin
   if (!isAllowedApiUrl(gatewayUrl)) {
     throw new Error(`configure: unsafe --gateway-url ${gatewayUrl} (must be https:// or http://localhost)`)
   }
+  // apiUrl is the Octo IM server (cc's top-level config.apiUrl). The daemon
+  // passes its server url at install time so the zero-bot idle gateway can boot
+  // (loadConfig requires apiUrl). Same SSRF policy as the gateway url.
+  if (opts?.apiUrl && !isAllowedApiUrl(opts.apiUrl)) {
+    throw new Error(`configure: unsafe --api-url ${opts.apiUrl} (must be https:// or http://localhost)`)
+  }
+  const normalizedUrl = normalizeGatewayUrl(gatewayUrl)
   const path = configPath ?? DEFAULT_CONFIG_PATH
   let existing: Record<string, unknown> = {}
   if (existsSync(path)) {
@@ -45,9 +67,20 @@ export function configure(gatewayUrl: string, apiKey: string, configPath?: strin
     existing.sdk && typeof existing.sdk === 'object' && !Array.isArray(existing.sdk)
       ? (existing.sdk as Record<string, unknown>)
       : {}
-  const merged = {
+  const merged: Record<string, unknown> = {
     ...existing,
-    sdk: { ...existingSdk, anthropicBaseUrl: gatewayUrl, apiKey },
+    sdk: { ...existingSdk, anthropicBaseUrl: normalizedUrl, apiKey },
+  }
+  // Write model only when provided; omitting it PRESERVES any existing sdk.model
+  // (the existingSdk spread above) so a re-configure that just rotates the key
+  // never wipes the model. Resetting model→default is intentionally not a
+  // configure feature (add an explicit --clear-model later if ever needed).
+  if (opts?.model) {
+    (merged.sdk as Record<string, unknown>).model = opts.model
+  }
+  // The Octo IM server url lives at the top level (not under sdk).
+  if (opts?.apiUrl) {
+    merged.apiUrl = opts.apiUrl
   }
   mkdirSync(dirname(path), { recursive: true })
 

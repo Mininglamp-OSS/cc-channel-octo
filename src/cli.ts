@@ -57,6 +57,10 @@ export interface ParsedArgs {
   gatewayUrl?: string;
   /** `configure --api-key <key>`. */
   apiKey?: string;
+  /** `configure --model <model>` — optional global sdk.model. */
+  model?: string;
+  /** `configure --api-url <url>` — Octo IM server url (cc top-level apiUrl). */
+  apiUrl?: string;
 }
 
 /**
@@ -97,6 +101,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let version: string | undefined;
   let gatewayUrl: string | undefined;
   let apiKey: string | undefined;
+  let model: string | undefined;
+  let apiUrl: string | undefined;
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === '--foreground' || a === '-f') {
@@ -120,11 +126,27 @@ export function parseArgs(argv: string[]): ParsedArgs {
       apiKey = next;
     } else if (a.startsWith('--api-key=')) {
       apiKey = a.slice('--api-key='.length);
+    } else if (a === '--model') {
+      const next = rest[++i];
+      if (next === undefined || next.startsWith('--')) {
+        throw new Error('configure: --model requires a value')
+      }
+      model = next;
+    } else if (a.startsWith('--model=')) {
+      model = a.slice('--model='.length);
+    } else if (a === '--api-url') {
+      const next = rest[++i];
+      if (next === undefined || next.startsWith('--')) {
+        throw new Error('configure: --api-url requires a value')
+      }
+      apiUrl = next;
+    } else if (a.startsWith('--api-url=')) {
+      apiUrl = a.slice('--api-url='.length);
     } else if (!a.startsWith('-') && version === undefined) {
       version = a;
     }
   }
-  return { cmd, foreground, timeoutMs: timeoutSec * 1000, version, gatewayUrl, apiKey };
+  return { cmd, foreground, timeoutMs: timeoutSec * 1000, version, gatewayUrl, apiKey, model, apiUrl };
 }
 
 /**
@@ -398,7 +420,7 @@ Usage:
   cc-channel-octo restart                stop (if running) then start
   cc-channel-octo status                 show running state
   cc-channel-octo upgrade [<version>]    npm install -g the gateway (default latest) then restart
-  cc-channel-octo configure --gateway-url <url> [--api-key <key>]   write LLM gateway + key to config (or set CC_OCTO_CONFIGURE_API_KEY)
+  cc-channel-octo configure --gateway-url <url> [--api-key <key>] [--model <model>] [--api-url <octo-server-url>]   write LLM gateway + key (+ optional model / Octo server url) to config (key also via CC_OCTO_CONFIGURE_API_KEY)
   cc-channel-octo version                print the version
 
 Paths (under ~/.cc-channel-octo):
@@ -418,7 +440,7 @@ export async function run(argv: string[], baseDir?: string, procId: ProcIdentity
     console.error(`cc-channel-octo: ${(err as Error).message}`);
     return 2;
   }
-  const { cmd, foreground, timeoutMs, version, gatewayUrl, apiKey } = parsed;
+  const { cmd, foreground, timeoutMs, version, gatewayUrl, apiKey, model, apiUrl } = parsed;
   const paths = resolveSupervisorPaths(baseDir);
   switch (cmd) {
     case 'start':
@@ -436,7 +458,7 @@ export async function run(argv: string[], baseDir?: string, procId: ProcIdentity
       const resolvedApiKey = apiKey ?? process.env.CC_OCTO_CONFIGURE_API_KEY ?? '';
       const configPath = baseDir ? join(baseDir, 'config.json') : undefined;
       try {
-        configure(gatewayUrl ?? '', resolvedApiKey, configPath);
+        configure(gatewayUrl ?? '', resolvedApiKey, configPath, { model, apiUrl });
         console.log('cc-channel-octo: configured gateway + api key');
         return 0;
       } catch (err) {

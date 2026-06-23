@@ -495,6 +495,18 @@ function isPathInside(child: string, parent: string): boolean {
  * apiUrl (fail fast at boot).
  */
 export function resolveBotConfigs(config: Config): Config[] {
+  // Zero-bot idle: no bots[] list and no global botToken — and no token in the
+  // default per-bot file either. Return [] so the gateway can run idle (online,
+  // no bots) until the first bot is provisioned, instead of throwing. A legacy
+  // single bot may keep its token only in <baseDir>/default/config.json (read by
+  // the synthesized "default" entry below), so check that before idling.
+  const hasInlineBots = !!(config.bots && config.bots.length > 0);
+  if (!hasInlineBots && !config.botToken) {
+    const defaultPerBot = readConfigFile(pathJoin(config.baseDir, 'default', 'config.json'));
+    if (!defaultPerBot.botToken) {
+      return [];
+    }
+  }
   // Single-bot: synthesize one entry with id "default".
   const entries: BotOverride[] =
     config.bots && config.bots.length > 0

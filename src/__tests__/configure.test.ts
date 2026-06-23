@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { configure } from '../configure.js'
+import { configure, normalizeGatewayUrl } from '../configure.js'
 
 let dir: string
 let cfgPath: string
@@ -61,5 +61,43 @@ describe('configure', () => {
   it('throws a clear error when existing config root is a number', () => {
     writeFileSync(cfgPath, JSON.stringify(42))
     expect(() => configure('https://gw', 'sk', cfgPath)).toThrow(/is not a JSON object/)
+  })
+  it('strips a trailing /v1 from the stored gateway url', () => {
+    configure('https://gw.test/v1', 'sk-test', cfgPath)
+    expect(JSON.parse(readFileSync(cfgPath, 'utf-8')).sdk.anthropicBaseUrl).toBe('https://gw.test')
+  })
+  it('writes sdk.model when a model is provided', () => {
+    configure('https://gw.test', 'sk', cfgPath, { model: 'vertexai/claude-opus-4-8' })
+    expect(JSON.parse(readFileSync(cfgPath, 'utf-8')).sdk.model).toBe('vertexai/claude-opus-4-8')
+  })
+  it('PRESERVES an existing sdk.model when no model is provided', () => {
+    writeFileSync(cfgPath, JSON.stringify({ sdk: { model: 'old/model' } }))
+    configure('https://gw.test', 'sk', cfgPath) // no model → keep existing
+    expect(JSON.parse(readFileSync(cfgPath, 'utf-8')).sdk.model).toBe('old/model')
+  })
+  it('writes the top-level apiUrl when provided', () => {
+    configure('https://gw.test', 'sk', cfgPath, { apiUrl: 'http://127.0.0.1:8090' })
+    expect(JSON.parse(readFileSync(cfgPath, 'utf-8')).apiUrl).toBe('http://127.0.0.1:8090')
+  })
+  it('rejects an unsafe --api-url', () => {
+    expect(() => configure('https://gw.test', 'sk', cfgPath, { apiUrl: 'ftp://evil' })).toThrow()
+  })
+})
+
+describe('normalizeGatewayUrl', () => {
+  it('strips a trailing /v1 or /v1/', () => {
+    expect(normalizeGatewayUrl('https://gw.test/v1')).toBe('https://gw.test')
+    expect(normalizeGatewayUrl('https://gw.test/v1/')).toBe('https://gw.test')
+  })
+  it('leaves a bare host or non-version path intact', () => {
+    expect(normalizeGatewayUrl('https://gw.test')).toBe('https://gw.test')
+    expect(normalizeGatewayUrl('https://gw.test/api')).toBe('https://gw.test/api')
+  })
+  it('does not strip a mid-path v1', () => {
+    expect(normalizeGatewayUrl('https://gw.test/v1/foo')).toBe('https://gw.test/v1/foo')
+  })
+  it('strips a trailing /v1 case-insensitively and trims surrounding whitespace', () => {
+    expect(normalizeGatewayUrl('https://gw.test/V1')).toBe('https://gw.test')
+    expect(normalizeGatewayUrl('  https://gw.test/v1/  ')).toBe('https://gw.test')
   })
 })

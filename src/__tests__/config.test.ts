@@ -141,8 +141,11 @@ describe('required field validation', () => {
     expect(() => loadConfig(path)).toThrow(/apiUrl/);
   });
 
-  it('resolveBotConfigs throws when a bot has no token (single-bot)', () => {
-    const path = writeConfig({ apiUrl: 'https://api.test' });
+  it('resolveBotConfigs throws when a listed bot has no token', () => {
+    // A bots[] entry whose token is absent (no inline token, no per-bot file)
+    // still fails fast. Only the truly empty case (no bots[], no global token,
+    // no default per-bot token) idles — see the "zero-bot idle" suite.
+    const path = writeConfig({ apiUrl: 'https://api.test', bots: [{ id: 'a' }] });
     expect(() => resolveBotConfigs(loadConfig(path))).toThrow(/missing botToken/);
   });
 
@@ -695,5 +698,34 @@ describe('v1.1: SOUL.md personality (openclaw-style)', () => {
     });
     const bots = resolveBotConfigs(loadConfig(cfgPath));
     expect(bots[0].sdk.systemPrompt).toBe('file soul wins');
+  });
+});
+
+describe('resolveBotConfigs zero-bot idle', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('returns [] when no bots[], no global botToken, no default per-bot token', () => {
+    // A freshly-installed gateway has only gateway/apiUrl, no bot yet.
+    const cfg = loadConfig(writeConfig({ apiUrl: 'https://api.test' }));
+    expect(resolveBotConfigs(cfg)).toEqual([]);
+  });
+
+  it('still returns one default bot when a global botToken is set', () => {
+    const cfg = loadConfig(writeConfig({ apiUrl: 'https://api.test', botToken: 'bf_legacy' }));
+    const bots = resolveBotConfigs(cfg);
+    expect(bots).toHaveLength(1);
+    expect(bots[0].botId).toBe('default');
+    expect(bots[0].botToken).toBe('bf_legacy');
+  });
+
+  it('still starts the default bot when only <baseDir>/default/config.json has a token', () => {
+    // No global botToken and no bots[], but a legacy single bot keeps its token
+    // in the default per-bot file — must NOT idle, must start that bot.
+    writeBotConfig('default', { botToken: 'bf_perbot' });
+    const cfg = loadConfig(writeConfig({ apiUrl: 'https://api.test' }));
+    const bots = resolveBotConfigs(cfg);
+    expect(bots).toHaveLength(1);
+    expect(bots[0].botToken).toBe('bf_perbot');
   });
 });

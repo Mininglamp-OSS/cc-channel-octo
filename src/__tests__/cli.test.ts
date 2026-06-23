@@ -38,6 +38,21 @@ describe('parseArgs', () => {
     expect(parseArgs(['stop', '--timeout=0']).timeoutMs).toBe(10_000);
     expect(parseArgs(['stop', '--timeout=abc']).timeoutMs).toBe(10_000);
   });
+
+  it('parses --model (space and = forms)', () => {
+    expect(parseArgs(['configure', '--model', 'm1']).model).toBe('m1');
+    expect(parseArgs(['configure', '--model=m2']).model).toBe('m2');
+  });
+
+  it('parses --api-url (space and = forms)', () => {
+    expect(parseArgs(['configure', '--api-url', 'http://127.0.0.1:8090']).apiUrl).toBe('http://127.0.0.1:8090');
+    expect(parseArgs(['configure', '--api-url=https://octo.test']).apiUrl).toBe('https://octo.test');
+  });
+
+  it('throws when --model or --api-url is missing a value', () => {
+    expect(() => parseArgs(['configure', '--model'])).toThrow(/--model requires a value/);
+    expect(() => parseArgs(['configure', '--api-url', '--api-key=k'])).toThrow(/--api-url requires a value/);
+  });
 });
 
 describe('isAlive', () => {
