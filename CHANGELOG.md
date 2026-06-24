@@ -4,7 +4,6 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-While the major version is `0`, minor releases may carry breaking changes.
 
 ## [Unreleased]
 
@@ -41,6 +40,16 @@ While the major version is `0`, minor releases may carry breaking changes.
 - **Configurable gateway URL and model** — the LLM gateway endpoint and model id
   are now read from config (settable via `configure`) instead of being fixed, so
   one build can target different gateways/models per deployment.
+
+### Fixed
+
+- **Per-message dispatch timeout** — a hung session no longer blocks the bot
+  indefinitely; each message dispatch is now bounded by a timeout so a stuck turn
+  is released instead of wedging the session (#142).
+- **Outbound `@uid` mention validation** — mentions emitted by the agent are now
+  validated against the live group's member set, so invalid/hallucinated `@uid`s
+  are dropped instead of being sent (#144, reworked in #145 to use the
+  authoritative member set).
 
 ## [1.0.1] - 2026-06-10
 
@@ -377,6 +386,7 @@ hardening across the SSRF, prompt-injection, and protocol-DoS surfaces.
 Initial tagged baseline: text messaging, streaming output, SQLite session
 persistence, rate limiting, and the core security model.
 
+[1.0.2]: https://github.com/Mininglamp-OSS/cc-channel-octo/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/Mininglamp-OSS/cc-channel-octo/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Mininglamp-OSS/cc-channel-octo/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/Mininglamp-OSS/cc-channel-octo/compare/v0.1.0...v0.2.0
