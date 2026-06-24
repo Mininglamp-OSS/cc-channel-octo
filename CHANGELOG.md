@@ -8,6 +8,8 @@ While the major version is `0`, minor releases may carry breaking changes.
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-06-24
+
 ### Added
 
 - **Process-supervisor CLI** — `cc-channel-octo start|stop|restart|status`
@@ -19,6 +21,26 @@ While the major version is `0`, minor releases may carry breaking changes.
 - **`version` / `--version` / `-v`** — prints the package version (read at
   runtime from `package.json`), and the `--help` banner now carries the version
   on its first line.
+- **`configure` subcommand** — `cc-channel-octo configure --gateway-url <url>
+  [--model <id>] [--api-url <url>]` writes the LLM gateway URL, optional model
+  id, and the Octo IM server URL (`apiUrl`) into the global config without
+  hand-editing JSON. The API key is read from the `CC_OCTO_CONFIGURE_API_KEY`
+  environment variable so it never appears in the process argument list. This is
+  what an automated installer invokes after a fresh global install to make the
+  gateway bootable.
+- **`upgrade` subcommand** — `cc-channel-octo upgrade <version>` performs an
+  in-place global npm reinstall to the target version and restarts the gateway,
+  so an installed gateway can self-update without an external script.
+- **Zero-bot idle startup** — the gateway now boots and stays up with no bound
+  bot (previously it required at least one bot to start). A bot bound later via
+  provisioning is picked up on the next restart, so a freshly installed gateway
+  can come online immediately and wait for its first bot.
+
+### Changed
+
+- **Configurable gateway URL and model** — the LLM gateway endpoint and model id
+  are now read from config (settable via `configure`) instead of being fixed, so
+  one build can target different gateways/models per deployment.
 
 ## [1.0.1] - 2026-06-10
 
