@@ -4,9 +4,10 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-While the major version is `0`, minor releases may carry breaking changes.
 
 ## [Unreleased]
+
+## [1.0.2] - 2026-06-24
 
 ### Added
 
@@ -19,6 +20,36 @@ While the major version is `0`, minor releases may carry breaking changes.
 - **`version` / `--version` / `-v`** — prints the package version (read at
   runtime from `package.json`), and the `--help` banner now carries the version
   on its first line.
+- **`configure` subcommand** — `cc-channel-octo configure --gateway-url <url>
+  [--model <id>] [--api-url <url>]` writes the LLM gateway URL, optional model
+  id, and the Octo IM server URL (`apiUrl`) into the global config without
+  hand-editing JSON. The API key is read from the `CC_OCTO_CONFIGURE_API_KEY`
+  environment variable so it never appears in the process argument list. This is
+  what an automated installer invokes after a fresh global install to make the
+  gateway bootable.
+- **`upgrade` subcommand** — `cc-channel-octo upgrade <version>` performs an
+  in-place global npm reinstall to the target version and restarts the gateway,
+  so an installed gateway can self-update without an external script.
+- **Zero-bot idle startup** — the gateway now boots and stays up with no bound
+  bot (previously it required at least one bot to start). A bot bound later via
+  provisioning is picked up on the next restart, so a freshly installed gateway
+  can come online immediately and wait for its first bot.
+
+### Changed
+
+- **Configurable gateway URL and model** — the LLM gateway endpoint and model id
+  are now read from config (settable via `configure`) instead of being fixed, so
+  one build can target different gateways/models per deployment.
+
+### Fixed
+
+- **Per-message dispatch timeout** — a hung session no longer blocks the bot
+  indefinitely; each message dispatch is now bounded by a timeout so a stuck turn
+  is released instead of wedging the session (#142).
+- **Outbound `@uid` mention validation** — mentions emitted by the agent are now
+  validated against the live group's member set, so invalid/hallucinated `@uid`s
+  are dropped instead of being sent (#144, reworked in #145 to use the
+  authoritative member set).
 
 ## [1.0.1] - 2026-06-10
 
@@ -355,6 +386,7 @@ hardening across the SSRF, prompt-injection, and protocol-DoS surfaces.
 Initial tagged baseline: text messaging, streaming output, SQLite session
 persistence, rate limiting, and the core security model.
 
+[1.0.2]: https://github.com/Mininglamp-OSS/cc-channel-octo/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/Mininglamp-OSS/cc-channel-octo/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Mininglamp-OSS/cc-channel-octo/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/Mininglamp-OSS/cc-channel-octo/compare/v0.1.0...v0.2.0
