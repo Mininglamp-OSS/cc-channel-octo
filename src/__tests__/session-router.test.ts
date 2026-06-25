@@ -723,6 +723,67 @@ describe('G14: bot-to-bot DM loop prevention', () => {
   });
 });
 
+// ─── #157: unregisterKnownBot (hot-reload sibling removal) ───────────────────
+
+describe('#157: unregisterKnownBot', () => {
+  it('drops a registered sibling, then processes it again after unregister', async () => {
+    const router = new SessionRouter(makeConfig(), ROBOT_ID);
+    router.registerKnownBot('peer-bot-uid');
+    const dm = () =>
+      router.route(
+        makeMsg({
+          channel_type: ChannelType.DM,
+          from_uid: 'peer-bot-uid',
+          payload: { type: MessageType.Text, content: 'hi' },
+        }),
+      );
+    // While registered: dropped as a known bot.
+    expect(await dm()).toBeNull();
+    // After unregister: no longer a known bot → treated as a normal DM peer.
+    router.unregisterKnownBot('peer-bot-uid');
+    const after = await dm();
+    expect(after).not.toBeNull();
+    expect(after!.shouldProcess).toBe(true);
+  });
+
+  it('refuses to unregister the router its own robotId (self is always a bot)', async () => {
+    const router = new SessionRouter(makeConfig(), ROBOT_ID);
+    router.unregisterKnownBot(ROBOT_ID);
+    // Self must still be treated as a bot — its own echoes stay dropped.
+    const result = await router.route(
+      makeMsg({
+        channel_type: ChannelType.DM,
+        from_uid: ROBOT_ID,
+        payload: { type: MessageType.Text, content: 'hi' },
+      }),
+    );
+    expect(result).toBeNull();
+    expect(router.knownBotUidsSnapshot().has(ROBOT_ID)).toBe(true);
+  });
+
+  it('is idempotent and safe for unknown / empty uids', () => {
+    const router = new SessionRouter(makeConfig(), ROBOT_ID);
+    expect(() => router.unregisterKnownBot('never-registered')).not.toThrow();
+    expect(() => router.unregisterKnownBot('')).not.toThrow();
+    router.registerKnownBot('peer');
+    router.unregisterKnownBot('peer');
+    router.unregisterKnownBot('peer'); // second time is a no-op
+    expect(router.knownBotUidsSnapshot().has('peer')).toBe(false);
+  });
+
+  it('snapshot reflects register/unregister and is a copy (not live)', () => {
+    const router = new SessionRouter(makeConfig(), ROBOT_ID);
+    router.registerKnownBot('peer');
+    const snap = router.knownBotUidsSnapshot();
+    expect(snap.has('peer')).toBe(true);
+    expect(snap.has(ROBOT_ID)).toBe(true);
+    // Mutating after snapshot must not change the already-returned set.
+    router.unregisterKnownBot('peer');
+    expect(snap.has('peer')).toBe(true); // snapshot is a copy
+    expect(router.knownBotUidsSnapshot().has('peer')).toBe(false);
+  });
+});
+
 // ─── G18: owner_uid storage ────────────────────────────────────────────────────────────
 
 describe('G18: owner_uid storage', () => {
