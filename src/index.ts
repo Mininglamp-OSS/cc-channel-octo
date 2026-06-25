@@ -37,15 +37,6 @@ import { mkdirSync, realpathSync } from 'node:fs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
 /**
- * True when there are no bots to run — the gateway should idle (stay alive and
- * online, with no sockets) until the first bot is provisioned. Pure for unit
- * testing. See the idle branch in main().
- */
-export function shouldRunIdle(botConfigs: { botId?: string }[]): boolean {
-  return botConfigs.length === 0;
-}
-
-/**
  * Resolve a single bot's concrete Config by its configId (config.json
  * `bots[].id`). Re-reads via resolveBotConfigs so a bot added after boot picks
  * up the latest global+per-bot merge. Throws if the id is absent — the manager
@@ -92,20 +83,30 @@ async function main(): Promise<void> {
     return startBot(botConfig, /* multi (main owns signals) */ true);
   });
 
-  // Initial sync: bring up whatever bots are already in config (may be none →
-  // idle). resolveBotConfigs throws on an invalid config; let that fail boot.
+  // Initial sync: bring up whatever bots are already in config. resolveBotConfigs
+  // throws on an invalid config; let that fail boot.
   const initialIds = resolveBotConfigs(config).map((c) => c.botId).filter((id): id is string => !!id);
+  let initialFailure: unknown;
   for (const id of initialIds) {
     try {
       await manager.addBot(id);
     } catch (err) {
-      // Multi-bot resilience: one bot failing to start must not abort the others
-      // or the process. Skip it; the watcher can retry on the next config touch.
+      // Multi-bot resilience: one bot failing to start must not abort the others.
+      // Record the first failure so we can preserve the original fail-boot
+      // behavior if NONE come up (see below).
+      initialFailure ??= err;
       console.error(`[cc-channel-octo] bot "${id}" failed to start, skipping: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  // Preserve pre-#157 semantics: an EMPTY config is a healthy idle state, but a
+  // NON-empty config where every bot failed is a boot failure (don't silently
+  // run idle while the operator believes bots are configured). The watcher still
+  // self-heals the empty/idle case on the next provision.
+  if (initialIds.length > 0 && manager.size() === 0) {
+    throw initialFailure ?? new Error('no bots started');
+  }
   if (manager.size() === 0) {
-    console.log('[cc-channel-octo] idle (no bots running) — awaiting provision');
+    console.log('[cc-channel-octo] idle (no bots configured) — awaiting provision');
   } else {
     console.log(`[cc-channel-octo] Ready — ${manager.size()} bot(s) running`);
   }
@@ -159,35 +160,6 @@ export interface BotStack {
   router: SessionRouter;
   connect: () => Promise<void>;
   shutdown: () => Promise<void>;
-}
-
-export interface StartFailure {
-  /** The failed bot's id (or a positional `#<index>` fallback). */
-  id: string;
-  reason: unknown;
-}
-
-/**
- * Split the settled results of starting every bot into the stacks that came up
- * and the ones that failed. Pure (no I/O) so the multi-bot resilience policy —
- * skip failed bots, keep the rest, only fatal when none start — is unit
- * testable. A failed bot's own partial resources are released inside startBot's
- * failure path (see its try/catch); this function never touches a stack.
- */
-export function partitionStartResults(
-  results: PromiseSettledResult<BotStack>[],
-  configs: { botId?: string }[],
-): { stacks: BotStack[]; failures: StartFailure[] } {
-  const stacks: BotStack[] = [];
-  const failures: StartFailure[] = [];
-  results.forEach((r, i) => {
-    if (r.status === 'fulfilled') {
-      stacks.push(r.value);
-    } else {
-      failures.push({ id: configs[i]?.botId ?? `#${i}`, reason: r.reason });
-    }
-  });
-  return { stacks, failures };
 }
 
 /**

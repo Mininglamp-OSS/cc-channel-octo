@@ -1,7 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   diffBotSets,
-  botKey,
   crossRegisterOnAdd,
   crossUnregisterOnRemove,
   BotManager,
@@ -28,14 +27,6 @@ describe('#157 diffBotSets', () => {
 
   it('is empty when desired equals running', () => {
     expect(diffBotSets(['a', 'b'], ['b', 'a'])).toEqual({ toAdd: [], toRemove: [] });
-  });
-});
-
-describe('#157 botKey', () => {
-  it('prefers configId, falls back to robotUid', () => {
-    expect(botKey({ configId: 'cfg-1', robotUid: 'r-1' })).toBe('cfg-1');
-    expect(botKey({ configId: '', robotUid: 'r-1' })).toBe('r-1');
-    expect(botKey({ robotUid: 'r-1' })).toBe('r-1');
   });
 });
 
@@ -178,6 +169,21 @@ describe('#157 BotManager add/remove', () => {
   it('removeBot is idempotent for an unknown key', async () => {
     const mgr = new BotManager(async (configId) => fakeBot(configId, `r-${configId}`));
     await expect(mgr.removeBot('nope')).resolves.toBeUndefined();
+    expect(mgr.size()).toBe(0);
+  });
+
+  it('shutdownAll tears down all bots; addBot afterwards is a no-op (no resurrection)', async () => {
+    const shutdownOrder: string[] = [];
+    const mgr = new BotManager(async (configId) =>
+      fakeBot(configId, `r-${configId}`, { onShutdown: () => shutdownOrder.push(configId) }),
+    );
+    await mgr.addBot('a');
+    await mgr.addBot('b');
+    await mgr.shutdownAll();
+    expect(mgr.size()).toBe(0);
+    expect(shutdownOrder.sort()).toEqual(['a', 'b']);
+    // An apply task that slipped past the watcher guard must NOT resurrect a bot.
+    await mgr.addBot('c');
     expect(mgr.size()).toBe(0);
   });
 

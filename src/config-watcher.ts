@@ -29,14 +29,24 @@ export interface Reconcilable {
  * (lock/dir) frees it before the replacement claims it. Add/remove failures are
  * logged and swallowed so one bad bot doesn't abort the whole reconcile; the
  * BotManager queue keeps the set consistent. Pure-ish (no fs) for unit testing.
+ *
+ * `isStale` is checked before each add/remove: a newer config event makes the
+ * in-flight reconcile abandon its remaining (now outdated) actions, so a bot
+ * removed by a later edit is never started by an earlier, slower reconcile
+ * (plan C6 generation guard).
  */
 export async function reconcile(
   manager: Reconcilable,
   desiredConfigIds: readonly string[],
   log: (msg: string) => void = () => {},
+  isStale: () => boolean = () => false,
 ): Promise<void> {
   const { toAdd, toRemove } = diffBotSets(desiredConfigIds, manager.runningKeys());
   for (const id of toRemove) {
+    if (isStale()) {
+      log(`[hot-reload] reconcile superseded by a newer config, stopping`);
+      return;
+    }
     try {
       await manager.removeBot(id);
       log(`[hot-reload] removed bot ${id}`);
@@ -45,6 +55,10 @@ export async function reconcile(
     }
   }
   for (const id of toAdd) {
+    if (isStale()) {
+      log(`[hot-reload] reconcile superseded by a newer config, stopping`);
+      return;
+    }
     try {
       await manager.addBot(id);
       log(`[hot-reload] added bot ${id}`);
@@ -98,8 +112,14 @@ export function watchConfig(opts: WatchOptions): WatcherHandle {
   let chain: Promise<void> = Promise.resolve();
   let timer: NodeJS.Timeout | undefined;
   let closed = false;
+  // Generation guard (plan C6): every scheduled change bumps `latestGen`. An
+  // apply task captures the gen at enqueue time; if a newer event arrives while
+  // it is mid-reconcile, its captured gen != latestGen and it abandons its
+  // remaining actions, so a slow reconcile never applies a stale desired set.
+  let latestGen = 0;
 
   const apply = (): Promise<void> => {
+    const myGen = ++latestGen;
     // Re-read latest desired set INSIDE the serialized task (plan C6). Any
     // failure (half-write / invalid config) leaves the running set untouched.
     chain = chain.then(async () => {
@@ -111,7 +131,7 @@ export function watchConfig(opts: WatchOptions): WatcherHandle {
         log(`[hot-reload] config invalid, keeping current bots: ${errMsg(err)}`);
         return;
       }
-      await reconcile(manager, desired, log);
+      await reconcile(manager, desired, log, () => closed || myGen !== latestGen);
     });
     return chain;
   };

@@ -70,6 +70,25 @@ describe('#157 reconcile', () => {
     expect(mgr.added).toEqual([]);
     expect(mgr.removed).toEqual([]);
   });
+
+  it('stops mid-reconcile when superseded by a newer generation (isStale)', async () => {
+    const mgr = fakeManager([]);
+    // desired wants a, b, c — but a newer config arrives right after the first add
+    let stale = false;
+    const order: string[] = [];
+    const wrapped: Reconcilable = {
+      runningKeys: () => mgr.runningKeys(),
+      addBot: async (id) => {
+        order.push(id);
+        await mgr.addBot(id);
+        if (id === 'a') stale = true; // a newer event lands after the first add
+      },
+      removeBot: mgr.removeBot,
+    };
+    await reconcile(wrapped, ['a', 'b', 'c'], () => {}, () => stale);
+    // Only 'a' applied; 'b'/'c' abandoned because the reconcile was superseded.
+    expect(order).toEqual(['a']);
+  });
 });
 
 // ─── watchConfig (real tmp dir + atomic rename) ──────────────────────────────

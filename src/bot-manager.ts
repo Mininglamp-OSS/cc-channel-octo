@@ -31,7 +31,6 @@ export interface DesiredBot {
 
 /**
  * Diff a desired config-id set against the currently-running config-id set.
- * Pure so the watcher's core decision is unit-testable.
  *
  * Returns the configIds to add (in desired, not running) and to remove (running,
  * not in desired). Order within each list is the input order of `desired` /
@@ -46,14 +45,6 @@ export function diffBotSets(
   const toAdd = desired.filter((id) => !runningSet.has(id));
   const toRemove = running.filter((id) => !desiredSet.has(id));
   return { toAdd, toRemove };
-}
-
-/**
- * Key a bot stack for the manager Map. configId is preferred; fall back to
- * robotUid only when a config has no explicit id (single-bot legacy). Pure.
- */
-export function botKey(bot: { configId?: string; robotUid: string }): string {
-  return bot.configId && bot.configId.length > 0 ? bot.configId : bot.robotUid;
 }
 
 /**
@@ -100,6 +91,10 @@ export type StartFn = (configId: string) => Promise<ManagedBot>;
 export class BotManager {
   private readonly bots = new Map<string, ManagedBot>();
   private queue: Promise<unknown> = Promise.resolve();
+  // Set by shutdownAll() so any apply task that was already past the watcher's
+  // `closed` guard can't re-add a bot after teardown has begun (plan E / N4
+  // shutdown race). Once true, addBot is a permanent no-op.
+  private shuttingDown = false;
 
   constructor(private readonly start: StartFn) {}
 
@@ -135,6 +130,7 @@ export class BotManager {
    */
   addBot(configId: string): Promise<void> {
     return this.enqueue(async () => {
+      if (this.shuttingDown) return; // teardown started — don't resurrect bots
       if (this.bots.has(configId)) return; // idempotent — already running
       const bot = await this.start(configId);
       const existing = [...this.bots.values()];
@@ -170,6 +166,7 @@ export class BotManager {
    * it can't interleave with an in-flight add/remove.
    */
   shutdownAll(): Promise<void> {
+    this.shuttingDown = true;
     return this.enqueue(async () => {
       const all = [...this.bots.values()];
       this.bots.clear();
