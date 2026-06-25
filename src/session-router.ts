@@ -76,6 +76,20 @@ export class SessionRouter {
     if (uid) this.knownBotUids.add(uid);
   }
 
+  /**
+   * Unregister a sibling bot uid (hot-reload: a bot was removed at runtime).
+   * Never drops this router's OWN robotId — self is always a bot, removing it
+   * would let the loop guard treat this bot's own echoes as user input.
+   */
+  unregisterKnownBot(uid: string): void {
+    if (uid && uid !== this.robotId) this.knownBotUids.delete(uid);
+  }
+
+  /** Test/diagnostics: snapshot of currently-known bot uids. */
+  knownBotUidsSnapshot(): ReadonlySet<string> {
+    return new Set(this.knownBotUids);
+  }
+
   /** G18: owner_uid stored from registerBot. Used by future permission model. */
   getOwnerUid(): string {
     return this.ownerUid;
