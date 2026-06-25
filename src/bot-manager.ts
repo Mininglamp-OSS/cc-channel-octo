@@ -163,5 +163,18 @@ export class BotManager {
       await bot.shutdown().catch(() => {});
     });
   }
+
+  /**
+   * Shut down every running bot (process exit). Drains them concurrently — order
+   * doesn't matter at teardown — and clears the Map. Runs on the serial queue so
+   * it can't interleave with an in-flight add/remove.
+   */
+  shutdownAll(): Promise<void> {
+    return this.enqueue(async () => {
+      const all = [...this.bots.values()];
+      this.bots.clear();
+      await Promise.allSettled(all.map((b) => b.shutdown()));
+    });
+  }
 }
 

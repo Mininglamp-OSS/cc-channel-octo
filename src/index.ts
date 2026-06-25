@@ -7,7 +7,9 @@
  * OctoGateway.start → setMessageHandler wiring the full pipeline.
  */
 
-import { loadConfig, resolveBotConfigs } from './config.js';
+import { loadConfig, resolveBotConfigs, DEFAULT_CONFIG_PATH } from './config.js';
+import { BotManager, type ManagedBot } from './bot-manager.js';
+import { watchConfig } from './config-watcher.js';
 import { createAdapter } from './db-adapter.js';
 import { SessionStore } from './session-store.js';
 import { OctoGateway } from './gateway.js';
@@ -43,6 +45,28 @@ export function shouldRunIdle(botConfigs: { botId?: string }[]): boolean {
   return botConfigs.length === 0;
 }
 
+/**
+ * Resolve a single bot's concrete Config by its configId (config.json
+ * `bots[].id`). Re-reads via resolveBotConfigs so a bot added after boot picks
+ * up the latest global+per-bot merge. Throws if the id is absent — the manager
+ * treats that as a failed add (rolled back), never starts a half-bot.
+ */
+export function resolveBotConfigById(
+  config: ReturnType<typeof loadConfig>,
+  configId: string,
+): ReturnType<typeof resolveBotConfigs>[number] {
+  const match = resolveBotConfigs(config).find((c) => c.botId === configId);
+  if (!match) {
+    throw new Error(`bot config not found for id "${configId}"`);
+  }
+  return match;
+}
+
+/** Absolute path to the global config.json the watcher should observe. */
+function configPathForWatch(): string {
+  return DEFAULT_CONFIG_PATH;
+}
+
 async function main(): Promise<void> {
   // --- Q8: Global unhandled rejection handler ---
   process.on('unhandledRejection', (reason) => {
@@ -51,118 +75,70 @@ async function main(): Promise<void> {
 
   // --- Config ---
   const config = loadConfig();
-  // v0.3 multi-bot: expand into one concrete Config per bot. Single-bot configs
-  // resolve to a 1-element array, so the loop below is the same code path.
-  const botConfigs = resolveBotConfigs(config);
-  if (shouldRunIdle(botConfigs)) {
-    console.log('[cc-channel-octo] idle (no bots configured) — awaiting provision');
-    // A pending Promise alone does NOT keep Node's event loop alive — the
-    // process would exit immediately and the supervisor would report "stopped"
-    // (claude runtime offline). Hold an explicit ref'd timer as keepalive and
-    // clear it on signal so shutdown stays clean. The first provision runs
-    // `cc-channel-octo restart`, respawning this process with a non-empty bots
-    // list, so the gateway transitions from idle to serving without manual steps.
-    await new Promise<void>((resolve) => {
-      const keepalive = setInterval(() => {}, 60_000); // ref'd (not unref'd) → keeps loop alive
-      const bye = (sig: string): void => {
-        console.log(`[cc-channel-octo] Received ${sig}, idle shutdown`);
-        clearInterval(keepalive);
-        resolve();
-      };
-      process.once('SIGINT', () => bye('SIGINT'));
-      process.once('SIGTERM', () => bye('SIGTERM'));
-    });
-    return;
-  }
-  const multi = botConfigs.length > 1;
-  if (multi) {
-    console.log(`[cc-channel-octo] Multi-bot mode: starting ${botConfigs.length} bots`);
-  }
 
-  // Each bot runs a fully independent stack (gateway + router + store + cwd
-  // cleanup), isolated by its own dataDir/cwdBase. They share nothing stateful,
-  // so per-user history and sandboxes never cross between bots.
-  //
-  // Two-phase startup so no WebSocket ACKs a message before its handler is
-  // ready: startBot() registers over REST (gets botId) and installs the message
-  // handler, but does NOT open the socket. We then cross-register sibling bot
-  // ids, and only AFTER that connect every socket.
-  //
-  // startBot() acquires the gateway.lock, opens the SQLite store, and arms the
-  // cwd-cleanup interval; on its own failure it releases those (see startBot's
-  // try/catch), so a rejected bot leaves nothing behind. Settle all, then apply
-  // the multi-bot resilience policy: skip the bots that failed, keep the ones
-  // that came up, and only treat startup as fatal when NONE start. (Single-bot
-  // mode has one entry, so "none started" == that bot failed → fatal, same as
-  // the old fail-fast behavior.) This stops one bot's bad token / held lock from
-  // taking the whole gateway — and every sibling bot — offline.
-  const startResults = await Promise.allSettled(botConfigs.map((c) => startBot(c, multi)));
-  const { stacks, failures } = partitionStartResults(startResults, botConfigs);
-  for (const f of failures) {
-    const reason = f.reason instanceof Error ? f.reason.message : String(f.reason);
-    console.error(`[cc-channel-octo] bot "${f.id}" failed to start, skipping: ${reason}`);
-  }
-  if (stacks.length === 0) {
-    // Nothing came up — surface the first failure and exit (process supervisor
-    // / operator restarts once the underlying cause is fixed).
-    throw failures[0]?.reason ?? new Error('no bots started');
-  }
+  // #157 hot-reload: a single long-lived BotManager owns the live bot set for
+  // the whole process lifetime. Bots are added/removed at runtime by a
+  // config.json watcher — provisioning a new bot no longer restarts the gateway.
+  // The manager always runs under multi-bot signal ownership (main() owns the
+  // shutdown signals; per-gateway handlers are disabled) so a bot added later is
+  // governed the same way as one present at boot.
+  const manager = new BotManager(async (configId): Promise<ManagedBot> => {
+    // Re-read config from disk: a bot added after boot is not in the boot-time
+    // config object. loadConfig() here reflects the latest config.json the
+    // watcher reacted to. startBot does register + handler install but does NOT
+    // open the socket — BotManager.addBot opens it (via stack.connect) AFTER
+    // cross-registering the loop-guard, preserving the two-phase ordering.
+    const botConfig = resolveBotConfigById(loadConfig(), configId);
+    return startBot(botConfig, /* multi (main owns signals) */ true);
+  });
 
-  // Multi-bot loop guard: make every router aware of ALL bot ids in this
-  // process, so a mention-free group can't let one bot reply to another's
-  // messages (knownBotUids → looksLikeBot → dropped). botIds are known after
-  // register() (REST), before any socket is open.
-  if (multi) {
-    const allBotIds = stacks.map((s) => s.botId);
-    for (const s of stacks) {
-      for (const id of allBotIds) {
-        if (id !== s.botId) s.router.registerKnownBot(id);
-      }
-    }
-  }
-
-  // Handlers are wired and siblings registered — now open every socket. From
-  // this point inbound messages are dispatched, never ACK'd-and-dropped.
-  //
-  // connect() is synchronous: it opens the WebSocket (fire-and-forget) and
-  // starts services. The try/catch here isolates a *synchronous* connect
-  // failure (e.g. an insecure ws:// URL rejected by isAllowedWsUrl, or a
-  // createSocket error) to that one bot — the others keep running. A *later*
-  // async WS drop is NOT surfaced here; it's handled by the gateway's own
-  // reconnect loop and never kills the process. The real auth gate is the
-  // register phase above (bad bot tokens fail there over REST and are isolated);
-  // by here every bot holds a freshly minted im_token, so connect failures are
-  // transport/transient, not per-bot auth.
-  const connected: BotStack[] = [];
-  for (const s of stacks) {
+  // Initial sync: bring up whatever bots are already in config (may be none →
+  // idle). resolveBotConfigs throws on an invalid config; let that fail boot.
+  const initialIds = resolveBotConfigs(config).map((c) => c.botId).filter((id): id is string => !!id);
+  for (const id of initialIds) {
     try {
-      await s.connect();
-      connected.push(s);
+      await manager.addBot(id);
     } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      console.error(`[cc-channel-octo] bot "${s.botId}" failed to connect, skipping: ${reason}`);
-      await s.shutdown().catch(() => {});
+      // Multi-bot resilience: one bot failing to start must not abort the others
+      // or the process. Skip it; the watcher can retry on the next config touch.
+      console.error(`[cc-channel-octo] bot "${id}" failed to start, skipping: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  if (connected.length === 0) {
-    throw new Error('no bots connected');
+  if (manager.size() === 0) {
+    console.log('[cc-channel-octo] idle (no bots running) — awaiting provision');
+  } else {
+    console.log(`[cc-channel-octo] Ready — ${manager.size()} bot(s) running`);
   }
 
-  // Wire a single process-wide shutdown that drains every LIVE bot, so N
-  // gateways don't each call process.exit. The per-gateway signal handlers are
-  // disabled in multi-bot mode (handleSignals=false); we own the signals here.
-  if (multi) {
-    const shutdownAll = async (signal: string): Promise<void> => {
-      console.log(`[cc-channel-octo] Received ${signal}, shutting down ${connected.length} bots...`);
-      await Promise.allSettled(connected.map((s) => s.shutdown()));
-      process.exit(0);
+  // #157: watch config.json and reconcile the running set on change. loadDesired
+  // re-reads + re-validates inside the watcher; an invalid/half-written config
+  // keeps the current bots (see config-watcher). The directory is watched (not
+  // the file) so an atomic temp+rename swap doesn't drop the subscription.
+  const watcher = watchConfig({
+    configPath: configPathForWatch(),
+    manager,
+    loadDesired: () =>
+      resolveBotConfigs(loadConfig()).map((c) => c.botId).filter((id): id is string => !!id),
+    log: (m) => console.log(`[cc-channel-octo] ${m}`),
+  });
+
+  // Single process-wide shutdown: stop the watcher, drain every live bot, exit.
+  // keepalive holds the event loop even when zero bots are running (idle state
+  // is now a steady runtime state, not just a boot branch).
+  await new Promise<void>((resolve) => {
+    const keepalive = setInterval(() => {}, 60_000); // ref'd → keeps loop alive while idle
+    const bye = async (signal: string): Promise<void> => {
+      console.log(`[cc-channel-octo] Received ${signal}, shutting down ${manager.size()} bot(s)...`);
+      clearInterval(keepalive);
+      watcher.close();
+      await manager.shutdownAll();
+      resolve();
     };
-    process.once('SIGINT', () => void shutdownAll('SIGINT'));
-    process.once('SIGTERM', () => void shutdownAll('SIGTERM'));
-  }
-
-  console.log(`[cc-channel-octo] Ready — listening for messages (${connected.length} bot(s))`);
+    process.once('SIGINT', () => void bye('SIGINT'));
+    process.once('SIGTERM', () => void bye('SIGTERM'));
+  });
 }
+
 
 export interface BotStack {
   /**
