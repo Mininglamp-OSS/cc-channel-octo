@@ -14,19 +14,17 @@
  */
 import type { SessionRouter } from './session-router.js';
 
-/** The subset of a started bot the manager needs to track and tear down. */
+/**
+ * The subset of a started bot the manager needs to track and tear down. The
+ * manager keys bots by the configId passed to addBot (not a field here), and the
+ * loop-guard uses robotUid — so configId is intentionally NOT carried on the
+ * stack (it would be a write-only field; see plan B2 for the identity split).
+ */
 export interface ManagedBot {
-  configId?: string;
   robotUid: string;
   router: SessionRouter;
   connect: () => Promise<void>;
   shutdown: () => Promise<void>;
-}
-
-/** A desired bot entry from config (just its identity for diffing). */
-export interface DesiredBot {
-  /** config.json bots[].id — the diff key. */
-  configId: string;
 }
 
 /**

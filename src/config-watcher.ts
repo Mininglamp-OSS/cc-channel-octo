@@ -112,14 +112,16 @@ export function watchConfig(opts: WatchOptions): WatcherHandle {
   let chain: Promise<void> = Promise.resolve();
   let timer: NodeJS.Timeout | undefined;
   let closed = false;
-  // Generation guard (plan C6): every scheduled change bumps `latestGen`. An
-  // apply task captures the gen at enqueue time; if a newer event arrives while
-  // it is mid-reconcile, its captured gen != latestGen and it abandons its
-  // remaining actions, so a slow reconcile never applies a stale desired set.
+  // Generation guard (plan C6). `latestGen` is bumped the moment a file event is
+  // observed (in schedule), NOT when the debounced apply finally runs — so an
+  // in-flight reconcile is invalidated immediately on a new event, even during
+  // the debounce window, instead of continuing to add/connect a bot a later
+  // edit already removed. Each apply captures the gen current when it starts and
+  // bails (isStale) as soon as a newer event has bumped past it.
   let latestGen = 0;
 
   const apply = (): Promise<void> => {
-    const myGen = ++latestGen;
+    const myGen = latestGen;
     // Re-read latest desired set INSIDE the serialized task (plan C6). Any
     // failure (half-write / invalid config) leaves the running set untouched.
     chain = chain.then(async () => {
@@ -138,6 +140,9 @@ export function watchConfig(opts: WatchOptions): WatcherHandle {
 
   const schedule = (): void => {
     if (closed) return;
+    // Invalidate any in-flight reconcile right now (not at debounce expiry): a
+    // slow reconcile must see this newer event before it acts on stale desired.
+    latestGen++;
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
       timer = undefined;
