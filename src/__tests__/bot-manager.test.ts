@@ -52,13 +52,14 @@ function fakeRouter(selfUid: string): FakeRouter {
 }
 
 function fakeBot(
-  configId: string,
+  _configId: string,
   robotUid: string,
   opts?: { connect?: () => Promise<void>; onShutdown?: () => void },
 ): ManagedBot & { router: FakeRouter } {
   const router = fakeRouter(robotUid);
+  // ManagedBot deliberately does NOT carry configId (plan B2: the manager keys
+  // by the addBot argument, not a stack field) — so the fixture doesn't set one.
   return {
-    configId,
     robotUid,
     router: router as unknown as ManagedBot['router'] & FakeRouter,
     connect: opts?.connect ?? (() => Promise.resolve()),
@@ -170,6 +171,91 @@ describe('#157 BotManager add/remove', () => {
     const mgr = new BotManager(async (configId) => fakeBot(configId, `r-${configId}`));
     await expect(mgr.removeBot('nope')).resolves.toBeUndefined();
     expect(mgr.size()).toBe(0);
+  });
+
+  it('removeBot closes the socket (shutdown) BEFORE unregistering from siblings', async () => {
+    // Loop-guard correctness: a removed bot may still drain in-flight handlers
+    // after shutdown() is called; siblings must keep recognizing its robotUid
+    // until the socket is closed. So order must be shutdown → unregister.
+    const events: string[] = [];
+    const mgr = new BotManager(async (configId) => {
+      const bot = fakeBot(configId, `r-${configId}`, {
+        onShutdown: () => events.push(`shutdown:${configId}`),
+      });
+      // wrap the sibling routers' unregister to record when 'a' is forgotten
+      return bot;
+    });
+    await mgr.addBot('a');
+    await mgr.addBot('b');
+    // Spy on b's router.unregisterKnownBot to record ordering vs a's shutdown.
+    const bBotRouter = (mgr as unknown as { bots: Map<string, ManagedBot & { router: FakeRouter }> }).bots.get('b')!.router;
+    const origUnreg = bBotRouter.unregisterKnownBot;
+    bBotRouter.unregisterKnownBot = (uid: string) => {
+      if (uid === 'r-a') events.push('unregister:a');
+      origUnreg(uid);
+    };
+    await mgr.removeBot('a');
+    expect(events).toEqual(['shutdown:a', 'unregister:a']);
+  });
+
+  it('addBotsBatch cross-registers the WHOLE batch before any connect (two-phase)', async () => {
+    // Reproduces the initial-multi-bot bug: A must know B even though both are
+    // brought up in the same batch. Connect order is recorded to assert all
+    // cross-registration happened before the first connect.
+    const events: string[] = [];
+    const made: Record<string, ManagedBot & { router: FakeRouter }> = {};
+    const mgr = new BotManager(async (configId) => {
+      const bot = fakeBot(configId, `r-${configId}`, {
+        connect: () => {
+          events.push(`connect:${configId}`);
+          return Promise.resolve();
+        },
+      });
+      made[configId] = bot;
+      return bot;
+    });
+    const { failed } = await mgr.addBotsBatch(['a', 'b']);
+    expect(failed).toEqual([]);
+    expect(mgr.runningKeys().sort()).toEqual(['a', 'b']);
+    // Bidirectional knowledge across the batch (the bug was A never learning B).
+    expect(made['a'].router.known.has('r-b')).toBe(true);
+    expect(made['b'].router.known.has('r-a')).toBe(true);
+    // Both connects happened (phase 3), after start+cross-register (phases 1-2).
+    expect(events.filter((e) => e.startsWith('connect:')).sort()).toEqual(['connect:a', 'connect:b']);
+  });
+
+  it('addBotsBatch rolls back a bot whose connect fails, keeps the rest', async () => {
+    const mgr = new BotManager(async (configId) => {
+      if (configId === 'bad') {
+        return fakeBot(configId, `r-${configId}`, {
+          connect: () => Promise.reject(new Error('connect boom')),
+        });
+      }
+      return fakeBot(configId, `r-${configId}`);
+    });
+    const { failed } = await mgr.addBotsBatch(['a', 'bad', 'b']);
+    expect(mgr.runningKeys().sort()).toEqual(['a', 'b']);
+    expect(failed.map((f) => f.configId)).toEqual(['bad']);
+    // surviving siblings must not retain the rolled-back bot's uid
+    const aRouter = (mgr as unknown as { bots: Map<string, ManagedBot & { router: FakeRouter }> }).bots.get('a')!.router;
+    expect(aRouter.known.has('r-bad')).toBe(false);
+  });
+
+  it('shutdownAll cancels an addBot enqueued BEFORE it (shuttingDown flag)', async () => {
+    // The load-bearing case for the flag: addBot is queued, THEN shutdownAll is
+    // called before the add runs. The add must become a no-op.
+    let started = 0;
+    const mgr = new BotManager(async (configId) => {
+      started++;
+      await new Promise((r) => setTimeout(r, 5));
+      return fakeBot(configId, `r-${configId}`);
+    });
+    const addP = mgr.addBot('a'); // enqueued, not yet awaited
+    const shutP = mgr.shutdownAll();
+    await Promise.all([addP, shutP]);
+    expect(mgr.size()).toBe(0);
+    // The add was cancelled by the shuttingDown flag before start() ran.
+    expect(started).toBe(0);
   });
 
   it('shutdownAll tears down all bots; addBot afterwards is a no-op (no resurrection)', async () => {

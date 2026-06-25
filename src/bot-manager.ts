@@ -153,8 +153,62 @@ export class BotManager {
       if (!bot) return; // idempotent — already gone
       this.bots.delete(configId);
       const remaining = [...this.bots.values()];
-      crossUnregisterOnRemove(bot, remaining);
+      // Symmetric inverse of addBot's ordering: close the socket FIRST, then let
+      // siblings forget this bot. If we unregistered before shutdown, the bot's
+      // in-flight handlers (still draining for up to the gateway drain timeout)
+      // could emit replies that siblings — having already dropped its robotUid —
+      // would treat as user input, reopening the very loop the guard prevents.
       await bot.shutdown().catch(() => {});
+      crossUnregisterOnRemove(bot, remaining);
+    });
+  }
+
+  /**
+   * Bring up several bots as ONE two-phase batch: start every bot (register +
+   * handler, NO socket) → cross-register the whole set's loop-guard uids
+   * pairwise → connect them all. This preserves the "no bot opens its socket
+   * before every sibling knows its robotUid" invariant ACROSS the initial set —
+   * adding bots one-by-one via addBot would let the first bot connect before
+   * later bots exist, so it would never learn them. A bot that fails to start or
+   * connect is rolled back and skipped (resilience); the rest still come up.
+   * Returns the configIds that failed.
+   */
+  addBotsBatch(configIds: readonly string[]): Promise<{ failed: { configId: string; error: unknown }[] }> {
+    return this.enqueue(async () => {
+      const failed: { configId: string; error: unknown }[] = [];
+      if (this.shuttingDown) {
+        return { failed: configIds.map((configId) => ({ configId, error: new Error('shutting down') })) };
+      }
+      // Phase 1: start (register + handler, no socket) every not-yet-running bot.
+      const started: { configId: string; bot: ManagedBot }[] = [];
+      for (const configId of configIds) {
+        if (this.bots.has(configId)) continue; // already running — skip
+        try {
+          started.push({ configId, bot: await this.start(configId) });
+        } catch (error) {
+          failed.push({ configId, error });
+        }
+      }
+      // Phase 2: cross-register loop-guard uids across the existing set AND the
+      // whole freshly-started batch, BEFORE any socket opens.
+      const existing = [...this.bots.values()];
+      const batch = started.map((s) => s.bot);
+      for (const s of started) {
+        crossRegisterOnAdd(s.bot, [...existing, ...batch]);
+      }
+      // Phase 3: connect every started bot. A connect failure rolls back just
+      // that bot (unregister from everyone + shutdown) and is reported.
+      for (const s of started) {
+        try {
+          await s.bot.connect();
+          this.bots.set(s.configId, s.bot);
+        } catch (error) {
+          crossUnregisterOnRemove(s.bot, [...existing, ...batch.filter((b) => b !== s.bot)]);
+          await s.bot.shutdown().catch(() => {});
+          failed.push({ configId: s.configId, error });
+        }
+      }
+      return { failed };
     });
   }
 

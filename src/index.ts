@@ -83,27 +83,22 @@ async function main(): Promise<void> {
     return startBot(botConfig, /* multi (main owns signals) */ true);
   });
 
-  // Initial sync: bring up whatever bots are already in config. resolveBotConfigs
-  // throws on an invalid config; let that fail boot.
+  // Initial sync: bring up the configured bots as ONE two-phase batch (start all
+  // → cross-register all → connect all), so no bot opens its socket before every
+  // sibling knows its robotUid (loop guard). resolveBotConfigs throws on an
+  // invalid config; let that fail boot.
   const initialIds = resolveBotConfigs(config).map((c) => c.botId).filter((id): id is string => !!id);
-  let initialFailure: unknown;
-  for (const id of initialIds) {
-    try {
-      await manager.addBot(id);
-    } catch (err) {
-      // Multi-bot resilience: one bot failing to start must not abort the others.
-      // Record the first failure so we can preserve the original fail-boot
-      // behavior if NONE come up (see below).
-      initialFailure ??= err;
-      console.error(`[cc-channel-octo] bot "${id}" failed to start, skipping: ${err instanceof Error ? err.message : String(err)}`);
-    }
+  const { failed } = await manager.addBotsBatch(initialIds);
+  for (const f of failed) {
+    // Multi-bot resilience: one bot failing to start must not abort the others.
+    console.error(`[cc-channel-octo] bot "${f.configId}" failed to start, skipping: ${f.error instanceof Error ? f.error.message : String(f.error)}`);
   }
   // Preserve pre-#157 semantics: an EMPTY config is a healthy idle state, but a
   // NON-empty config where every bot failed is a boot failure (don't silently
   // run idle while the operator believes bots are configured). The watcher still
   // self-heals the empty/idle case on the next provision.
   if (initialIds.length > 0 && manager.size() === 0) {
-    throw initialFailure ?? new Error('no bots started');
+    throw failed[0]?.error ?? new Error('no bots started');
   }
   if (manager.size() === 0) {
     console.log('[cc-channel-octo] idle (no bots configured) — awaiting provision');

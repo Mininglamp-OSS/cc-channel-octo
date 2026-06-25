@@ -155,19 +155,24 @@ describe('#157 watchConfig', () => {
       atomicWrite(path, ['a']);
       let desired = ['a'];
       const mgr = fakeManager(['a']);
+      const logs: string[] = [];
       const h = watchConfig({
         configPath: path,
         manager: mgr,
         loadDesired: () => desired,
         debounceMs: 20,
+        log: (m) => logs.push(m),
       });
-      // change desired and rewrite the file → watcher should pick it up
+      // change desired and rewrite the file → watcher should pick it up on its
+      // own (no manual applyNow, so the assertion proves the fs.watch path fired)
       desired = ['a', 'b'];
       atomicWrite(path, ['a', 'b']);
-      // wait past debounce + fs event latency
-      await new Promise((r) => setTimeout(r, 200));
-      await h.applyNow(); // ensure any scheduled apply has drained
+      // poll up to ~2s for the debounced watcher-driven reconcile to add 'b'
+      for (let i = 0; i < 40 && !mgr.added.includes('b'); i++) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
       expect(mgr.added).toContain('b');
+      expect(logs.some((m) => m.includes('added bot b'))).toBe(true);
       h.close();
     } finally {
       cleanup();
