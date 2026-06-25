@@ -165,6 +165,20 @@ async function main(): Promise<void> {
 }
 
 export interface BotStack {
+  /**
+   * configId — the bot's identity in config.json `bots[].id` (what the daemon
+   * writes). This is the key for the desired-set diff in hot-reload. May be
+   * undefined for a single-bot config with no explicit id; callers that need a
+   * stable map key fall back accordingly.
+   */
+  configId?: string;
+  /**
+   * robotUid — the robot id returned by Octo register(). This is the key used
+   * for SessionRouter known-bot registration/unregistration (loop guard).
+   * Distinct from configId: never mix them (see plan B2).
+   */
+  robotUid: string;
+  /** @deprecated alias of robotUid, kept so existing call sites compile. */
   botId: string;
   router: SessionRouter;
   connect: () => Promise<void>;
@@ -382,7 +396,7 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
     // Single-bot: the gateway's own SIGINT/SIGTERM handler invokes this.
     gateway.setShutdownCallback(shutdown);
 
-    return { botId: gateway.botId, router, connect, shutdown };
+    return { configId: config.botId, robotUid: gateway.botId, botId: gateway.botId, router, connect, shutdown };
   } catch (err) {
     // Release the durable resources acquired above so a failed bot doesn't leak
     // them in multi-bot mode (the surviving bots keep the process alive).
