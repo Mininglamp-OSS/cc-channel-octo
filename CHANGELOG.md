@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-06-26
+
+### Changed
+
+- **Hot-reload bots on config change — no gateway restart** — the gateway now
+  watches the global `config.json` and loads or unloads bots in place when its
+  bot set changes, instead of requiring a full process restart. A bot added by
+  provisioning comes online on its own, and a removed bot is disconnected and
+  unregistered, without bouncing the gateway or disturbing the other bots'
+  live sessions. This pairs with the daemon no longer restarting the gateway on
+  provision: previously, after the daemon stopped restarting, a newly added bot
+  stayed offline until the gateway was manually restarted.
+
+### Added
+
+- **Bot manager + config watcher** — a serial bot lifecycle manager and a
+  debounced config watcher reconcile the running bot set against the on-disk
+  config. Batch boot is two-phase (start all, cross-register all, then connect)
+  so the cross-bot loop guard is consistent, and removal shuts a bot down before
+  unregistering it. A generation guard drops stale reconcile passes when the
+  config changes again mid-apply.
+
 ## [1.0.2] - 2026-06-24
 
 ### Added
@@ -386,6 +408,7 @@ hardening across the SSRF, prompt-injection, and protocol-DoS surfaces.
 Initial tagged baseline: text messaging, streaming output, SQLite session
 persistence, rate limiting, and the core security model.
 
+[1.0.3]: https://github.com/Mininglamp-OSS/cc-channel-octo/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/Mininglamp-OSS/cc-channel-octo/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/Mininglamp-OSS/cc-channel-octo/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Mininglamp-OSS/cc-channel-octo/compare/v0.2.0...v1.0.0
