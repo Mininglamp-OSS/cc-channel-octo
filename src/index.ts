@@ -416,7 +416,7 @@ export async function handleMessage(
               channelId: msg.channel_id,
               channelType: msg.channel_type,
               messageIds: [msg.message_id],
-            }).catch((err) => console.error(`[cc-channel-octo] readReceipt failed: ${String(err)}`));
+            }).catch(() => { /* read receipt is best-effort; never surface failures */ });
           }
           return; // skip context, history, and the agent query entirely
         }
@@ -852,7 +852,7 @@ export async function handleMessage(
           channelId: msg.channel_id,
           channelType: msg.channel_type,
           messageIds: [msg.message_id],
-        }).catch((err) => console.error(`[cc-channel-octo] readReceipt failed: ${String(err)}`));
+        }).catch(() => { /* read receipt is best-effort; never surface failures */ });
       }
 
       // --- Store assistant response in history ---

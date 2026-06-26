@@ -3,7 +3,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
-import { getUploadCredentials } from '../octo/api.js';
+import { getUploadCredentials, sendReadReceipt } from '../octo/api.js';
+import { ChannelType } from '../octo/types.js';
 
 // Mock global fetch
 const fetchMock = vi.fn();
@@ -135,5 +136,47 @@ describe('getUploadCredentials', () => {
     // Error prefix + 200 chars max + nothing more
     expect(captured!.message.length).toBeLessThan(300);
     expect(captured!.message).not.toMatch(/x{300,}/);
+  });
+});
+
+describe('sendReadReceipt — message_ids guard', () => {
+  const RR_BASE = {
+    apiUrl: 'https://api.example.com',
+    botToken: 'test-token',
+    channelId: 'chan-1',
+    channelType: ChannelType.DM,
+  };
+
+  function bodyOf(callIndex = 0): Record<string, unknown> {
+    const init = fetchMock.mock.calls[callIndex][1] as RequestInit;
+    return JSON.parse(init.body as string);
+  }
+
+  it('includes message_ids when non-empty', async () => {
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({}));
+    await sendReadReceipt({ ...RR_BASE, messageIds: ['123', '456'] });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(bodyOf()).toMatchObject({ message_ids: ['123', '456'] });
+  });
+
+  it('omits message_ids when the array is empty', async () => {
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({}));
+    await sendReadReceipt({ ...RR_BASE, messageIds: [] });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect('message_ids' in bodyOf()).toBe(false);
+    // still clears the unread badge — channel_id is present
+    expect(bodyOf()).toMatchObject({ channel_id: 'chan-1' });
+  });
+
+  it('omits message_ids when every id is empty or blank', async () => {
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({}));
+    await sendReadReceipt({ ...RR_BASE, messageIds: ['', '   '] });
+    expect('message_ids' in bodyOf()).toBe(false);
+  });
+
+  it('filters out blank ids and keeps the real ones', async () => {
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({}));
+    await sendReadReceipt({ ...RR_BASE, messageIds: ['x', '', '  '] });
+    expect(bodyOf()).toMatchObject({ message_ids: ['x'] });
   });
 });

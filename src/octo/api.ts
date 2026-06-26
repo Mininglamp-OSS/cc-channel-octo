@@ -293,10 +293,15 @@ export async function sendReadReceipt(params: {
   messageIds: string[];
   signal?: AbortSignal;
 }): Promise<void> {
+  // Only send message-level ids that are actually present. An empty / blank id
+  // makes the server resolve a message_seq it cannot find, which the IM backend
+  // rejects — so omit message_ids entirely when there is nothing valid to ack
+  // (the request then just clears the conversation unread badge).
+  const ids = (params.messageIds ?? []).filter((id) => id && id.trim() !== '');
   await postJson(params.apiUrl, params.botToken, '/v1/bot/readReceipt', {
     channel_id: params.channelId,
     channel_type: params.channelType,
-    message_ids: params.messageIds,
+    ...(ids.length > 0 ? { message_ids: ids } : {}),
   }, params.signal);
 }
 
