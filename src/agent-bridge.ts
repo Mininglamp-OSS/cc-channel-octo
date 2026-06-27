@@ -307,10 +307,14 @@ export async function* queryAgent(
     });
 
   // Detect the SDK's stale/invalid-resume signal (verified via spike): it throws
-  // an Error whose message names the missing/invalid session id.
+  // an Error whose message names the missing/invalid session id. Also matches
+  // the Bedrock/Anthropic-direct ValidationException for orphaned tool_use
+  // blocks — when a turn is interrupted mid-execution, the SDK session is left
+  // with tool_use blocks that have no matching tool_result, and the next resume
+  // attempt must be treated as stale (#154).
   const isResumeError = (err: unknown): boolean => {
     const m = err instanceof Error ? err.message : String(err);
-    return /No conversation found with session ID|--resume requires a valid session/i.test(m);
+    return /No conversation found with session ID|--resume requires a valid session|tool_use.*ids were found without.*tool_result|tool_result.*blocks.*immediately after/i.test(m);
   };
 
   const stream = runStream(opts?.resume, userMessage);

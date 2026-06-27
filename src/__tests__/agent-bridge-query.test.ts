@@ -639,6 +639,94 @@ describe('queryAgent', () => {
     expect(mockQuery).toHaveBeenCalledTimes(1); // no retry after a tool_use side effect
     expect(resumeFailed).toBe(true); // but the stale id was cleared
   });
+
+  // --- orphaned tool_use ValidationException recovery (#154) ---
+  // Bedrock's ValidationException when a session carries tool_use blocks without
+  // corresponding tool_result blocks was NOT matched by isResumeError, so
+  // onResumeFailed was never called and the corrupt session id persisted.
+
+  it('recovers from a Bedrock ValidationException for orphaned tool_use blocks (no prior output)', async () => {
+    // The exact error shape Bedrock returns when a session carries tool_use
+    // blocks without matching tool_result blocks (observed in production, #154).
+    const bedrockErr = new Error(
+      'ValidationException: messages.805: `tool_use` ids were found without ' +
+      '`tool_result` blocks immediately after: toolu_757190a2ce1b41e48ebf8ebd, ' +
+      'toolu_c6e1a12e9f234cf493debbb5. Each `tool_use` block must have a ' +
+      'corresponding `tool_result` block.',
+    );
+    const throwing = createMockStream([]);
+    throwing[Symbol.asyncIterator] = async function* () { throw bedrockErr; };
+    const ok = createMockStream([
+      { type: 'assistant', session_id: 'fresh-sid', message: { content: [{ type: 'text', text: 'recovered' }] } },
+    ]);
+    mockQuery.mockReturnValueOnce(throwing).mockReturnValueOnce(ok);
+
+    let resumeFailed = false;
+    const ids: string[] = [];
+    const chunks: string[] = [];
+    for await (const chunk of queryAgent('hi', makeConfig(), undefined, undefined, {
+      resume: 'stale-sid',
+      onSessionId: (id) => ids.push(id),
+      onResumeFailed: () => { resumeFailed = true; },
+      fallbackRetryPrompt: 'fallback',
+    })) {
+      chunks.push(chunk);
+    }
+
+    expect(resumeFailed).toBe(true);
+    expect(chunks).toEqual(['recovered']);
+    expect(mockQuery).toHaveBeenCalledTimes(2);
+    expect(mockQuery.mock.calls[0][0].options.resume).toBe('stale-sid');
+    expect(mockQuery.mock.calls[1][0].options).not.toHaveProperty('resume');
+    expect(ids).toEqual(['fresh-sid']);
+  });
+
+  it('clears the stale id when a Bedrock ValidationException arrives AFTER output (no retry)', async () => {
+    const partial = createMockStream([]);
+    partial[Symbol.asyncIterator] = async function* () {
+      yield { type: 'assistant', session_id: 's', message: { content: [{ type: 'text', text: 'partial' }] } };
+      throw new Error(
+        'ValidationException: messages.12: `tool_use` ids were found without ' +
+        '`tool_result` blocks immediately after: toolu_abc. Each `tool_use` block ' +
+        'must have a corresponding `tool_result` block.',
+      );
+    };
+    mockQuery.mockReturnValue(partial);
+    const chunks: string[] = [];
+    let resumeFailed = false;
+    await expect(async () => {
+      for await (const chunk of queryAgent('hi', makeConfig(), undefined, undefined, {
+        resume: 'sid', onResumeFailed: () => { resumeFailed = true; },
+      })) { chunks.push(chunk); }
+    }).rejects.toThrow('ValidationException');
+    expect(chunks).toEqual(['partial']);
+    expect(mockQuery).toHaveBeenCalledTimes(1); // no retry after partial output
+    expect(resumeFailed).toBe(true); // stale id still cleared
+  });
+
+  it('matches Anthropic-direct error shape for orphaned tool_use (variant wording)', async () => {
+    // The Anthropic-direct API may phrase it differently. The regex must cover:
+    // "tool_result blocks immediately after" variant too.
+    const throwing = createMockStream([]);
+    throwing[Symbol.asyncIterator] = async function* () {
+      throw new Error('tool_result blocks immediately after: toolu_xyz');
+    };
+    const ok = createMockStream([
+      { type: 'assistant', session_id: 'new', message: { content: [{ type: 'text', text: 'ok' }] } },
+    ]);
+    mockQuery.mockReturnValueOnce(throwing).mockReturnValueOnce(ok);
+
+    let resumeFailed = false;
+    const chunks: string[] = [];
+    for await (const chunk of queryAgent('hi', makeConfig(), undefined, undefined, {
+      resume: 'stale',
+      onResumeFailed: () => { resumeFailed = true; },
+    })) {
+      chunks.push(chunk);
+    }
+    expect(resumeFailed).toBe(true);
+    expect(chunks).toEqual(['ok']);
+  });
 });
 
 describe('queryAgent — sdk.env injection (#107)', () => {
