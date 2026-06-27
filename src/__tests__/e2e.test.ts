@@ -10,30 +10,42 @@ import { join } from 'node:path';
 
 // --- Mocks (hoisted before imports) ---
 
-vi.mock('../octo/api.js', () => ({
-  sendMessage: vi.fn().mockResolvedValue(undefined),
-  sendTyping: vi.fn().mockResolvedValue(undefined),
-  sendReadReceipt: vi.fn().mockResolvedValue(undefined),
-  getGroupMembers: vi.fn().mockResolvedValue([]),
-  // G4 backfill path in the real handleMessage — default to no history.
-  getChannelMessages: vi.fn().mockResolvedValue([]),
-  getUploadCredentials: vi.fn().mockResolvedValue({
-    bucket: 'b', region: 'r', key: 'k',
-    credentials: { tmpSecretId: 'i', tmpSecretKey: 'k', sessionToken: 't' },
-    startTime: 1, expiredTime: 2,
-  }),
-  sendHeartbeat: vi.fn().mockResolvedValue(undefined),
-  registerBot: vi.fn().mockResolvedValue({
-    robot_id: 'bot-001',
-    im_token: 'token',
-    ws_url: 'ws://localhost',
-    api_url: 'https://test.example.com',
-    owner_uid: 'owner',
-    owner_channel_id: 'ch-owner',
-  }),
-  generateClientMsgNo: vi.fn().mockReturnValue('client-msg-001'),
-  fetchUserInfo: vi.fn().mockResolvedValue(null),
-}));
+vi.mock('../octo/api.js', () => {
+  // OCT-37: stream routes "not advertised" in the smoke suite — streamStart
+  // rejects with a 404 OctoApiError so deliver() takes the plain sendMessage
+  // fallback path, which these assertions target.
+  class OctoApiError extends Error {
+    status: number;
+    constructor(message: string, status: number) { super(message); this.name = 'OctoApiError'; this.status = status; }
+  }
+  return {
+    OctoApiError,
+    streamStart: vi.fn(async () => { throw new OctoApiError('stream routes absent', 404); }),
+    streamEnd: vi.fn().mockResolvedValue(undefined),
+    sendMessage: vi.fn().mockResolvedValue(undefined),
+    sendTyping: vi.fn().mockResolvedValue(undefined),
+    sendReadReceipt: vi.fn().mockResolvedValue(undefined),
+    getGroupMembers: vi.fn().mockResolvedValue([]),
+    // G4 backfill path in the real handleMessage — default to no history.
+    getChannelMessages: vi.fn().mockResolvedValue([]),
+    getUploadCredentials: vi.fn().mockResolvedValue({
+      bucket: 'b', region: 'r', key: 'k',
+      credentials: { tmpSecretId: 'i', tmpSecretKey: 'k', sessionToken: 't' },
+      startTime: 1, expiredTime: 2,
+    }),
+    sendHeartbeat: vi.fn().mockResolvedValue(undefined),
+    registerBot: vi.fn().mockResolvedValue({
+      robot_id: 'bot-001',
+      im_token: 'token',
+      ws_url: 'ws://localhost',
+      api_url: 'https://test.example.com',
+      owner_uid: 'owner',
+      owner_channel_id: 'ch-owner',
+    }),
+    generateClientMsgNo: vi.fn().mockReturnValue('client-msg-001'),
+    fetchUserInfo: vi.fn().mockResolvedValue(null),
+  };
+});
 
 vi.mock('../agent-bridge.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('../agent-bridge.js')>();

@@ -38,7 +38,7 @@ This document describes the internal architecture of cc-channel-octo: a standalo
 └─────────────────────────────────────────────────────────────┘
          ▲                                      │
          │ WuKongIM binary protocol             │ Octo REST API
-         │ (WebSocket)                          │ (send/typing)
+         │ (WebSocket)                          │ (stream/send/typing)
          ▼                                      ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                      Octo Server                            │
@@ -56,7 +56,7 @@ Forked from [openclaw-channel-octo](https://github.com/Mininglamp-OSS/openclaw-c
 | File | Responsibility |
 |---|---|
 | `types.ts` | Octo Bot API types, channel/message enums, mention payloads |
-| `api.ts` | REST API functions: register, send, typing, heartbeat, group members, user info, channel message sync |
+| `api.ts` | REST API functions: register, send, typing, heartbeat, stream start/end, group members, user info, channel message sync |
 | `socket.ts` | WuKongIM binary protocol over WebSocket: DH key exchange (curve25519), AES-CBC encryption, binary framing (variable-length encoding), CONNECT/CONNACK/RECV/RECVACK/PING/PONG, reconnect with exponential backoff + jitter |
 
 **Protocol details.** The WuKongIM protocol uses a custom binary framing format (not protobuf). Each frame has a 1-byte header (packet type in upper nibble, flags in lower nibble) followed by a variable-length body size and the body. Encryption is AES-128-CBC with keys derived from a Diffie-Hellman exchange (curve25519) during CONNECT/CONNACK. The salt from CONNACK provides the IV. Message IDs are 64-bit integers transmitted as big-endian — the API layer uses `parseOctoJson` to convert 16+ digit numeric IDs to strings before `JSON.parse` to avoid JavaScript precision loss.
@@ -77,7 +77,7 @@ Forked from [openclaw-channel-octo](https://github.com/Mininglamp-OSS/openclaw-c
 | `session-router.ts` | Message routing pipeline: self-message filter → bot blocklist → group mention gate (`uids` or `ais`, NOT `all`) → rate limiting (token bucket, per-session, debounced notification) → non-text rejection. **Critical design: `routeAndHandle` holds a per-session lock across both routing and handler execution** — this eliminates the TOCTOU gap between "should I process this?" and "processing it". |
 | `group-context.ts` | Group chat context management: in-memory message window (100 messages per channel, budget-capped to `maxContextChars`), member name cache (SQLite-backed, hourly API refresh), bidirectional uid↔name mapping, `@name` mention resolution via regex. Context string is built BEFORE the current message is cached to avoid duplication. |
 | `agent-bridge.ts` | Claude Agent SDK integration. Builds a **frozen** system prompt (security prefix + SOUL + group instructions only — no per-turn history/context, so the SDK's cached system block hits) and always `resume`s the SDK session (the source of truth for conversation history). Calls `query()` with configured permissions/tools/model, yields text chunks as `AsyncIterable<string>`. Recovers from a stale/expired resume by clearing the id + retrying once with an injected history fallback. **Knows nothing about Octo.** |
-| `stream-relay.ts` | Output delivery. Typing indicator heartbeat (5s). Delivers agent output via plain `sendMessage` with intelligent splitting (paragraph > newline > space > hard cut, 3500 char segments). |
+| `stream-relay.ts` | Output delivery. Typing indicator heartbeat (5s). Two-tier (OCT-37): incremental **stream path** (`stream/start` → per-chunk `sendMessage({stream_no})` → `stream/end` in a `finally` so END always fires), with **fallback** to plain `sendMessage` + @mention resolution + intelligent splitting (paragraph > newline > space > hard cut, 3500 char segments) when stream routes are absent (404). |
 | `index.ts` | Entry point orchestrator. Wires all modules in sequence: config → adapter → store → cleanup → group-context → stream-relay → gateway → router → message handler. The `handleMessage` function coordinates the full pipeline under the router's session lock. |
 
 ## Data Flow
@@ -93,7 +93,7 @@ Forked from [openclaw-channel-octo](https://github.com/Mininglamp-OSS/openclaw-c
 6. Inside handler (still under lock):
    a. session-store: getOrCreate session, build history prefix
    b. agent-bridge: buildPrompt (history + message) → query() → AsyncIterable<string>
-   c. stream-relay: typing heartbeat + sendMessage delivery to Octo
+   c. stream-relay: typing heartbeat + incremental stream delivery (or plain sendMessage fallback) to Octo
    d. session-store: append user message + assistant response
 7. Lock released → next queued message for this session proceeds
 ```
@@ -244,20 +244,32 @@ All 14 config fields are overridable via environment variables. See [README.md](
 
 ## Output Delivery
 
-### Text
+The stream relay implements a two-tier delivery strategy (OCT-37).
 
-The stream relay delivers agent text via plain `sendMessage` with intelligent text splitting. Split priority: paragraph break (`\n\n`) > newline (`\n`) > space > hard cut (surrogate-pair safe). Maximum segment size: 3500 characters. Per-segment try/catch ensures one failed segment does not drop the rest.
+### Stream path (preferred)
 
-A typing indicator heartbeat runs at 5-second intervals so the user sees activity during long agent runs.
+When the server advertises `/v1/bot/stream/{start,end}` (OCT-31), the relay renders a live, token-by-token bubble:
 
-### @mentions (G7)
+1. `stream/start` opens the bubble and returns a `stream_no` (the server forces the sender to the authenticated bot).
+2. Each agent chunk is sent via `sendMessage({ stream_no, content })` — the server forwards `stream_no` → `MsgSendReq` so octo-web appends it to the streaming bubble.
+3. `stream/end` is called in a **`finally`** so the terminal END (`streamFlag === END`) **always** fires — on success, agent error, abort, or truncation. octo-web (OCT-11) stops the streaming bubble on that END; a missing END leaves it stuck "streaming".
 
-Before each `sendMessage` call, the relay runs `resolveMentions()` from `mention-utils.ts`:
-- **Structured form** `@[uid:displayName]` (preferred, generated from system prompt) — converted to `@displayName` with precise `MentionEntity` payload.
-- **Plain form** `@displayName` — resolved via optional `memberMap` (displayName → uid). Longest-prefix match handles names containing spaces.
-- **`@all` / `@所有人`** — detected and surfaced as `mentionAll: true`.
+Per-chunk send failures are swallowed (logged) so one bad chunk does not abort the stream. A source-iterable error is re-thrown after END fires so the caller's error path still runs. Total streamed length is bounded by `maxResponseChars` (Q32). The stream path streams raw chunks and does **not** resolve @mentions — see note below.
 
-Resolved `mentionUids`, `mentionEntities`, and `mentionAll` are attached to the outbound payload so the IM server can route notifications correctly.
+### Fallback path
+
+When the server does not advertise the stream routes (**404** on `stream/start`), the relay falls back to plain `sendMessage` — this is a capability signal, not a turn error, and the result is cached so later turns skip the probe. The fallback accumulates the full reply, then:
+
+- **Text splitting.** Split priority: paragraph break (`\n\n`) > newline (`\n`) > space > hard cut (surrogate-pair safe). Maximum segment size: 3500 characters. Per-segment try/catch ensures one failed segment does not drop the rest.
+- **@mentions (G7).** `resolveMentions()` (from `mention-utils.ts`) runs ONCE on the full text before splitting:
+  - **Structured** `@[uid:displayName]` → `@displayName` with a precise `MentionEntity`.
+  - **Plain** `@displayName` → resolved via optional `memberMap`. Longest-prefix match handles names with spaces.
+  - **`@all` / `@所有人`** → surfaced as `mentionAll: true`, attached to the first segment only (no notification spam).
+  Resolved `mentionUids`, `mentionEntities`, and `mentionAll` are attached to the outbound payload so the IM server routes notifications correctly.
+
+A typing indicator heartbeat runs at 5-second intervals on both paths so the user sees activity during long agent runs.
+
+> **@mentions on the stream path.** The live token-by-token path sends raw chunks, so structured `@[uid:name]` mentions are not resolved and group notifications do not fire while streaming (a mention can span chunk boundaries, and per-chunk entity offsets do not map onto octo-web's concatenated bubble). Full mention handling lives on the fallback path. Resolving mentions inside streamed bubbles is a follow-up owned with Frontend.
 
 ### Outbound media & rich text
 
@@ -272,6 +284,7 @@ itself. Inbound media (downloading images the user sent) lives in `media-inbound
 ## Error Handling
 
 - **Agent errors:** Caught per-message, best-effort error reply sent to user, does not crash the process.
+- **Stream routes absent / failures:** A 404 on `stream/start` is a capability signal → automatic fallback to plain `sendMessage` (cached, no re-probe), no user-visible error. Transient (non-404) start failures fall back for that turn without disabling streaming. `stream/end` is always called in a `finally` so the live bubble is never left stuck "streaming".
 - **WebSocket disconnects:** Exponential backoff reconnect (3s base, 60s max, ±25% jitter). Three consecutive rapid disconnects (<5s each) trigger token refresh instead of reconnect.
 - **Heartbeat failures:** Three consecutive API heartbeat failures trigger reconnect via token refresh.
 - **Token refresh:** 60-second cooldown prevents refresh storms. Re-registers bot and establishes new WebSocket connection.

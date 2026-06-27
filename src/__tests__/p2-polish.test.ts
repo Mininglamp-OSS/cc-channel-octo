@@ -11,6 +11,10 @@ import { StreamRelay } from '../stream-relay.js';
 vi.mock('../octo/api.js', () => ({
   sendTyping: vi.fn().mockResolvedValue(undefined),
   sendMessage: vi.fn().mockResolvedValue(undefined),
+  // OCT-37: these truncation tests target the plain (fallback) path; streamStart
+  // returns a 404-shaped error so deliver() falls back deterministically.
+  streamStart: vi.fn(async () => { throw Object.assign(new Error('stream routes absent'), { status: 404 }); }),
+  streamEnd: vi.fn().mockResolvedValue(undefined),
   registerBot: vi.fn().mockResolvedValue({
     robot_id: 'bot-001',
     im_token: 'test-token',

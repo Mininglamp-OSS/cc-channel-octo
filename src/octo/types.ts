@@ -88,6 +88,38 @@ export interface SendMessageResult {
   message_seq: number;
 }
 
+// ─── Stream API (OCT-31 / OCT-37) ───────────────────────────────────────────
+//
+// Re-introduced after b7139d2 removed the (then-dead) stream path. The server
+// now exposes /v1/bot/stream/{start,end} (OCT-31). The bot opens a live bubble
+// with stream/start, streams incremental chunks via /v1/bot/sendMessage with
+// `stream_no` set, and closes the bubble with stream/end (terminal END). The
+// server forces FromUID to the authenticated bot, so no sender field is sent.
+
+/** Request body for POST /v1/bot/stream/start. */
+export interface BotStreamStartReq {
+  channel_id: string;
+  channel_type: ChannelType;
+  /** Optional client-side idempotency key for the opening message. */
+  client_msg_no?: string;
+  /** Optional message header flags (e.g. red-dot). */
+  header?: Record<string, unknown>;
+  /** Optional base64-encoded initial payload. */
+  payload?: string;
+}
+
+/** Response body for POST /v1/bot/stream/start. */
+export interface BotStreamStartResp {
+  stream_no: string;
+}
+
+/** Request body for POST /v1/bot/stream/end. */
+export interface BotStreamEndReq {
+  stream_no: string;
+  channel_id: string;
+  channel_type: ChannelType;
+}
+
 /** Channel types */
 export enum ChannelType {
   DM = 1,
