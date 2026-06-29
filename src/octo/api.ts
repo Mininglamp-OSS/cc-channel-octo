@@ -1,13 +1,17 @@
 // Forked from openclaw-channel-octo v1.0.13 (2026-06-04)
 // Source: https://github.com/Mininglamp-OSS/openclaw-channel-octo
-// Removed: COS upload, GROUP.md API, OBO, rich text, media, thread/group management,
+// Removed: COS upload, GROUP.md API, OBO, rich text, media, group management,
 //          read receipts, bot groups list, group info, mention prefs, space members.
+// Restored: thread lifecycle (create/list/get/delete/members/join/leave) — see
+//          "Thread Lifecycle" section below; group/server-md APIs stay removed.
 
 import {
   ChannelType,
   MessageType,
   type MentionEntity,
   type SendMessageResult,
+  type Thread,
+  type ThreadMember,
 } from "./types.js";
 import { randomUUID } from "node:crypto";
 
@@ -494,4 +498,171 @@ export async function getChannelMessages(params: {
     console.error(`octo: getChannelMessages error: ${String(err)}`);
     return [];
   }
+}
+
+// ─── Thread Lifecycle ────────────────────────────────────────────────────────
+//
+// Restores the bot thread (CommunityTopic) lifecycle endpoints that were removed
+// at fork time (see file header). Path / method / auth are a verbatim restore of
+// openclaw-channel-octo api-fetch.ts (createThread … leaveThread); each call is
+// routed through this client's postJson/getJson/requestNoBody helpers so it
+// shares the same timeout, Bearer auth, int64-safe JSON parse, and error-message
+// format as the rest of the API surface.
+
+/**
+ * Issue a request that carries neither a request body nor a meaningful response
+ * body (thread delete / join / leave). Mirrors postJson's timeout, Bearer auth,
+ * and error-message format. A 2xx with an empty body resolves to void.
+ */
+async function requestNoBody(
+  apiUrl: string,
+  botToken: string,
+  method: "POST" | "DELETE",
+  path: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const url = `${apiUrl.replace(/\/+$/, "")}${path}`;
+  const effectiveSignal = signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const resp = await fetch(url, {
+    method,
+    headers: { Authorization: `Bearer ${botToken}` },
+    signal: effectiveSignal,
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`Octo API ${path} failed (${resp.status}): ${text || resp.statusText}`);
+  }
+}
+
+/** Create a thread under a parent group. POST /v1/bot/groups/{groupNo}/threads */
+export async function createThread(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  name: string;
+  /** Optional: anchor the thread to the message it was started from. */
+  sourceMessageId?: number;
+  signal?: AbortSignal;
+}): Promise<Thread | undefined> {
+  const body: Record<string, unknown> = { name: params.name };
+  if (params.sourceMessageId != null) body.source_message_id = params.sourceMessageId;
+  return await postJson<Thread>(
+    params.apiUrl,
+    params.botToken,
+    `/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads`,
+    body,
+    params.signal,
+  );
+}
+
+/** List threads under a parent group. GET /v1/bot/groups/{groupNo}/threads */
+export async function listThreads(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  signal?: AbortSignal;
+}): Promise<Thread[]> {
+  const data = await getJson<Record<string, unknown>>(
+    params.apiUrl,
+    params.botToken,
+    `/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads`,
+    params.signal,
+  );
+  // Tolerate both a bare array and a `{ threads: [...] }` envelope, mirroring
+  // getGroupMembers' defensive shape handling.
+  const threads = Array.isArray(data?.threads)
+    ? data.threads
+    : Array.isArray(data)
+      ? data
+      : [];
+  return threads as Thread[];
+}
+
+/** Get a single thread. GET /v1/bot/groups/{groupNo}/threads/{shortId} */
+export async function getThread(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+  signal?: AbortSignal;
+}): Promise<Thread> {
+  return await getJson<Thread>(
+    params.apiUrl,
+    params.botToken,
+    `/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}`,
+    params.signal,
+  );
+}
+
+/** Delete a thread. DELETE /v1/bot/groups/{groupNo}/threads/{shortId} */
+export async function deleteThread(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+  signal?: AbortSignal;
+}): Promise<void> {
+  await requestNoBody(
+    params.apiUrl,
+    params.botToken,
+    "DELETE",
+    `/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}`,
+    params.signal,
+  );
+}
+
+/** List a thread's members. GET /v1/bot/groups/{groupNo}/threads/{shortId}/members */
+export async function listThreadMembers(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+  signal?: AbortSignal;
+}): Promise<ThreadMember[]> {
+  const data = await getJson<Record<string, unknown>>(
+    params.apiUrl,
+    params.botToken,
+    `/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}/members`,
+    params.signal,
+  );
+  const members = Array.isArray(data?.members)
+    ? data.members
+    : Array.isArray(data)
+      ? data
+      : [];
+  return members as ThreadMember[];
+}
+
+/** Join a thread. POST /v1/bot/groups/{groupNo}/threads/{shortId}/join */
+export async function joinThread(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+  signal?: AbortSignal;
+}): Promise<void> {
+  await requestNoBody(
+    params.apiUrl,
+    params.botToken,
+    "POST",
+    `/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}/join`,
+    params.signal,
+  );
+}
+
+/** Leave a thread. POST /v1/bot/groups/{groupNo}/threads/{shortId}/leave */
+export async function leaveThread(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+  signal?: AbortSignal;
+}): Promise<void> {
+  await requestNoBody(
+    params.apiUrl,
+    params.botToken,
+    "POST",
+    `/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}/leave`,
+    params.signal,
+  );
 }

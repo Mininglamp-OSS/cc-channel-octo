@@ -27,6 +27,7 @@
 
 import { closeSync, existsSync, openSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { extractThreadShortId, isThreadChannelId } from './octo/channel-id.js';
 
 /** Max bytes of an instruction file we will inject (keeps the prompt bounded). */
 export const MAX_GROUP_CONFIG_BYTES = 16_384; // 16 KiB
@@ -41,25 +42,65 @@ function isSafeId(id: string): boolean {
 }
 
 /**
- * Load the instruction file for a group, or undefined when none applies.
+ * Load the instruction file for a channel, or undefined when none applies.
  *
- * Looks for `<groupConfigDir>/<groupId>.md`. Returns the trimmed contents,
- * truncated to MAX_GROUP_CONFIG_BYTES. Returns undefined when:
- *   - groupConfigDir is not configured,
- *   - groupId is empty or unsafe as a path segment,
+ * Routing by channel-id shape:
+ *   - Plain group (`<groupNo>`, no separator): looks for `<groupNo>.md`.
+ *     Byte-identical to the pre-thread behavior.
+ *   - Thread (`<groupNo>____<shortId>`, CommunityTopic): a thread carries its
+ *     OWN instructions, not the parent group's, so the NEW semantics looks for
+ *     `<shortId>.md` (the thread's own slug). To avoid breaking deployments
+ *     that dropped a whole-composite `<groupNo>____<shortId>.md` file under the
+ *     old "channel_id as filename" behavior, it then falls back to that legacy
+ *     name when the short-id file is absent (compat lookup — see #88 redline 5).
+ *
+ * ⚠️ Path-semantics change (redline 5): before this change a thread channel_id
+ * was used verbatim as the filename; now the short id is the primary slug and
+ * the whole-composite name is only a fallback. A thread no longer inherits its
+ * parent group's `<groupNo>.md` (decision A: thread injects its own file only).
+ *
+ * Returns the trimmed contents, truncated to MAX_GROUP_CONFIG_BYTES, or
+ * undefined when no file applies. Never throws.
+ */
+export function loadGroupConfig(
+  groupConfigDir: string | undefined,
+  channelId: string,
+): string | undefined {
+  if (!groupConfigDir) return undefined;
+  if (!channelId) return undefined;
+
+  if (isThreadChannelId(channelId)) {
+    // New semantics: the thread's own short-id file first…
+    const shortId = extractThreadShortId(channelId);
+    if (shortId) {
+      const byShortId = loadConfigFile(groupConfigDir, shortId);
+      if (byShortId !== undefined) return byShortId;
+    }
+    // …then the legacy whole-composite filename for backward compatibility.
+    return loadConfigFile(groupConfigDir, channelId);
+  }
+
+  return loadConfigFile(groupConfigDir, channelId);
+}
+
+/**
+ * Read a single instruction file `<groupConfigDir>/<slug>.md`, or undefined.
+ *
+ * Returns the trimmed contents, truncated to MAX_GROUP_CONFIG_BYTES. Returns
+ * undefined when:
+ *   - slug is empty or unsafe as a path segment,
  *   - the file does not exist or is unreadable.
  *
  * Never throws — a misconfigured dir or unreadable file degrades to "no custom
  * instructions" rather than failing the turn.
  */
-export function loadGroupConfig(
-  groupConfigDir: string | undefined,
-  groupId: string,
+function loadConfigFile(
+  groupConfigDir: string,
+  slug: string,
 ): string | undefined {
-  if (!groupConfigDir) return undefined;
-  if (!groupId || !isSafeId(groupId)) return undefined;
+  if (!slug || !isSafeId(slug)) return undefined;
 
-  const path = join(groupConfigDir, `${groupId}.md`);
+  const path = join(groupConfigDir, `${slug}.md`);
   try {
     if (!existsSync(path)) return undefined;
     const st = statSync(path);

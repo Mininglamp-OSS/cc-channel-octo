@@ -4,6 +4,7 @@
 
 import type { DbAdapter, PreparedStatement } from './db-adapter.js';
 import { getGroupMembers, fetchUserInfo } from './octo/api.js';
+import { extractParentGroupNo } from './octo/channel-id.js';
 import { sanitizeDisplayName } from './prompt-safety.js';
 
 interface GroupMessage {
@@ -202,7 +203,14 @@ export class GroupContext {
     // Don't set lastRefresh here — only on success
 
     try {
-      const members = await getGroupMembers({ apiUrl, botToken, groupNo: channelId });
+      // Redline 6 (#88): the roster endpoint is keyed by the PARENT group number.
+      // A thread channelId is the composite `<groupNo>____<shortId>`; hitting
+      // `/groups/<groupNo>____<shortId>/members` 404s. Resolve the parent group
+      // number for the API call while keeping every cache (memory + DB + robot
+      // flags) keyed by the full channelId, so a thread keeps its own isolated
+      // roster view. For a plain group channelId extractParentGroupNo is identity.
+      const groupNo = extractParentGroupNo(channelId);
+      const members = await getGroupMembers({ apiUrl, botToken, groupNo });
       this.lastRefresh.set(channelId, now); // Record only on success
       const memberMap = this.getMemberMap(channelId);
       const nameMap = this.getNameToUid(channelId);
