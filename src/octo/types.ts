@@ -95,6 +95,30 @@ export enum ChannelType {
   CommunityTopic = 5,
 }
 
+/**
+ * A thread (CommunityTopic) under a parent group, as returned by the Octo bot
+ * thread lifecycle endpoints. A thread's channel_id is the composite
+ * `<groupNo>____<shortId>` (see octo/channel-id.ts).
+ */
+export interface Thread {
+  /** Thread short id; the right-hand side of the composite channel_id. */
+  short_id: string;
+  name: string;
+  /** uid of the member who created the thread. */
+  creator_uid: string;
+  /** Lifecycle status flag (server-defined). Absent on the create response. */
+  status?: number;
+  /** Current member count. Present on getThread. */
+  member_count?: number;
+}
+
+/** A single member of a thread, as returned by listThreadMembers. */
+export interface ThreadMember {
+  uid: string;
+  /** Member role within the thread (server-defined). */
+  role: number;
+}
+
 /** Message content types */
 export enum MessageType {
   Text = 1,

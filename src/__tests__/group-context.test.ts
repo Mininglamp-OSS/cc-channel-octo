@@ -507,3 +507,34 @@ describe('G23: robot flag', () => {
     expect(ctx.isMember('ch-empty', 'u2')).toBe(true);
   });
 });
+
+describe('GroupContext.refreshMembers — thread roster uses parent group [#88 redline 6]', () => {
+  let adapter: DbAdapter;
+  let ctx: GroupContext;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    adapter = createTestAdapter();
+    ctx = new GroupContext(adapter, 6000);
+  });
+
+  it('queries the PARENT group number, not the composite thread channel_id', async () => {
+    const GROUP = '99dc18164a29435f9791dc37023f98e1';
+    const COMPOSITE = `${GROUP}____2071488441815666688`;
+    (getGroupMembers as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+
+    await ctx.refreshMembers(COMPOSITE, 'https://test.example.com', 'bf_test');
+
+    expect(getGroupMembers).toHaveBeenCalledTimes(1);
+    const arg = (getGroupMembers as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    // Hitting /groups/<composite>/members would 404 — must use the parent group.
+    expect(arg.groupNo).toBe(GROUP);
+    expect(arg.groupNo).not.toContain('____');
+  });
+
+  it('passes a plain group channel_id through unchanged', async () => {
+    (getGroupMembers as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+    await ctx.refreshMembers('plain-group', 'https://test.example.com', 'bf_test');
+    expect((getGroupMembers as ReturnType<typeof vi.fn>).mock.calls[0][0].groupNo).toBe('plain-group');
+  });
+});

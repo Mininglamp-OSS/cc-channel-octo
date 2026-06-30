@@ -943,3 +943,32 @@ describe('unsupported channel types (system messages)', () => {
     expect(result?.shouldProcess).toBe(true);
   });
 });
+
+describe('SessionRouter — thread (CommunityTopic) session isolation [#88]', () => {
+  let router: SessionRouter;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    router = new SessionRouter(makeConfig(), ROBOT_ID);
+  });
+
+  it('a thread composite channel_id keys a session distinct from its parent group', () => {
+    const GROUP = '99dc18164a29435f9791dc37023f98e1';
+    const COMPOSITE = `${GROUP}____2071488441815666688`;
+
+    const parent = makeMsg({ channel_type: ChannelType.Group, channel_id: GROUP, from_uid: 'u1' });
+    const thread = makeMsg({ channel_type: ChannelType.CommunityTopic, channel_id: COMPOSITE, from_uid: 'u1' });
+
+    // The composite id IS the session key, so the thread never shares the
+    // parent group's session/history/cwd/memory partition.
+    expect(router.sessionKey(thread)).toBe(COMPOSITE);
+    expect(router.sessionKey(thread)).not.toBe(router.sessionKey(parent));
+  });
+
+  it('two threads under the same parent get independent sessions', () => {
+    const GROUP = 'g1';
+    const a = makeMsg({ channel_type: ChannelType.CommunityTopic, channel_id: `${GROUP}____aaa`, from_uid: 'u1' });
+    const b = makeMsg({ channel_type: ChannelType.CommunityTopic, channel_id: `${GROUP}____bbb`, from_uid: 'u1' });
+    expect(router.sessionKey(a)).not.toBe(router.sessionKey(b));
+  });
+});

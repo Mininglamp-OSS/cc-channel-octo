@@ -92,3 +92,43 @@ describe('loadGroupConfig', () => {
     expect(loadGroupConfig(dir, 'g1')).toBe('instructions');
   });
 });
+
+describe('loadGroupConfig — thread (composite channel_id) routing [#88 redline 5]', () => {
+  const GROUP = 'g123';
+  const SHORT = 't789';
+  const COMPOSITE = `${GROUP}____${SHORT}`;
+
+  it('a plain group id is unaffected (byte-identical to prior behavior)', () => {
+    writeFileSync(join(dir, `${GROUP}.md`), 'group rules');
+    expect(loadGroupConfig(dir, GROUP)).toBe('group rules');
+  });
+
+  it('NEW semantics: a thread reads its own <shortId>.md', () => {
+    writeFileSync(join(dir, `${SHORT}.md`), 'thread rules');
+    expect(loadGroupConfig(dir, COMPOSITE)).toBe('thread rules');
+  });
+
+  it('a thread does NOT inherit the parent group <groupNo>.md (decision A)', () => {
+    writeFileSync(join(dir, `${GROUP}.md`), 'group rules');
+    // No <shortId>.md and no legacy file → undefined, not the parent's file.
+    expect(loadGroupConfig(dir, COMPOSITE)).toBeUndefined();
+  });
+
+  it('COMPAT fallback: legacy whole-composite <groupNo____shortId>.md still loads', () => {
+    writeFileSync(join(dir, `${COMPOSITE}.md`), 'legacy thread file');
+    expect(loadGroupConfig(dir, COMPOSITE)).toBe('legacy thread file');
+  });
+
+  it('NEW semantics wins over the legacy whole-composite file', () => {
+    writeFileSync(join(dir, `${SHORT}.md`), 'new');
+    writeFileSync(join(dir, `${COMPOSITE}.md`), 'legacy');
+    expect(loadGroupConfig(dir, COMPOSITE)).toBe('new');
+  });
+
+  it('thread short id and parent group resolve to different files', () => {
+    writeFileSync(join(dir, `${GROUP}.md`), 'group rules');
+    writeFileSync(join(dir, `${SHORT}.md`), 'thread rules');
+    expect(loadGroupConfig(dir, GROUP)).toBe('group rules');
+    expect(loadGroupConfig(dir, COMPOSITE)).toBe('thread rules');
+  });
+});
