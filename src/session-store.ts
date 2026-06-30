@@ -149,13 +149,15 @@ export class SessionStore {
     // idempotent. Keyed on role because a user turn and the bot's reply
     // legitimately share the inbound seq (appendAssistant is called with the
     // inbound message_seq), so a session_id+seq-only index would wrongly forbid
-    // the reply. WHERE message_seq IS NOT NULL keeps it partial: assistant /
-    // legacy / no-seq turns carry NULL seq and stay unconstrained (NULLs are
-    // never equal to one another, but the explicit predicate documents intent and
-    // keeps the index small).
+    // the reply. The predicate is `message_seq > 0` (not merely IS NOT NULL):
+    // a synthetic cron fire carries the seq=0 SENTINEL (no real wire seq; see
+    // index.ts), and multiple cron rounds legitimately share seq=0 — constraining
+    // them would silently drop real rounds via INSERT OR IGNORE. So only real
+    // positive wire seqs are deduped; NULL- and 0/negative-seq turns stay
+    // unconstrained. `> 0` matches the existing "real seq" predicate in index.ts.
     this.adapter.exec(
       'CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_session_role_seq ' +
-        'ON messages(session_id, role, message_seq) WHERE message_seq IS NOT NULL',
+        'ON messages(session_id, role, message_seq) WHERE message_seq > 0',
     );
 
     this.selectSession = this.adapter.prepare('SELECT * FROM sessions WHERE id = ?');
@@ -168,8 +170,9 @@ export class SessionStore {
     // row at its message_seq (the "seq236" bug). The cure is a PARTIAL unique
     // index (created above) plus INSERT OR IGNORE here: a re-write of an already
     // stored (session_id, role, message_seq) is silently dropped, making append()
-    // idempotent. NULL-seq rows (assistant / legacy / no-seq turns) are exempt
-    // from the index, so OR IGNORE never suppresses them.
+    // idempotent. The index is partial on `message_seq > 0`, so NULL-seq turns
+    // AND the seq=0 cron sentinel (multiple legit rounds share it) are exempt —
+    // OR IGNORE never suppresses them.
     this.insertMessage = this.adapter.prepare(
       'INSERT OR IGNORE INTO messages (session_id, role, content, timestamp, message_seq, from_name) VALUES (?, ?, ?, ?, ?, ?)',
     );
@@ -205,11 +208,17 @@ export class SessionStore {
   /**
    * XIN-154 existing-row migration: collapse duplicate
    * (session_id, role, message_seq) rows left by the pre-fix seq236 double-write,
-   * keeping the lowest id (the earliest insert) in each group. Rows with NULL
-   * message_seq (assistant / legacy / no-seq turns) are never touched — they are
-   * not part of the uniqueness contract — and rows that merely share a seq across
-   * roles (a user turn and the bot's reply) are preserved because role is part of
-   * the grouping key.
+   * keeping the lowest id (the earliest insert) in each group.
+   *
+   * Only REAL wire seqs (message_seq > 0) participate. Rows are exempt when:
+   *   - message_seq IS NULL (assistant / legacy / no-seq turns), or
+   *   - message_seq <= 0 — notably the seq=0 SENTINEL a synthetic cron fire
+   *     carries (no real wire seq; see index.ts where the cron round stores
+   *     seq=0). Multiple cron rounds legitimately share seq=0, so folding on it
+   *     would delete real data — hence `> 0`, matching the codebase's existing
+   *     "real seq" predicate (`msg.message_seq > 0`).
+   * Rows that merely share a seq across roles (a user turn and the bot's reply)
+   * are preserved because role is part of the grouping key.
    *
    * Wrapped in a single transaction with explicit before/after row accounting: a
    * mismatch between the delete count and the row delta means the table was
@@ -226,8 +235,8 @@ export class SessionStore {
       ).n;
       const result = this.adapter
         .prepare(
-          'DELETE FROM messages WHERE message_seq IS NOT NULL AND id NOT IN (' +
-            'SELECT MIN(id) FROM messages WHERE message_seq IS NOT NULL ' +
+          'DELETE FROM messages WHERE message_seq > 0 AND id NOT IN (' +
+            'SELECT MIN(id) FROM messages WHERE message_seq > 0 ' +
             'GROUP BY session_id, role, message_seq)',
         )
         .run();

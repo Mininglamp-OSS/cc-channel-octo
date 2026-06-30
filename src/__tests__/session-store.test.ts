@@ -418,6 +418,25 @@ describe('SessionStore — seq236 double-write root-cause fix (partial unique in
     ).n;
     expect(nullCount).toBe(4);
   });
+
+  it('does NOT constrain the seq=0 cron sentinel — multiple cron rounds all persist', () => {
+    // A synthetic cron fire carries message_seq=0 (no real wire seq; see
+    // index.ts). Multiple rounds share seq=0 and are legitimately distinct. The
+    // partial index is `WHERE message_seq > 0`, so the sentinel is exempt and
+    // INSERT OR IGNORE must NOT collapse these (reviewer's data-loss blocker).
+    store.getOrCreate('g1', 'ch1', 2);
+    store.appendUser('g1', 'cron round 1', 0, 'Scheduler');
+    store.appendAssistant('g1', 'cron reply 1', 0, 'OctoBot');
+    store.appendUser('g1', 'cron round 2', 0, 'Scheduler');
+    store.appendAssistant('g1', 'cron reply 2', 0, 'OctoBot');
+
+    const count = (
+      adapter
+        .prepare("SELECT COUNT(*) AS n FROM messages WHERE session_id = 'g1' AND message_seq = 0")
+        .get() as { n: number }
+    ).n;
+    expect(count).toBe(4);
+  });
 });
 
 describe('SessionStore — existing-row dedup migration (seq236 backfill)', () => {
@@ -459,6 +478,17 @@ describe('SessionStore — existing-row dedup migration (seq236 backfill)', () =
         VALUES ('g1', 'assistant', 'no-seq A', 14, NULL, 'OctoBot');
       INSERT INTO messages (session_id, role, content, timestamp, message_seq, from_name)
         VALUES ('g1', 'assistant', 'no-seq B', 15, NULL, 'OctoBot');
+      -- seq=0 SENTINEL: synthetic cron fires carry message_seq=0 (no real wire
+      -- seq; see index.ts). Multiple cron rounds legitimately share seq=0 and are
+      -- DISTINCT rows. Folding them on (session, role, seq) would delete real
+      -- data — the reviewer's data-loss blocker. The migration must leave all of
+      -- these intact (predicate is message_seq > 0, not IS NOT NULL).
+      INSERT INTO messages (session_id, role, content, timestamp, message_seq, from_name)
+        VALUES ('g1', 'user', 'cron round 1', 16, 0, 'Scheduler');
+      INSERT INTO messages (session_id, role, content, timestamp, message_seq, from_name)
+        VALUES ('g1', 'user', 'cron round 2', 17, 0, 'Scheduler');
+      INSERT INTO messages (session_id, role, content, timestamp, message_seq, from_name)
+        VALUES ('g1', 'assistant', 'cron reply 1', 18, 0, 'OctoBot');
     `);
     return adapter;
   }
@@ -467,18 +497,19 @@ describe('SessionStore — existing-row dedup migration (seq236 backfill)', () =
     const adapter = seedDirtyDb();
     const store = new SessionStore(adapter);
 
-    // First pass: one duplicate user row removed; row accounting reported.
+    // First pass: one duplicate user row removed (seq236 only); row accounting
+    // reported. The three seq=0 cron rounds are NOT touched.
     const first = store.dedupeMessagesBySeq();
-    expect(first.before).toBe(6);
+    expect(first.before).toBe(9);
     expect(first.removed).toBe(1);
-    expect(first.after).toBe(5);
+    expect(first.after).toBe(8);
     expect(first.after).toBe(first.before - first.removed);
 
     // Idempotent re-entrancy: a second pass over clean data removes nothing.
     const second = store.dedupeMessagesBySeq();
-    expect(second.before).toBe(5);
+    expect(second.before).toBe(8);
     expect(second.removed).toBe(0);
-    expect(second.after).toBe(5);
+    expect(second.after).toBe(8);
 
     // The earliest (MIN id) duplicate survives.
     const userSeq236 = adapter
@@ -506,6 +537,19 @@ describe('SessionStore — existing-row dedup migration (seq236 backfill)', () =
         .get() as { n: number }
     ).n;
     expect(nullCount).toBe(2);
+
+    // DATA-LOSS GUARD (reviewer blocker): every seq=0 cron round survives — the
+    // migration never folds the sentinel. All three (2 user + 1 assistant) remain.
+    const cronRows = adapter
+      .prepare(
+        "SELECT content FROM messages WHERE session_id = 'g1' AND message_seq = 0 ORDER BY id",
+      )
+      .all() as Array<{ content: string }>;
+    expect(cronRows.map((r) => r.content)).toEqual([
+      'cron round 1',
+      'cron round 2',
+      'cron reply 1',
+    ]);
 
     store.close();
   });
@@ -537,6 +581,17 @@ describe('SessionStore — existing-row dedup migration (seq236 backfill)', () =
         .get() as { n: number }
     ).n;
     expect(afterAppend).toBe(1);
+
+    // The seq=0 cron rounds survived init()'s migration AND a fresh seq=0 round
+    // appends fine afterwards (the partial index excludes the sentinel, so
+    // INSERT OR IGNORE does not suppress it).
+    store.appendUser('g1', 'cron round 3', 0, 'Scheduler');
+    const cronCount = (
+      adapter
+        .prepare("SELECT COUNT(*) AS n FROM messages WHERE session_id = 'g1' AND message_seq = 0")
+        .get() as { n: number }
+    ).n;
+    expect(cronCount).toBe(4);
 
     store.close();
   });
