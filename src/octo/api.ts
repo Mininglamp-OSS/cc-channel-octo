@@ -540,8 +540,9 @@ export async function createThread(params: {
   botToken: string;
   groupNo: string;
   name: string;
-  /** Optional: anchor the thread to the message it was started from. */
-  sourceMessageId?: number;
+  /** Optional: anchor the thread to the message it was started from.
+   *  Carried as a string to stay int64-safe (avoids JS number precision loss). */
+  sourceMessageId?: string;
   signal?: AbortSignal;
 }): Promise<Thread | undefined> {
   const body: Record<string, unknown> = { name: params.name };

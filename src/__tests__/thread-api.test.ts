@@ -76,10 +76,10 @@ describe('createThread', () => {
     fetchMock.mockResolvedValueOnce(
       mockJsonResponse({ short_id: SHORT, name: 'topic', creator_uid: 'u1' }),
     );
-    await createThread({ ...BASE, groupNo: GROUP, name: 'topic', sourceMessageId: 42 });
+    await createThread({ ...BASE, groupNo: GROUP, name: 'topic', sourceMessageId: '42' });
     expect(JSON.parse(call().init.body as string)).toEqual({
       name: 'topic',
-      source_message_id: 42,
+      source_message_id: '42',
     });
   });
 });
