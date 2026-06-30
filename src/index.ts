@@ -28,7 +28,7 @@ import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } f
 import { downloadInboundImage, MAX_IMAGES_PER_MESSAGE } from './media-inbound.js';
 import { handleCommand } from './commands.js';
 import { resolveGroupInstructions } from './group-md.js';
-import { GroupMdCache } from './group-md-cache.js';
+import { GroupMdCache, DEFAULT_GROUP_MD_TTL_MS } from './group-md-cache.js';
 import { CronStore } from './cron-store.js';
 import { CronScheduler } from './cron-scheduler.js';
 import { createCronToolServer, CRON_TOOL_SERVER_NAME, type CronSessionCoords } from './cron-tool.js';
@@ -212,11 +212,13 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
     const groupContext = new GroupContext(adapter, config.context.maxContextChars);
     groupContext.loadAllFromDb();
 
-    // --- P2-A: server GROUP.md cache (durable copy under dataDir, decoupled from
-    // the P1 GroupContext caches). Created unconditionally — cheap, and the disk
-    // dir is only materialized on first write (i.e. when serverMd is enabled and
-    // a fetch succeeds). ---
-    const groupMdCache = new GroupMdCache(join(config.dataDir, 'group-md-cache'));
+    // --- P2-A: server GROUP.md cache. IN-MEMORY ONLY (no disk) — the resolved
+    // GROUP.md is injected as a TRUSTED system-prompt block, and a disk cache the
+    // gateway user can write would be a chat-injection → trusted-prompt poisoning
+    // vector that survives restart (review #172 🔴; see group-md-cache.ts). TTL
+    // bounds staleness (review #172 🟡). Decoupled from the P1 GroupContext
+    // caches; created unconditionally (cheap, only populated when serverMd is on). ---
+    const groupMdCache = new GroupMdCache(config.serverMdTtlMs ?? DEFAULT_GROUP_MD_TTL_MS);
 
     // --- #115: cron (opt-in). ---
     if (config.sdk.cron && config.botId) {

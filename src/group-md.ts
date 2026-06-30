@@ -10,12 +10,22 @@
  *      (`loadGroupConfig`). Byte-identical to the pre-P2 behavior, so existing
  *      local-file deployments are unaffected.
  *   2. Feature flag ON:
- *        a. serve a cached server GROUP.md if present (keyed by the PARENT group
- *           number — a thread shares its parent group's GROUP.md);
+ *        a. serve a cached server GROUP.md if present and not past its TTL (keyed
+ *           by the PARENT group number — a thread shares its parent group's
+ *           GROUP.md). The cache is IN-MEMORY ONLY (no disk), so the only way
+ *           content reaches this trusted system-prompt channel is a live,
+ *           authenticated fetch — never a forgeable on-disk artifact a chat-
+ *           driven Bash/Write could plant (review #172 🔴; see group-md-cache.ts);
  *        b. otherwise fetch from the server (server-first). On success with
  *           non-empty content, cache it and use it;
  *        c. on ANY failure (404 "no GROUP.md", network, timeout, empty content)
  *           fall back to the local file. The local-file path is never lost.
+ *
+ * Trust: server content stands on its own trust root — an authenticated
+ * `getGroupMd` over the bot token against the SSRF-validated `apiUrl`, server-
+ * side bot_admin-gated — NOT on the OS-permission trust the local `groupConfigDir`
+ * file relies on. By caching only in memory we never let server content
+ * masquerade as (or be confused with) a trusted local file on disk.
  *
  * Thread routing (P1): a thread channelId is the composite `<groupNo>____<shortId>`.
  * The server GROUP.md endpoint is keyed by the parent group number, so we resolve
@@ -74,8 +84,9 @@ export async function resolveGroupInstructions(
 
   const groupNo = extractParentGroupNo(channelId);
 
-  // a) cached server GROUP.md wins (kept stable until invalidated by the
-  //    event-driven refresh — a separate work item).
+  // a) fresh cached server GROUP.md wins. The cache is in-memory only and TTL-
+  //    bounded, so an expired entry reads as a miss and falls through to a
+  //    re-fetch below (staleness backstop; item B adds event-driven refresh).
   const cached = cache.get(groupNo);
   if (cached) {
     const bounded = boundInstructions(cached.content);

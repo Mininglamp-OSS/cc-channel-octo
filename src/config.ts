@@ -94,10 +94,19 @@ export interface Config {
    * server GROUP.md API (`GET /v1/bot/groups/{groupNo}/md`) first, falling back
    * to the local `groupConfigDir` file on any failure (404 / network / no
    * content). When false/unset (default) only the local file is used — flip it
-   * off to roll back to pure local-file behavior. The fetched copy is cached in
-   * `<dataDir>/group-md-cache`.
+   * off to roll back to pure local-file behavior. The fetched copy is cached
+   * IN MEMORY ONLY (never on disk — the content is injected as a trusted system
+   * prompt and a disk cache the gateway user can write would be a poisoning
+   * vector), with a TTL staleness backstop (`serverMdTtlMs`).
    */
   serverMd?: boolean;
+  /**
+   * P2-A: TTL in ms for the in-memory server GROUP.md cache — a cached entry is
+   * re-fetched once it is this old, so an operator's server-side edit eventually
+   * takes effect even before item B's event-driven refresh lands. Defaults to
+   * `DEFAULT_GROUP_MD_TTL_MS` (5 min). Only meaningful when `serverMd` is true.
+   */
+  serverMdTtlMs?: number;
   sdk: {
     model?: string;
     /**
@@ -269,6 +278,7 @@ type PartialConfig = {
   apiUrl?: string;
   groupConfigDir?: string;
   serverMd?: boolean;
+  serverMdTtlMs?: number;
   sdk?: Partial<Config['sdk']>;
   rateLimit?: Partial<Config['rateLimit']>;
   context?: Partial<Config['context']>;
@@ -361,6 +371,7 @@ function mergeConfig(base: Config, override: PartialConfig): Config {
     memoryBase: base.memoryBase,
     groupConfigDir: override.groupConfigDir ?? base.groupConfigDir,
     serverMd: override.serverMd ?? base.serverMd,
+    serverMdTtlMs: override.serverMdTtlMs ?? base.serverMdTtlMs,
     sdk: {
       ...base.sdk,
       ...(override.sdk ?? {}),
@@ -594,6 +605,7 @@ export function resolveBotConfigs(config: Config): Config[] {
         perBotFile.mentionFreeGroups ?? bot.mentionFreeGroups ?? config.mentionFreeGroups,
       groupConfigDir: perBotFile.groupConfigDir ?? config.groupConfigDir,
       serverMd: perBotFile.serverMd ?? config.serverMd,
+      serverMdTtlMs: perBotFile.serverMdTtlMs ?? config.serverMdTtlMs,
       sdk: {
         ...config.sdk,
         ...(perBotFile.sdk ?? {}),
