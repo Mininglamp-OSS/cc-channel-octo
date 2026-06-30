@@ -595,11 +595,16 @@ describe('E2E smoke tests', () => {
   // --- 6. Multi-turn history accumulates ---
 
   it('Multi-turn DM: history accumulates across messages', async () => {
+    // message_seq is monotonic per channel in WuKongIM, so two distinct inbound
+    // messages always carry distinct seqs. Use realistic seqs here — the
+    // (session_id, role, message_seq) uniqueness contract treats a repeated
+    // (user, seq) as the same message (seq236 double-write guard), which would
+    // otherwise drop the second turn if both reused the makeDmMsg default seq.
     mockQueryYield('First reply');
-    await simulateMessage(makeDmMsg('Hello'), config, store, router, groupContext, streamRelay);
+    await simulateMessage(makeDmMsg('Hello', { message_seq: 1 }), config, store, router, groupContext, streamRelay);
 
     mockQueryYield('Second reply');
-    await simulateMessage(makeDmMsg('Follow up'), config, store, router, groupContext, streamRelay);
+    await simulateMessage(makeDmMsg('Follow up', { message_seq: 2 }), config, store, router, groupContext, streamRelay);
 
     expect(queryAgent).toHaveBeenCalledTimes(2);
 

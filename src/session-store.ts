@@ -138,13 +138,40 @@ export class SessionStore {
       );
     }
 
+    // XIN-154: collapse any pre-existing seq236-style duplicate rows BEFORE
+    // creating the partial unique index — a unique index cannot be built over a
+    // table that already violates it. Idempotent + transactional (see the method),
+    // so it is safe to run on every startup; on an already-clean DB it deletes
+    // nothing. After this, INSERT OR IGNORE (insertMessage) keeps the table clean.
+    this.dedupeMessagesBySeq();
+
+    // Partial unique index that makes the (session_id, role, message_seq) write
+    // idempotent. Keyed on role because a user turn and the bot's reply
+    // legitimately share the inbound seq (appendAssistant is called with the
+    // inbound message_seq), so a session_id+seq-only index would wrongly forbid
+    // the reply. WHERE message_seq IS NOT NULL keeps it partial: assistant /
+    // legacy / no-seq turns carry NULL seq and stay unconstrained (NULLs are
+    // never equal to one another, but the explicit predicate documents intent and
+    // keeps the index small).
+    this.adapter.exec(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_session_role_seq ' +
+        'ON messages(session_id, role, message_seq) WHERE message_seq IS NOT NULL',
+    );
+
     this.selectSession = this.adapter.prepare('SELECT * FROM sessions WHERE id = ?');
     this.insertSession = this.adapter.prepare(
       'INSERT INTO sessions (id, channel_id, channel_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
     );
     this.touchSession = this.adapter.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?');
+    // XIN-145 root cause: the G4 cold-start backfill (seedHistoryFromApi) and the
+    // live inbound path both persisted the SAME triggering message, doubling the
+    // row at its message_seq (the "seq236" bug). The cure is a PARTIAL unique
+    // index (created above) plus INSERT OR IGNORE here: a re-write of an already
+    // stored (session_id, role, message_seq) is silently dropped, making append()
+    // idempotent. NULL-seq rows (assistant / legacy / no-seq turns) are exempt
+    // from the index, so OR IGNORE never suppresses them.
     this.insertMessage = this.adapter.prepare(
-      'INSERT INTO messages (session_id, role, content, timestamp, message_seq, from_name) VALUES (?, ?, ?, ?, ?, ?)',
+      'INSERT OR IGNORE INTO messages (session_id, role, content, timestamp, message_seq, from_name) VALUES (?, ?, ?, ?, ?, ?)',
     );
     this.selectRecentMessages = this.adapter.prepare(
       'SELECT role, content, message_seq, from_name FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?',
@@ -173,6 +200,50 @@ export class SessionStore {
     this.deleteExpiredSdkSessions = this.adapter.prepare(
       'DELETE FROM sdk_sessions WHERE updated_at < ?',
     );
+  }
+
+  /**
+   * XIN-154 existing-row migration: collapse duplicate
+   * (session_id, role, message_seq) rows left by the pre-fix seq236 double-write,
+   * keeping the lowest id (the earliest insert) in each group. Rows with NULL
+   * message_seq (assistant / legacy / no-seq turns) are never touched — they are
+   * not part of the uniqueness contract — and rows that merely share a seq across
+   * roles (a user turn and the bot's reply) are preserved because role is part of
+   * the grouping key.
+   *
+   * Wrapped in a single transaction with explicit before/after row accounting: a
+   * mismatch between the delete count and the row delta means the table was
+   * mutated concurrently, so we throw and roll back rather than report a clean
+   * migration over an inconsistent result (防丢数据). Idempotent: a second run over
+   * already-clean data deletes nothing and leaves counts unchanged.
+   */
+  dedupeMessagesBySeq(): { before: number; removed: number; after: number } {
+    const tx = this.adapter.transaction(() => {
+      const before = (
+        this.adapter.prepare('SELECT COUNT(*) AS n FROM messages').get() as {
+          n: number;
+        }
+      ).n;
+      const result = this.adapter
+        .prepare(
+          'DELETE FROM messages WHERE message_seq IS NOT NULL AND id NOT IN (' +
+            'SELECT MIN(id) FROM messages WHERE message_seq IS NOT NULL ' +
+            'GROUP BY session_id, role, message_seq)',
+        )
+        .run();
+      const after = (
+        this.adapter.prepare('SELECT COUNT(*) AS n FROM messages').get() as {
+          n: number;
+        }
+      ).n;
+      if (before - after !== result.changes) {
+        throw new Error(
+          `session-store: dedup row accounting mismatch (before=${before}, after=${after}, deleted=${result.changes}) — rolling back`,
+        );
+      }
+      return { before, removed: result.changes, after };
+    });
+    return tx();
   }
 
   getOrCreate(id: string, channelId: string, channelType: number): Session {
