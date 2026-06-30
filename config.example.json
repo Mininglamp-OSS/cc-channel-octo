@@ -9,6 +9,8 @@
 
   "_comment_group_config_dir": "v1.0: optional directory of per-group instruction files (<groupId>.md), injected as trusted custom instructions. Operator-controlled — keep it OUTSIDE every bot's workspace (the agent can write there) AND non-writable by the gateway user. Omit to disable.",
 
+  "_comment_server_md": "P2-A: set serverMd=true to fetch each group's instructions from the server GROUP.md API (GET /v1/bot/groups/{groupNo}/md) first, falling back to the local groupConfigDir file on any failure (404 / network / no content). The fetched copy is cached under <dataDir>/group-md-cache. Default false = pure local-file behavior (flip off to roll back).",
+
   "sdk": {
     "_comment_anthropic_base_url": "Q1: Optional self-hosted Claude API gateway base URL. Forwarded to the SDK subprocess (scoped). Must be https:// (or http://localhost for dev) — SSRF-validated at boot. Omit to use Anthropic's public endpoint.",
     "_comment_allowed_tools": "Q2: either '*' (allow every tool the SDK exposes) or an explicit string[] whitelist.",

@@ -27,7 +27,8 @@ import type { BotMessage } from './octo/types.js';
 import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } from './inbound.js';
 import { downloadInboundImage, MAX_IMAGES_PER_MESSAGE } from './media-inbound.js';
 import { handleCommand } from './commands.js';
-import { loadGroupConfig } from './group-config.js';
+import { resolveGroupInstructions } from './group-md.js';
+import { GroupMdCache } from './group-md-cache.js';
 import { CronStore } from './cron-store.js';
 import { CronScheduler } from './cron-scheduler.js';
 import { createCronToolServer, CRON_TOOL_SERVER_NAME, type CronSessionCoords } from './cron-tool.js';
@@ -211,6 +212,12 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
     const groupContext = new GroupContext(adapter, config.context.maxContextChars);
     groupContext.loadAllFromDb();
 
+    // --- P2-A: server GROUP.md cache (durable copy under dataDir, decoupled from
+    // the P1 GroupContext caches). Created unconditionally — cheap, and the disk
+    // dir is only materialized on first write (i.e. when serverMd is enabled and
+    // a fetch succeeds). ---
+    const groupMdCache = new GroupMdCache(join(config.dataDir, 'group-md-cache'));
+
     // --- #115: cron (opt-in). ---
     if (config.sdk.cron && config.botId) {
       cronStore = new CronStore(join(config.baseDir, config.botId, 'cron.json'));
@@ -278,7 +285,7 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
       // these on the WS path; guard here too for safety (otherwise a bot's own
       // group message could be cached into group context as un-processed chatter).
       if (msg.from_uid === gateway.botId) return;
-      const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore)
+      const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore, groupMdCache)
         .catch((err) => {
           console.error(`[cc-channel-octo] ${label}Unhandled message handler error:`, err instanceof Error ? err.message : err);
         })
@@ -299,7 +306,7 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
         cronStore,
         onFire: (msg: BotMessage): Promise<void> => {
           if (gateway.draining) return Promise.resolve();
-          const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore)
+          const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore, groupMdCache)
             .finally(() => { activeHandlers.delete(p); });
           activeHandlers.add(p);
           return p;
@@ -359,6 +366,7 @@ export async function handleMessage(
   streamRelay: StreamRelay,
   botId: string,
   cronStore?: CronStore,
+  groupMdCache?: GroupMdCache,
 ): Promise<void> {
   const channelId = msg.channel_id ?? '';
   const channelType = msg.channel_type ?? ChannelType.DM;
@@ -793,11 +801,20 @@ export async function handleMessage(
         sessionOpts = { ...(sessionOpts ?? {}), memoryDir };
       }
 
-      // v1.0 GROUP.md: inject operator-provided per-group instructions (from
-      // config.groupConfigDir/<channelId>.md) into the system prompt. Only for
-      // groups — DMs key on the peer uid, not a shared channel.
+      // GROUP.md: inject operator-provided per-group instructions into the
+      // system prompt. Only for groups — DMs key on the peer uid, not a shared
+      // channel. P2-A: server-first (GET /v1/bot/groups/{groupNo}/md, cached)
+      // with a never-lose fallback to the local `groupConfigDir/<channelId>.md`
+      // file; gated behind `config.serverMd` (off → pure local file).
       if (isGroup) {
-        const groupInstructions = loadGroupConfig(config.groupConfigDir, channelId);
+        const groupInstructions = await resolveGroupInstructions({
+          groupConfigDir: config.groupConfigDir,
+          serverMd: config.serverMd,
+          apiUrl: config.apiUrl,
+          botToken: config.botToken,
+          channelId,
+          cache: groupMdCache,
+        });
         if (groupInstructions) {
           sessionOpts = { ...(sessionOpts ?? {}), groupInstructions };
         }

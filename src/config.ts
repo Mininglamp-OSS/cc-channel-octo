@@ -89,6 +89,15 @@ export interface Config {
    * per-session cwd sandbox (which the agent can write). Unset = feature off.
    */
   groupConfigDir?: string;
+  /**
+   * P2-A feature flag: when true, per-group instructions are fetched from the
+   * server GROUP.md API (`GET /v1/bot/groups/{groupNo}/md`) first, falling back
+   * to the local `groupConfigDir` file on any failure (404 / network / no
+   * content). When false/unset (default) only the local file is used — flip it
+   * off to roll back to pure local-file behavior. The fetched copy is cached in
+   * `<dataDir>/group-md-cache`.
+   */
+  serverMd?: boolean;
   sdk: {
     model?: string;
     /**
@@ -259,6 +268,7 @@ type PartialConfig = {
   botToken?: string;
   apiUrl?: string;
   groupConfigDir?: string;
+  serverMd?: boolean;
   sdk?: Partial<Config['sdk']>;
   rateLimit?: Partial<Config['rateLimit']>;
   context?: Partial<Config['context']>;
@@ -350,6 +360,7 @@ function mergeConfig(base: Config, override: PartialConfig): Config {
     dataDir: base.dataDir,
     memoryBase: base.memoryBase,
     groupConfigDir: override.groupConfigDir ?? base.groupConfigDir,
+    serverMd: override.serverMd ?? base.serverMd,
     sdk: {
       ...base.sdk,
       ...(override.sdk ?? {}),
@@ -582,6 +593,7 @@ export function resolveBotConfigs(config: Config): Config[] {
       mentionFreeGroups:
         perBotFile.mentionFreeGroups ?? bot.mentionFreeGroups ?? config.mentionFreeGroups,
       groupConfigDir: perBotFile.groupConfigDir ?? config.groupConfigDir,
+      serverMd: perBotFile.serverMd ?? config.serverMd,
       sdk: {
         ...config.sdk,
         ...(perBotFile.sdk ?? {}),

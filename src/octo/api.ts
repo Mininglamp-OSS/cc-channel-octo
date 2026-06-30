@@ -1,9 +1,10 @@
 // Forked from openclaw-channel-octo v1.0.13 (2026-06-04)
 // Source: https://github.com/Mininglamp-OSS/openclaw-channel-octo
-// Removed: COS upload, GROUP.md API, OBO, rich text, media, group management,
+// Removed: COS upload, OBO, rich text, media, group management,
 //          read receipts, bot groups list, group info, mention prefs, space members.
 // Restored: thread lifecycle (create/list/get/delete/members/join/leave) — see
-//          "Thread Lifecycle" section below; group/server-md APIs stay removed.
+//          "Thread Lifecycle" section below; GROUP.md server API (get/update) —
+//          see "Group Markdown (GROUP.md)" section below.
 
 import {
   ChannelType,
@@ -665,4 +666,81 @@ export async function leaveThread(params: {
     `/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}/leave`,
     params.signal,
   );
+}
+
+// ─── Group Markdown (GROUP.md) ───────────────────────────────────────────────
+//
+// Restores the GROUP.md server API removed at fork time (see file header). A
+// group's GROUP.md is operator-authored persona / rules stored server-side; the
+// gateway fetches it (server-first) and injects it as a trusted instruction
+// block into the agent's system prompt. Path / method / auth / response shape
+// are a verbatim restore of openclaw-channel-octo api-fetch.ts
+// (getGroupMd / updateGroupMd), routed through this client's getJson helper so
+// GET shares the same timeout, Bearer auth, int64-safe JSON parse and
+// error-message format as the rest of the API surface.
+
+/** Server GROUP.md payload returned by GET /v1/bot/groups/{groupNo}/md. */
+export interface GroupMd {
+  content: string;
+  version: number;
+  updated_at: string | null;
+  updated_by: string;
+}
+
+/**
+ * Fetch a group's server-side GROUP.md. GET /v1/bot/groups/{groupNo}/md.
+ *
+ * Throws on any non-2xx (including 404 "no GROUP.md set") — the caller decides
+ * how to degrade. The server-first fetch orchestrator (group-md.ts) catches and
+ * falls back to the local instruction file, so a 404 cleanly downgrades to local.
+ */
+export async function getGroupMd(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  signal?: AbortSignal;
+}): Promise<GroupMd> {
+  return await getJson<GroupMd>(
+    params.apiUrl,
+    params.botToken,
+    `/v1/bot/groups/${encodeURIComponent(params.groupNo)}/md`,
+    params.signal,
+  );
+}
+
+/**
+ * Update a group's server-side GROUP.md (requires bot_admin permission).
+ * PUT /v1/bot/groups/{groupNo}/md, body `{ content }` → `{ version }`.
+ *
+ * NOTE (P2-A scope): this client function is restored alongside getGroupMd, but
+ * is intentionally NOT wired into any write-back path here — the PUT trigger
+ * chain is owned by a separate work item. Mirrors postJson's timeout, Bearer
+ * auth and error-message format.
+ */
+export async function updateGroupMd(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  content: string;
+  signal?: AbortSignal;
+}): Promise<{ version: number }> {
+  const path = `/v1/bot/groups/${encodeURIComponent(params.groupNo)}/md`;
+  const url = `${params.apiUrl.replace(/\/+$/, "")}${path}`;
+  const effectiveSignal = params.signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const resp = await fetch(url, {
+    method: "PUT",
+    headers: {
+      ...DEFAULT_HEADERS,
+      Authorization: `Bearer ${params.botToken}`,
+    },
+    body: JSON.stringify({ content: params.content }),
+    signal: effectiveSignal,
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`Octo API ${path} failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  const text = await resp.text();
+  if (!text) return { version: 0 };
+  return parseOctoJson<{ version: number }>(text);
 }
