@@ -7,6 +7,9 @@ import type { BotMessage, MentionEntity } from './octo/types.js';
 import { ChannelType, MessageType } from './octo/types.js';
 import { sendMessage } from './octo/api.js';
 import { isAuthenticCronFire } from './cron-fire-marker.js';
+import { extractParentGroupNo } from './octo/channel-id.js';
+import type { GroupMdCache } from './group-md-cache.js';
+import { isGroupMdUpdateEvent } from './group-md-events.js';
 
 export interface RouteResult {
   sessionKey: string;
@@ -64,11 +67,20 @@ export class SessionRouter {
    */
   private readonly knownBotUids = new Set<string>();
 
-  constructor(config: Config, robotId: string, ownerUid = '') {
+  /**
+   * P2-B: in-memory server GROUP.md cache (A's P2-A cache). Held so a GROUP.md
+   * change event can invalidate the affected group's entry, forcing the next
+   * turn to re-fetch the authoritative copy. Optional — omitted (or with
+   * `serverMd` off) the event path is a harmless no-op.
+   */
+  private readonly groupMdCache?: GroupMdCache;
+
+  constructor(config: Config, robotId: string, ownerUid = '', groupMdCache?: GroupMdCache) {
     this.config = config;
     this.robotId = robotId;
     this.ownerUid = ownerUid;
     this.knownBotUids.add(robotId);
+    this.groupMdCache = groupMdCache;
   }
 
   /** G14: register another known bot uid (future multi-bot support). */
@@ -335,6 +347,51 @@ export class SessionRouter {
     return isAuthenticCronFire(msg.payload);
   }
 
+  /**
+   * P2-B: react to a server system event that signals a GROUP.md change by
+   * invalidating that group's cached server GROUP.md, so the next turn re-fetches
+   * the authoritative copy over the authenticated bot token (never trusting the
+   * event payload as the new content — see group-md-events.ts for the
+   * forged-event poisoning rationale). Non-md system events (join/leave, etc.)
+   * match nothing here and fall through to the caller's `return null`, so they
+   * are dropped exactly as before.
+   *
+   * Gated on `serverMd`: with the flag off the cache is never populated, so there
+   * is nothing to invalidate. Best-effort and never throws — a malformed event
+   * must not wedge the router (the caller drops the event regardless).
+   *
+   * The group is identified from the event's `group_no`: these events are
+   * delivered on a system/DM channel (a group event on the group's own channel
+   * dies at the mention gate above, never reaching here — XIN-173), so the
+   * arriving `channel_id` is the sender, not the group. The channel is only a
+   * fallback when `group_no` is absent AND the event happens to have arrived on a
+   * group-like channel (e.g. a mention-free group, the one group path that
+   * reaches this point). Using the event-supplied `group_no` is safe despite the
+   * event being untrusted: invalidation is non-destructive — the worst a forged
+   * event can do is force a redundant authenticated re-fetch of the real value,
+   * never inject content (the new GROUP.md is always re-fetched, never read from
+   * the event body — see group-md-events.ts).
+   */
+  private handleGroupMdEvent(msg: BotMessage): void {
+    if (!this.config.serverMd || !this.groupMdCache) return;
+    const event = msg.payload.event;
+    if (!isGroupMdUpdateEvent(event, this.config.serverMdEventTypes)) return;
+
+    let groupNo = event?.group_no ?? '';
+    if (groupNo === '' && this.isGroupLike(msg.channel_type)) {
+      groupNo = extractParentGroupNo(msg.channel_id ?? '');
+    }
+    if (groupNo === '') return;
+
+    // invalidate() is itself total (validates the id, never throws); the guard
+    // here keeps a future non-total cache from breaking the drop path.
+    try {
+      this.groupMdCache.invalidate(groupNo);
+    } catch {
+      /* best-effort: a refresh hiccup must never block dropping the event */
+    }
+  }
+
   private async processMessage(msg: BotMessage, key: string): Promise<RouteResult | null> {
     // Skip messages from self.
     if (msg.from_uid === this.robotId) return null;
@@ -394,8 +451,16 @@ export class SessionRouter {
       }
     }
 
-    // Skip system events (group join/leave, etc.) — no user-facing reply needed.
-    if (msg.payload.event) return null;
+    // System events (group join/leave, GROUP.md change, etc.) never produce a
+    // user-facing reply, so they always route to `null`. P2-B: before dropping,
+    // a GROUP.md change event is dispatched to invalidate that group's cached
+    // server GROUP.md (forcing the next turn to re-fetch the authoritative copy);
+    // every other system event (join/leave/...) is dropped unchanged, exactly as
+    // before — non-md events must NOT be mistaken for an md event.
+    if (msg.payload.event) {
+      this.handleGroupMdEvent(msg);
+      return null;
+    }
 
     // Rate limit check BEFORE non-text check — prevents DM spam of non-text
     // messages from bypassing rate limiting entirely.

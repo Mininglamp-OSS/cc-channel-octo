@@ -107,6 +107,16 @@ export interface Config {
    * `DEFAULT_GROUP_MD_TTL_MS` (5 min). Only meaningful when `serverMd` is true.
    */
   serverMdTtlMs?: number;
+  /**
+   * P2-B: `event.type` literal(s) the server emits when a group's GROUP.md
+   * changes. On such an event the in-memory GROUP.md cache for that group is
+   * invalidated so the next turn re-fetches the authoritative copy (never
+   * trusting the event payload — see group-md-events.ts). PROVISIONAL: the
+   * exact literal is not yet confirmed from a real captured event, so this is
+   * overridable here to calibrate without a code change. Defaults to
+   * `DEFAULT_GROUP_MD_EVENT_TYPES`. Only meaningful when `serverMd` is true.
+   */
+  serverMdEventTypes?: string[];
   sdk: {
     model?: string;
     /**
@@ -279,6 +289,7 @@ type PartialConfig = {
   groupConfigDir?: string;
   serverMd?: boolean;
   serverMdTtlMs?: number;
+  serverMdEventTypes?: string[];
   sdk?: Partial<Config['sdk']>;
   rateLimit?: Partial<Config['rateLimit']>;
   context?: Partial<Config['context']>;
@@ -372,6 +383,7 @@ function mergeConfig(base: Config, override: PartialConfig): Config {
     groupConfigDir: override.groupConfigDir ?? base.groupConfigDir,
     serverMd: override.serverMd ?? base.serverMd,
     serverMdTtlMs: override.serverMdTtlMs ?? base.serverMdTtlMs,
+    serverMdEventTypes: override.serverMdEventTypes ?? base.serverMdEventTypes,
     sdk: {
       ...base.sdk,
       ...(override.sdk ?? {}),
@@ -606,6 +618,7 @@ export function resolveBotConfigs(config: Config): Config[] {
       groupConfigDir: perBotFile.groupConfigDir ?? config.groupConfigDir,
       serverMd: perBotFile.serverMd ?? config.serverMd,
       serverMdTtlMs: perBotFile.serverMdTtlMs ?? config.serverMdTtlMs,
+      serverMdEventTypes: perBotFile.serverMdEventTypes ?? config.serverMdEventTypes,
       sdk: {
         ...config.sdk,
         ...(perBotFile.sdk ?? {}),
