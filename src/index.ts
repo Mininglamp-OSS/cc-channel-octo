@@ -28,7 +28,7 @@ import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } f
 import { downloadInboundImage, MAX_IMAGES_PER_MESSAGE } from './media-inbound.js';
 import { handleCommand } from './commands.js';
 import { resolveGroupInstructions } from './group-md.js';
-import { GroupMdCache, DEFAULT_GROUP_MD_TTL_MS } from './group-md-cache.js';
+import { GroupMdCache, ThreadMdCache, DEFAULT_GROUP_MD_TTL_MS } from './group-md-cache.js';
 import { GroupMdWriteback } from './group-md-writeback.js';
 import { CronStore } from './cron-store.js';
 import { CronScheduler } from './cron-scheduler.js';
@@ -222,6 +222,14 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
     // caches; created unconditionally (cheap, only populated when serverMd is on). ---
     const groupMdCache = new GroupMdCache(config.serverMdTtlMs ?? DEFAULT_GROUP_MD_TTL_MS);
 
+    // --- P3-1: server THREAD.md cache. Same IN-MEMORY-ONLY security model as the
+    // group cache above, but keyed by the COMPOSITE `groupNo::shortId` so one
+    // group's threads never collide (defensive even though shortId is a globally
+    // unique snowflake today). Created unconditionally (cheap; only populated when
+    // config.threadMd is on). Kept SEPARATE from groupMdCache so the thread branch
+    // can never read or write a parent-group GROUP.md entry (老板拍板互斥口径). ---
+    const threadMdCache = new ThreadMdCache(config.serverMdTtlMs ?? DEFAULT_GROUP_MD_TTL_MS);
+
     // --- P2-C: GROUP.md write-back coordinator. Shared across turns so its
     // per-groupNo write lock actually serializes concurrent agent turns writing
     // the same group (a per-turn instance would defeat the lock). Updates the
@@ -300,7 +308,7 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
       // these on the WS path; guard here too for safety (otherwise a bot's own
       // group message could be cached into group context as un-processed chatter).
       if (msg.from_uid === gateway.botId) return;
-      const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore, groupMdCache, groupMdWriteback)
+      const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore, groupMdCache, groupMdWriteback, threadMdCache)
         .catch((err) => {
           console.error(`[cc-channel-octo] ${label}Unhandled message handler error:`, err instanceof Error ? err.message : err);
         })
@@ -321,7 +329,7 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
         cronStore,
         onFire: (msg: BotMessage): Promise<void> => {
           if (gateway.draining) return Promise.resolve();
-          const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore, groupMdCache, groupMdWriteback)
+          const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore, groupMdCache, groupMdWriteback, threadMdCache)
             .finally(() => { activeHandlers.delete(p); });
           activeHandlers.add(p);
           return p;
@@ -383,6 +391,7 @@ export async function handleMessage(
   cronStore?: CronStore,
   groupMdCache?: GroupMdCache,
   groupMdWriteback?: GroupMdWriteback,
+  threadMdCache?: ThreadMdCache,
 ): Promise<void> {
   const channelId = msg.channel_id ?? '';
   const channelType = msg.channel_type ?? ChannelType.DM;
@@ -839,17 +848,22 @@ export async function handleMessage(
 
       // GROUP.md: inject operator-provided per-group instructions into the
       // system prompt. Only for groups — DMs key on the peer uid, not a shared
-      // channel. P2-A: server-first (GET /v1/bot/groups/{groupNo}/md, cached)
-      // with a never-lose fallback to the local `groupConfigDir/<channelId>.md`
-      // file; gated behind `config.serverMd` (off → pure local file).
+      // channel. P2-A: a plain group resolves GROUP.md server-first (GET
+      // /v1/bot/groups/{groupNo}/md, cached) with a never-lose fallback to the
+      // local `groupConfigDir/<channelId>.md` file (gated behind `config.serverMd`).
+      // P3-1: a thread (CommunityTopic) resolves its OWN THREAD.md ONLY — the
+      // resolver routes on channelId shape and NEVER stacks the parent group's
+      // GROUP.md for a thread (server thread read gated behind `config.threadMd`).
       if (isGroup) {
         const groupInstructions = await resolveGroupInstructions({
           groupConfigDir: config.groupConfigDir,
           serverMd: config.serverMd,
+          threadMd: config.threadMd,
           apiUrl: config.apiUrl,
           botToken: config.botToken,
           channelId,
           cache: groupMdCache,
+          threadCache: threadMdCache,
         });
         if (groupInstructions) {
           sessionOpts = { ...(sessionOpts ?? {}), groupInstructions };

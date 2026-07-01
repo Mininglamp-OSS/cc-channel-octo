@@ -127,6 +127,17 @@ export interface Config {
    * server-first READ path), so an operator can enable reads without writes.
    */
   mdWriteback?: boolean;
+  /**
+   * P3-1 feature flag: when true, a THREAD (CommunityTopic) channel resolves its
+   * THREAD.md server-first (GET /v1/bot/groups/{groupNo}/threads/{shortId}/md,
+   * cached in-memory keyed by `groupNo::shortId`) before its local `<shortId>.md`
+   * file. Off (default) → a thread resolves ONLY its local file, which is already
+   * the correct behavior (a thread injects its own THREAD.md and never stacks the
+   * parent group's GROUP.md). So this flag gates the NEW server-read capability,
+   * NOT the thread/group split — that split is unconditional. Independent of
+   * `serverMd` (which governs the group server-read path).
+   */
+  threadMd?: boolean;
   sdk: {
     model?: string;
     /**
@@ -301,6 +312,7 @@ type PartialConfig = {
   serverMdTtlMs?: number;
   serverMdEventTypes?: string[];
   mdWriteback?: boolean;
+  threadMd?: boolean;
   sdk?: Partial<Config['sdk']>;
   rateLimit?: Partial<Config['rateLimit']>;
   context?: Partial<Config['context']>;
@@ -396,6 +408,7 @@ function mergeConfig(base: Config, override: PartialConfig): Config {
     serverMdTtlMs: override.serverMdTtlMs ?? base.serverMdTtlMs,
     serverMdEventTypes: override.serverMdEventTypes ?? base.serverMdEventTypes,
     mdWriteback: override.mdWriteback ?? base.mdWriteback,
+    threadMd: override.threadMd ?? base.threadMd,
     sdk: {
       ...base.sdk,
       ...(override.sdk ?? {}),
@@ -632,6 +645,7 @@ export function resolveBotConfigs(config: Config): Config[] {
       serverMdTtlMs: perBotFile.serverMdTtlMs ?? config.serverMdTtlMs,
       serverMdEventTypes: perBotFile.serverMdEventTypes ?? config.serverMdEventTypes,
       mdWriteback: perBotFile.mdWriteback ?? config.mdWriteback,
+      threadMd: perBotFile.threadMd ?? config.threadMd,
       sdk: {
         ...config.sdk,
         ...(perBotFile.sdk ?? {}),

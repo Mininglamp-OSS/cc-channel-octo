@@ -106,3 +106,83 @@ export class GroupMdCache {
     this.mem.delete(groupNo);
   }
 }
+
+/**
+ * THREAD.md server cache (P3-1) — IN-MEMORY ONLY, with a TTL.
+ *
+ * The thread analogue of {@link GroupMdCache}. Holds server-fetched THREAD.md
+ * for a CommunityTopic thread. Same memory-only security model as the group
+ * cache (see the module SECURITY note): the resolved THREAD.md is injected as a
+ * trusted system-prompt block, so it must never touch disk — the only path
+ * content can enter the trusted channel is a live, authenticated `getThreadMd`
+ * over the bot token against the SSRF-validated `apiUrl`.
+ *
+ * Keying — COMPOSITE `<groupNo>::<shortId>`, NOT the bare shortId. Octo's
+ * current shortId is a globally unique 19-digit snowflake, so a bare shortId
+ * would not collide across groups today; the composite key is defensive
+ * double-insurance so that even if a future shortId scheme becomes a
+ * per-parent-group sequence, one group's THREAD.md can never be served for a
+ * same-shortId thread under a different parent group. `::` is intentionally
+ * outside the safe-id charset, so it can never appear inside a validated
+ * component and cannot be forged to cross a key boundary.
+ *
+ * Never throws.
+ */
+export class ThreadMdCache {
+  private readonly mem = new Map<string, StoredEntry>();
+  private readonly ttlMs: number;
+  private readonly now: () => number;
+
+  /**
+   * @param ttlMs staleness backstop in ms (entry expires this long after it was
+   *   stored). Defaults to {@link DEFAULT_GROUP_MD_TTL_MS} — the thread cache
+   *   shares the group cache's staleness policy. A non-positive value disables
+   *   expiry (entries live until invalidate()).
+   * @param now injectable clock (testing); defaults to Date.now.
+   */
+  constructor(ttlMs: number = DEFAULT_GROUP_MD_TTL_MS, now: () => number = () => Date.now()) {
+    this.ttlMs = ttlMs;
+    this.now = now;
+  }
+
+  /**
+   * Build the composite Map key, or null if either component is unsafe. Both
+   * halves are validated with the same isSafeGroupNo rule the group cache uses,
+   * and neither can contain `::` (colon is outside the charset), so the
+   * separator is unambiguous.
+   */
+  private key(groupNo: string, shortId: string): string | null {
+    if (!isSafeGroupNo(groupNo) || !isSafeGroupNo(shortId)) return null;
+    return `${groupNo}::${shortId}`;
+  }
+
+  /**
+   * Read a cached entry from memory. Returns undefined on a miss, an expired
+   * entry (which is also evicted), or an unsafe groupNo/shortId.
+   */
+  get(groupNo: string, shortId: string): GroupMdEntry | undefined {
+    const k = this.key(groupNo, shortId);
+    if (k === null) return undefined;
+    const stored = this.mem.get(k);
+    if (!stored) return undefined;
+    if (this.ttlMs > 0 && this.now() - stored.storedAt >= this.ttlMs) {
+      this.mem.delete(k);
+      return undefined;
+    }
+    return stored.entry;
+  }
+
+  /** Store an entry in memory, stamping it for TTL expiry. */
+  set(groupNo: string, shortId: string, entry: GroupMdEntry): void {
+    const k = this.key(groupNo, shortId);
+    if (k === null) return;
+    this.mem.set(k, { entry, storedAt: this.now() });
+  }
+
+  /** Drop a cached entry (event-driven refresh hook, symmetric to GroupMdCache). */
+  invalidate(groupNo: string, shortId: string): void {
+    const k = this.key(groupNo, shortId);
+    if (k === null) return;
+    this.mem.delete(k);
+  }
+}

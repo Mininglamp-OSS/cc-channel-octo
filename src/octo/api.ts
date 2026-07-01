@@ -732,6 +732,48 @@ export async function getGroupMd(params: {
 }
 
 /**
+ * Server THREAD.md payload returned by GET /v1/bot/groups/{groupNo}/threads/{shortId}/md.
+ *
+ * Same shape as {@link GroupMd} — the thread markdown endpoint is symmetric to
+ * the group one (verified against the live backend: 200 with
+ * `{content, version, updated_at, updated_by}`). A thread carries its OWN
+ * operator-authored instructions; it does NOT inherit the parent group's GROUP.md.
+ */
+export interface ThreadMd {
+  content: string;
+  version: number;
+  updated_at: string | null;
+  updated_by: string;
+}
+
+/**
+ * Fetch a thread's server-side THREAD.md.
+ * GET /v1/bot/groups/{groupNo}/threads/{shortId}/md.
+ *
+ * The endpoint is symmetric to {@link getGroupMd} (group md = `.../groups/{groupNo}/md`;
+ * thread md = `.../groups/{groupNo}/threads/{shortId}/md`), sharing the same
+ * getJson timeout / Bearer auth / int64-safe JSON parse / error-message format.
+ *
+ * Throws on any non-2xx (including 404 "no THREAD.md set") — the caller
+ * (group-md.ts thread branch) catches and falls back to the local
+ * `<shortId>.md` file, mirroring the group server-first degrade path.
+ */
+export async function getThreadMd(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+  signal?: AbortSignal;
+}): Promise<ThreadMd> {
+  return await getJson<ThreadMd>(
+    params.apiUrl,
+    params.botToken,
+    `/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}/md`,
+    params.signal,
+  );
+}
+
+/**
  * Update a group's server-side GROUP.md (requires bot_admin permission).
  * PUT /v1/bot/groups/{groupNo}/md, body `{ content }` → `{ version }`.
  *
