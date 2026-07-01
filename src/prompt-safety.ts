@@ -119,6 +119,31 @@ export function sanitizeDisplayName(name: unknown, fallback = ''): string {
 }
 
 /**
+ * Format a sender label for prompt display: `name(uid)` when a name is present,
+ * otherwise the bare `uid`. Both fields go through sanitizeDisplayName so a
+ * user-controlled name (or, defensively, uid) cannot inject brackets, colons,
+ * or line breaks that would forge a role/section boundary. Mirrors
+ * openclaw-channel-octo's buildSenderPrefix — the shared convention across
+ * both Octo channel adapters, so a Claude-Code / Claw agent sees the same
+ * `name(uid)` shape whether the transport is cc-channel-octo or
+ * openclaw-channel-octo.
+ *
+ * Used at two sites:
+ *  1. The `[Current message — respond to this ONLY]` anchor body in
+ *     index.ts, so the bot can tell WHO sent the request being replied to
+ *     (previously the current message was anonymous, forcing the model to
+ *     guess from context).
+ *  2. Each line of the `[Recent group messages]` block in group-context.ts,
+ *     so the historical background carries uid too — the two blocks now
+ *     agree on identity semantics.
+ */
+export function formatSenderLabel(fromUid: unknown, fromName: unknown): string {
+  const uid = sanitizeDisplayName(fromUid, 'unknown');
+  const name = sanitizeDisplayName(fromName, '');
+  return name.length > 0 ? `${name}(${uid})` : uid;
+}
+
+/**
  * Escape a line-leading role label in user-authored CONTENT so it renders as
  * literal text inside its turn rather than forging a new turn boundary:
  * `[assistant bot]: x` -> `\[assistant bot]: x`.

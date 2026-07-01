@@ -5,7 +5,7 @@
 import type { DbAdapter, PreparedStatement } from './db-adapter.js';
 import { getGroupMembers, fetchUserInfo } from './octo/api.js';
 import { extractParentGroupNo } from './octo/channel-id.js';
-import { sanitizeDisplayName } from './prompt-safety.js';
+import { sanitizeDisplayName, formatSenderLabel } from './prompt-safety.js';
 
 interface GroupMessage {
   fromUid: string;
@@ -108,7 +108,7 @@ export class GroupContext {
     // buildContextSince re-sorts the budget-selected slice into chronological
     // order for display. Mirrors the in-memory buildContext rolling-window.
     this.selectMessagesSince = this.adapter.prepare(
-      'SELECT id, from_name, content FROM group_messages WHERE channel_id = ? AND id > ? ORDER BY id DESC LIMIT ?',
+      'SELECT id, from_uid, from_name, content FROM group_messages WHERE channel_id = ? AND id > ? ORDER BY id DESC LIMIT ?',
     );
     this.selectMaxId = this.adapter.prepare(
       'SELECT MAX(id) AS maxId FROM group_messages WHERE channel_id = ?',
@@ -141,6 +141,33 @@ export class GroupContext {
     return m;
   }
 
+  /**
+   * Resolve the best-known human-readable display name for a uid in a channel.
+   *
+   * Priority (most trusted first):
+   *  1. Member roster (memberMap) — populated by refreshMembers from the
+   *     authoritative /groups/<id>/members API, so this is the current
+   *     displayName even after a rename.
+   *  2. wire-provided fallback name, when it is non-empty AND not just the
+   *     uid echoed back. Some IM payloads omit from_name entirely, others
+   *     echo the uid; both look useless as a displayName.
+   *  3. undefined — caller decides whether to fall back to bare uid or a
+   *     literal 'unknown'.
+   *
+   * Read-only: callers that want to also LEARN the name should invoke
+   * learnMember separately (renderer paths intentionally do not learn, to
+   * keep render a pure read).
+   */
+  resolveDisplayName(channelId: string, fromUid: string, fromName?: string | null): string | undefined {
+    const rosterName = this.getMemberMap(channelId).get(fromUid);
+    if (rosterName && rosterName.length > 0) return rosterName;
+    if (fromName && fromName.length > 0 && fromName !== fromUid) {
+      const safe = sanitizeDisplayName(fromName);
+      if (safe.length > 0) return safe;
+    }
+    return undefined;
+  }
+
   pushMessage(
     channelId: string,
     fromUid: string,
@@ -154,7 +181,19 @@ export class GroupContext {
     // is ALSO user-controlled, and sanitizeDisplayName returns its fallback
     // verbatim — so sanitize the uid fallback too rather than passing it raw
     // (PR #128 review: raw-uid-as-fallback re-introduces the injection).
-    const safeName = sanitizeDisplayName(fromName) || sanitizeDisplayName(fromUid) || 'unknown';
+    //
+    // Prefer the member roster's displayName over the wire from_name: wire can
+    // be undefined (some IM payloads omit it) or echo the uid back, both of
+    // which render as an unhelpful `uid(uid)` in the recent-messages block.
+    // resolveDisplayName returns undefined when neither roster nor a real wire
+    // name is available; fall back to sanitized uid then 'unknown' — same
+    // final-fallback chain as before, but with a shot at the human name first.
+    const resolvedName = this.resolveDisplayName(channelId, fromUid, fromName);
+    const safeName =
+      (resolvedName && sanitizeDisplayName(resolvedName)) ||
+      sanitizeDisplayName(fromName) ||
+      sanitizeDisplayName(fromUid) ||
+      'unknown';
     let window = this.messageCache.get(channelId);
     if (!window) {
       window = [];
@@ -325,7 +364,14 @@ export class GroupContext {
     let used = 0;
     for (let i = window.length - 1; i >= 0; i--) {
       const m = window[i];
-      const line = `${m.fromName}：${m.content}`;
+      // Same `name(uid)：content` format as buildContextSince (DB path) — see
+      // that method's comment for rationale (uniform identity semantics between
+      // the current-message anchor and the recent-messages block). Consult
+      // resolveDisplayName so a row whose cached fromName was written before
+      // the roster caught the real displayName (or wire only supplied the uid)
+      // still renders with the current human name.
+      const displayName = this.resolveDisplayName(channelId, m.fromUid, m.fromName) ?? m.fromName;
+      const line = `${formatSenderLabel(m.fromUid, displayName)}：${m.content}`;
       const cost = line.length + (selected.length > 0 ? 1 : 0);
       if (used + cost > budget) break;
       selected.push(line);
@@ -382,10 +428,11 @@ export class GroupContext {
    * from the DB so the cursor delta is exact even across restarts / window eviction.
    */
   buildContextSince(channelId: string, sinceId: number): { text: string; lastId: number } {
-    let rows: Array<{ id: number; from_name: string; content: string }>;
+    let rows: Array<{ id: number; from_uid: string; from_name: string; content: string }>;
     try {
       rows = this.selectMessagesSince.all(channelId, sinceId, this.maxWindowSize) as Array<{
         id: number;
+        from_uid: string;
         from_name: string;
         content: string;
       }>;
@@ -405,10 +452,19 @@ export class GroupContext {
     if (budget <= 0) return { text: '', lastId };
 
     // Walk newest→oldest (rows[0] is newest) keeping lines within budget.
+    // Each line renders as `name(uid)：content` (or `uid：content` when the name
+    // is missing) via formatSenderLabel — the same shape used at the current-
+    // message anchor (index.ts) so identity semantics are uniform across the
+    // whole prompt. Historically this rendered as `from_name：content` and any
+    // downstream reader that pattern-matched had to guess uid from the name.
+    // resolveDisplayName lets an old row whose fromName was the uid (wire lacked
+    // it at write time) still render with the currently-known displayName once
+    // refreshMembers populates the roster.
     const selected: string[] = [];
     let used = 0;
     for (let i = 0; i < rows.length; i++) {
-      const line = `${rows[i].from_name}：${rows[i].content}`;
+      const displayName = this.resolveDisplayName(channelId, rows[i].from_uid, rows[i].from_name) ?? rows[i].from_name;
+      const line = `${formatSenderLabel(rows[i].from_uid, displayName)}：${rows[i].content}`;
       const cost = line.length + (selected.length > 0 ? 1 : 0);
       if (used + cost > budget) break;
       selected.push(line);

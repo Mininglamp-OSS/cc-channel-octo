@@ -473,10 +473,13 @@ describe('E2E smoke tests', () => {
     const msg = makeGroupMsg('What is this code?', true);
     await simulateMessage(msg, config, store, router, groupContext, streamRelay);
 
-    // queryAgent was called with user message in user role
+    // queryAgent was called with user message in user role. The body is prefixed
+    // with the sender label `name(uid)：` in group channels so the agent can
+    // identify the speaker across shared-context participants (unified with the
+    // `[Recent group messages]` format).
     expect(queryAgent).toHaveBeenCalledTimes(1);
     const userMsg2 = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
-    expect(userMsg2).toBe('What is this code?');
+    expect(userMsg2).toBe('TestUser(user-001)：What is this code?');
 
     // Output was sent to group channel
     expect(sendMessage).toHaveBeenCalled();
@@ -542,7 +545,7 @@ describe('E2E smoke tests', () => {
 
     // But message IS cached in group context
     const ctx = groupContext.buildContext(GROUP_CHANNEL);
-    expect(ctx).toContain('TestUser：Just chatting');
+    expect(ctx).toContain('TestUser(user-001)：Just chatting');
   });
 
   // --- 4. Non-text message: G1 routes it through to the agent ---
@@ -647,13 +650,13 @@ describe('E2E smoke tests', () => {
     // system-prompt arg. The prior chatter is present; the current message is NOT
     // echoed back into the [Recent group messages] block.
     const userMsg3 = (queryAgent as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
-    expect(userMsg3).toContain('Alice：Previous message');
+    expect(userMsg3).toContain('Alice(other-user)：Previous message');
     expect(userMsg3).toContain('My question'); // the actual question (the body) is present
     // The [Recent group messages] context block (everything up to the body) must
     // not include the current message — only prior chatter.
     const recentIdx = userMsg3.indexOf('[Recent group messages]');
     const contextBlock = userMsg3.slice(recentIdx, userMsg3.lastIndexOf('My question'));
-    expect(contextBlock).toContain('Alice：Previous message');
+    expect(contextBlock).toContain('Alice(other-user)：Previous message');
     expect(contextBlock).not.toContain('My question');
   });
 
