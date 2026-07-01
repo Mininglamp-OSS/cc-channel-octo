@@ -29,9 +29,11 @@ import { downloadInboundImage, MAX_IMAGES_PER_MESSAGE } from './media-inbound.js
 import { handleCommand } from './commands.js';
 import { resolveGroupInstructions } from './group-md.js';
 import { GroupMdCache, DEFAULT_GROUP_MD_TTL_MS } from './group-md-cache.js';
+import { GroupMdWriteback } from './group-md-writeback.js';
 import { CronStore } from './cron-store.js';
 import { CronScheduler } from './cron-scheduler.js';
 import { createCronToolServer, CRON_TOOL_SERVER_NAME, type CronSessionCoords } from './cron-tool.js';
+import { createGroupMdToolServer, GROUP_MD_TOOL_SERVER_NAME, type GroupMdSessionCoords } from './group-md-tool.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes, assembleUserMessage, MAX_USER_LLM_BYTES } from './file-inline-wrap.js';
 import { join } from 'node:path';
 import { mkdirSync, realpathSync } from 'node:fs';
@@ -220,6 +222,14 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
     // caches; created unconditionally (cheap, only populated when serverMd is on). ---
     const groupMdCache = new GroupMdCache(config.serverMdTtlMs ?? DEFAULT_GROUP_MD_TTL_MS);
 
+    // --- P2-C: GROUP.md write-back coordinator. Shared across turns so its
+    // per-groupNo write lock actually serializes concurrent agent turns writing
+    // the same group (a per-turn instance would defeat the lock). Updates the
+    // SAME in-memory groupMdCache above on a successful PUT — no new disk surface.
+    // Cheap to construct unconditionally; only exercised when the write-back tool
+    // is registered (config.mdWriteback). ---
+    const groupMdWriteback = new GroupMdWriteback(groupMdCache);
+
     // --- #115: cron (opt-in). ---
     if (config.sdk.cron && config.botId) {
       cronStore = new CronStore(join(config.baseDir, config.botId, 'cron.json'));
@@ -290,7 +300,7 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
       // these on the WS path; guard here too for safety (otherwise a bot's own
       // group message could be cached into group context as un-processed chatter).
       if (msg.from_uid === gateway.botId) return;
-      const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore, groupMdCache)
+      const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore, groupMdCache, groupMdWriteback)
         .catch((err) => {
           console.error(`[cc-channel-octo] ${label}Unhandled message handler error:`, err instanceof Error ? err.message : err);
         })
@@ -311,7 +321,7 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
         cronStore,
         onFire: (msg: BotMessage): Promise<void> => {
           if (gateway.draining) return Promise.resolve();
-          const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore, groupMdCache)
+          const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore, groupMdCache, groupMdWriteback)
             .finally(() => { activeHandlers.delete(p); });
           activeHandlers.add(p);
           return p;
@@ -372,6 +382,7 @@ export async function handleMessage(
   botId: string,
   cronStore?: CronStore,
   groupMdCache?: GroupMdCache,
+  groupMdWriteback?: GroupMdWriteback,
 ): Promise<void> {
   const channelId = msg.channel_id ?? '';
   const channelType = msg.channel_type ?? ChannelType.DM;
@@ -839,6 +850,29 @@ export async function handleMessage(
         sessionOpts = {
           ...(sessionOpts ?? {}),
           mcpServers: { [CRON_TOOL_SERVER_NAME]: cronServer },
+        };
+      }
+
+      // P2-C: when GROUP.md write-back is on, inject the write-back MCP tool
+      // bound to THIS message's channel coords (so the write targets the channel's
+      // parent group) and gated to the bot owner uid. Only for group channels —
+      // a DM has no shared GROUP.md. Per-turn server (coords differ per message);
+      // it borrows the shared groupMdWriteback so the per-groupNo write lock and
+      // the cache it refreshes are process-wide, not per-turn.
+      if (config.mdWriteback && groupMdWriteback && isGroup) {
+        const coords: GroupMdSessionCoords = {
+          channelId,
+          fromUid: msg.from_uid,
+          fromName: msg.from_name,
+        };
+        const groupMdServer = createGroupMdToolServer(
+          { writeback: groupMdWriteback, apiUrl: config.apiUrl, botToken: config.botToken },
+          coords,
+          router.getOwnerUid(),
+        );
+        sessionOpts = {
+          ...(sessionOpts ?? {}),
+          mcpServers: { ...(sessionOpts?.mcpServers ?? {}), [GROUP_MD_TOOL_SERVER_NAME]: groupMdServer },
         };
       }
 
