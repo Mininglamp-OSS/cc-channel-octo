@@ -10,6 +10,8 @@ import type { BotMessage } from '../octo/types.js';
 import { ChannelType, MessageType } from '../octo/types.js';
 import type { Config } from '../config.js';
 import { sendMessage } from '../octo/api.js';
+import { GroupMdCache } from '../group-md-cache.js';
+import type { GroupMdEntry } from '../group-md-cache.js';
 
 const ROBOT_ID = 'bot-001';
 
@@ -970,5 +972,156 @@ describe('SessionRouter — thread (CommunityTopic) session isolation [#88]', ()
     const a = makeMsg({ channel_type: ChannelType.CommunityTopic, channel_id: `${GROUP}____aaa`, from_uid: 'u1' });
     const b = makeMsg({ channel_type: ChannelType.CommunityTopic, channel_id: `${GROUP}____bbb`, from_uid: 'u1' });
     expect(router.sessionKey(a)).not.toBe(router.sessionKey(b));
+  });
+});
+
+// --- P2-B: server GROUP.md change events drive a cache refresh ---
+//
+// GROUP.md change events are delivered on a system/DM channel (a group event on
+// the group's own channel dies at the mention gate before reaching the event
+// branch — XIN-173), so the group identity travels in `event.group_no`, not the
+// arriving channel_id. The event.type literal is PROVISIONAL (group-md-events.ts)
+// — these tests use the default literal and an explicit override to lock in BOTH
+// the routing (md event → invalidate; everything else → dropped, never
+// invalidated) and the config-override seam, so calibrating the literal later
+// needs no test rewrite.
+describe('SessionRouter — GROUP.md event-driven cache refresh (P2-B)', () => {
+  const GROUP = 'group-abc';
+
+  function makeEntry(): GroupMdEntry {
+    return { content: '# cached', version: 1, updated_at: null };
+  }
+
+  function makeRouter(cache?: GroupMdCache, overrides?: Partial<Config>): SessionRouter {
+    // serverMd on by default here — the refresh path is gated on it.
+    return new SessionRouter(makeConfig({ serverMd: true, ...overrides }), ROBOT_ID, '', cache);
+  }
+
+  // A GROUP.md change event as it really arrives: on a DM channel, with the
+  // affected group carried in event.group_no.
+  function mdEvent(overrides?: Partial<BotMessage>): BotMessage {
+    return makeMsg({
+      channel_type: ChannelType.DM,
+      channel_id: 'dm-peer',
+      from_uid: 'user-1',
+      payload: { type: MessageType.Text, content: '', event: { type: 'group_md_updated', group_no: GROUP } },
+      ...overrides,
+    });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('a GROUP.md update event invalidates that group\'s cache (next turn re-fetches) and still returns null', async () => {
+    const cache = new GroupMdCache();
+    cache.set(GROUP, makeEntry());
+    const router = makeRouter(cache);
+
+    const result = await router.route(mdEvent());
+
+    // The event itself never produces a reply.
+    expect(result).toBeNull();
+    expect(sendMessage).not.toHaveBeenCalled();
+    // The cached entry is dropped (keyed by event.group_no, not the DM channel),
+    // so the resolver re-fetches the authoritative copy on the next turn.
+    expect(cache.get(GROUP)).toBeUndefined();
+  });
+
+  it('a join/leave (non-md) system event is dropped WITHOUT invalidating the cache', async () => {
+    const cache = new GroupMdCache();
+    cache.set(GROUP, makeEntry());
+    const router = makeRouter(cache);
+
+    const join = mdEvent({
+      payload: { type: MessageType.Text, content: '', event: { type: 'group_member_join', group_no: GROUP } },
+    });
+    const result = await router.route(join);
+
+    expect(result).toBeNull();
+    expect(sendMessage).not.toHaveBeenCalled();
+    // Non-md events must NOT be mistaken for an md event — cache is untouched.
+    expect(cache.get(GROUP)).toEqual(makeEntry());
+  });
+
+  it('an event with no type is dropped and never invalidates', async () => {
+    const cache = new GroupMdCache();
+    cache.set(GROUP, makeEntry());
+    const router = makeRouter(cache);
+
+    const result = await router.route(
+      mdEvent({ payload: { type: MessageType.Text, content: '', event: { group_no: GROUP } } }),
+    );
+
+    expect(result).toBeNull();
+    expect(cache.get(GROUP)).toEqual(makeEntry());
+  });
+
+  it('an md event with no group_no on a DM channel is a no-op (no group to target)', async () => {
+    const cache = new GroupMdCache();
+    cache.set(GROUP, makeEntry());
+    const router = makeRouter(cache);
+
+    const result = await router.route(
+      mdEvent({ payload: { type: MessageType.Text, content: '', event: { type: 'group_md_updated' } } }),
+    );
+
+    expect(result).toBeNull();
+    expect(cache.get(GROUP)).toEqual(makeEntry());
+  });
+
+  it('with serverMd off the cache is never touched (rollback flag)', async () => {
+    const cache = new GroupMdCache();
+    cache.set(GROUP, makeEntry());
+    const router = makeRouter(cache, { serverMd: false });
+
+    const result = await router.route(mdEvent());
+
+    expect(result).toBeNull();
+    expect(cache.get(GROUP)).toEqual(makeEntry());
+  });
+
+  it('no cache wired → md event is a harmless no-op (still returns null)', async () => {
+    const router = makeRouter(undefined);
+    const result = await router.route(mdEvent());
+    expect(result).toBeNull();
+  });
+
+  it('falls back to the channel group when an md event arrives on a mention-free group with no group_no', async () => {
+    const cache = new GroupMdCache();
+    cache.set(GROUP, makeEntry());
+    // Mention-free is the one group path that reaches the event branch (the
+    // mention gate otherwise drops un-mentioned group messages). A composite
+    // thread channel_id normalizes to its parent group.
+    const router = makeRouter(cache, { mentionFreeGroups: [`${GROUP}____thread-1`] });
+
+    const result = await router.route(
+      mdEvent({
+        channel_type: ChannelType.CommunityTopic,
+        channel_id: `${GROUP}____thread-1`,
+        payload: { type: MessageType.Text, content: '', event: { type: 'group_md_updated' } },
+      }),
+    );
+
+    expect(result).toBeNull();
+    expect(cache.get(GROUP)).toBeUndefined();
+  });
+
+  it('the md event literal is overridable via serverMdEventTypes (calibration seam)', async () => {
+    const cache = new GroupMdCache();
+    cache.set(GROUP, makeEntry());
+    // The provisional default literal no longer matches; a real captured literal does.
+    const router = makeRouter(cache, { serverMdEventTypes: ['group.md.changed'] });
+
+    // Default literal is now ignored.
+    await router.route(mdEvent());
+    expect(cache.get(GROUP)).toEqual(makeEntry());
+
+    // The configured literal triggers invalidation.
+    const real = mdEvent({
+      payload: { type: MessageType.Text, content: '', event: { type: 'group.md.changed', group_no: GROUP } },
+    });
+    await router.route(real);
+    expect(cache.get(GROUP)).toBeUndefined();
   });
 });

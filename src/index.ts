@@ -272,7 +272,10 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
     }
 
     // --- Session router ---
-    const router = new SessionRouter(config, gateway.botId, gateway.ownerUid);
+    // P2-B: the router holds the GROUP.md cache so a server GROUP.md change
+    // event invalidates the affected group's entry (re-fetched authoritatively
+    // next turn — never trusting the event payload). No-op when serverMd is off.
+    const router = new SessionRouter(config, gateway.botId, gateway.ownerUid, groupMdCache);
 
     // --- Active handler tracking (Q6: in-flight drain on shutdown) ---
     const activeHandlers = new Set<Promise<void>>();
