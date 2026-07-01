@@ -16,7 +16,7 @@ import { OctoGateway } from './gateway.js';
 import { SessionRouter } from './session-router.js';
 import { GroupContext } from './group-context.js';
 import { queryAgent } from './agent-bridge.js';
-import { sanitizeDisplayName, escapeSectionMarkers, sanitizePromptBody } from './prompt-safety.js';
+import { sanitizeDisplayName, escapeSectionMarkers, sanitizePromptBody, formatSenderLabel } from './prompt-safety.js';
 import type { SessionCtx } from './cwd-resolver.js';
 import { cleanupExpiredCwds, resolveMemoryDir, resolveSessionCwd } from './cwd-resolver.js';
 import { StreamRelay } from './stream-relay.js';
@@ -639,10 +639,30 @@ export async function handleMessage(
       // persists the raw user content without the quote prefix to avoid prefix
       // duplication on conversation replay.
       //
-      // The final user message is assembled AFTER history is built (below), so
-      // the one-time history block + group-context delta can be prepended and
-      // the whole payload capped together. See the assembly near queryAgent.
-      const userBody = quotePrefix + bodyText;
+      // Sender-identity prefix (groups only): the `[Current message — respond to
+      // this ONLY]` anchor previously carried an anonymous body, so a shared-group
+      // Claude Code / Claw agent could not tell WHICH member sent the request
+      // being replied to (the anchor block itself has no sender field, unlike
+      // `[Recent group messages]` where each line already prefixes `name(uid)：`).
+      // We prepend `name(uid)：` — sanitized via formatSenderLabel — to align the
+      // current-message identity semantics with the historical block, so the
+      // agent has a single, uniform convention for identifying speakers across
+      // the whole prompt. DM channels stay anonymous: there's exactly one human
+      // party, adding the prefix would be pure noise. The prefix is persisted
+      // via appendUser below too — otherwise a session-replay would drop identity
+      // from history while keeping it on current, defeating the whole point.
+      //
+      // Resolve the displayName via GroupContext so the wire's from_name (which
+      // is optional and, when present, sometimes just echoes the uid) is
+      // upgraded to the roster displayName learned via refreshMembers. Without
+      // this, human users whose wire payload lacks from_name render as
+      // `uid：body` instead of `name(uid)：body`, breaking the promised uniform
+      // shape.
+      const resolvedName = isGroup && msg.channel_id
+        ? groupContext.resolveDisplayName(msg.channel_id, msg.from_uid, msg.from_name)
+        : undefined;
+      const senderPrefix = isGroup ? `${formatSenderLabel(msg.from_uid, resolvedName)}：` : '';
+      const userBody = quotePrefix + senderPrefix + bodyText;
       // G4: Backfill history from API when local cache is empty for groups.
       // Only triggered on first interaction with a group (cold start) to avoid
       // duplicate API calls; checked via a sentinel marker stored in-memory.
