@@ -647,7 +647,7 @@ export async function handleMessage(
       const resolvedName = isGroup && msg.channel_id
         ? groupContext.resolveDisplayName(msg.channel_id, msg.from_uid, msg.from_name)
         : undefined;
-      const senderPrefix = isGroup ? `${formatSenderLabel(msg.from_uid, resolvedName ?? msg.from_name)}：` : '';
+      const senderPrefix = isGroup ? `${formatSenderLabel(msg.from_uid, resolvedName)}：` : '';
       const userBody = quotePrefix + senderPrefix + bodyText;
       // G4: Backfill history from API when local cache is empty for groups.
       // Only triggered on first interaction with a group (cold start) to avoid

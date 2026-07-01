@@ -159,11 +159,16 @@ export class GroupContext {
    * keep render a pure read).
    */
   resolveDisplayName(channelId: string, fromUid: string, fromName?: string | null): string | undefined {
+    // Roster is priority 1 ONLY when it carries a genuine displayName. A roster
+    // entry that echoes the uid is a poisoned cache (an earlier pushMessage
+    // learned the uid because wire from_name was missing) and must NOT win over
+    // a subsequent real wire name — otherwise the roster locks in `uid(uid)：`
+    // rendering until an external refresh overwrites the entry.
     const rosterName = this.getMemberMap(channelId).get(fromUid);
-    if (rosterName && rosterName.length > 0) return rosterName;
+    if (rosterName && rosterName.length > 0 && rosterName !== fromUid) return rosterName;
     if (fromName && fromName.length > 0 && fromName !== fromUid) {
       const safe = sanitizeDisplayName(fromName);
-      if (safe.length > 0) return safe;
+      if (safe.length > 0 && safe !== fromUid) return safe;
     }
     return undefined;
   }
@@ -203,7 +208,13 @@ export class GroupContext {
     while (window.length > this.maxWindowSize) {
       window.shift();
     }
-    this.learnMember(channelId, fromUid, safeName);
+    // Do NOT learn a uid-echo as an authoritative roster name — if we did, a
+    // later message that DOES carry a real wire name would be blocked by the
+    // roster (priority 1) and render as `uid(uid)：` forever. Only learn when
+    // safeName is a genuine displayName distinct from the uid.
+    if (safeName !== fromUid && safeName !== 'unknown') {
+      this.learnMember(channelId, fromUid, safeName);
+    }
 
     try {
       this.insertMessage.run(channelId, fromUid, safeName, content, timestamp);
@@ -370,7 +381,12 @@ export class GroupContext {
       // resolveDisplayName so a row whose cached fromName was written before
       // the roster caught the real displayName (or wire only supplied the uid)
       // still renders with the current human name.
-      const displayName = this.resolveDisplayName(channelId, m.fromUid, m.fromName) ?? m.fromName;
+      // resolveDisplayName returns undefined precisely to mean "no real name
+      // known, emit bare uid" — do NOT fall back to m.fromName, which is often
+      // the uid itself (write-time echo) and would re-create the `uid(uid)：`
+      // rendering this feature exists to eliminate. formatSenderLabel handles
+      // the undefined case by emitting the bare uid.
+      const displayName = this.resolveDisplayName(channelId, m.fromUid, m.fromName);
       const line = `${formatSenderLabel(m.fromUid, displayName)}：${m.content}`;
       const cost = line.length + (selected.length > 0 ? 1 : 0);
       if (used + cost > budget) break;
@@ -463,7 +479,7 @@ export class GroupContext {
     const selected: string[] = [];
     let used = 0;
     for (let i = 0; i < rows.length; i++) {
-      const displayName = this.resolveDisplayName(channelId, rows[i].from_uid, rows[i].from_name) ?? rows[i].from_name;
+      const displayName = this.resolveDisplayName(channelId, rows[i].from_uid, rows[i].from_name);
       const line = `${formatSenderLabel(rows[i].from_uid, displayName)}：${rows[i].content}`;
       const cost = line.length + (selected.length > 0 ? 1 : 0);
       if (used + cost > budget) break;

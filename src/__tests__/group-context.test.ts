@@ -649,3 +649,56 @@ describe('GroupContext.pushMessage prefers roster name at write time', () => {
     expect(out).toContain('Alice(u1)：hello');
   });
 });
+
+// Regression tests for the review of PR #175:
+// - `resolvedName ?? m.fromName` fallback used to re-introduce `uid(uid)：`
+//   whenever the roster missed AND wire from_name echoed the uid.
+// - pushMessage used to learn a uid-echo as an authoritative roster entry,
+//   which then blocked later real wire names via priority-1 lookup.
+// - resolveDisplayName used to trust a roster entry whose value equalled the
+//   uid, extending the poison across the whole session.
+describe('GroupContext regression: uid-echo never renders as `uid(uid)：`', () => {
+  let adapter: DbAdapter;
+  let ctx: GroupContext;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    adapter = createTestAdapter();
+    ctx = new GroupContext(adapter, 6000);
+  });
+
+  it('buildContext (in-memory) renders bare uid — not `uid(uid)：` — on cold-start uid echo', () => {
+    // Cold start: no roster entry, wire from_name echoes the uid.
+    ctx.pushMessage('ch1', 'u1', 'u1', 'hi', 1000);
+    const out = ctx.buildContext('ch1');
+    expect(out).toContain('u1：hi');
+    expect(out).not.toContain('u1(u1)');
+  });
+
+  it('buildContextSince (DB) renders bare uid on cold-start uid echo', () => {
+    ctx.pushMessage('ch1', 'u1', 'u1', 'hi', 1000);
+    const { text } = ctx.buildContextSince('ch1', 0);
+    expect(text).toContain('u1：hi');
+    expect(text).not.toContain('u1(u1)');
+  });
+
+  it('resolveDisplayName ignores a poisoned roster entry whose value equals the uid', () => {
+    // Simulate a pre-fix write that learned uid as name (or an external actor
+    // stuffing the roster). The resolver must NOT trust it, so a subsequent
+    // real wire name still wins.
+    ctx.learnMember('ch1', 'u1', 'u1');
+    expect(ctx.resolveDisplayName('ch1', 'u1', 'Alice')).toBe('Alice');
+  });
+
+  it('pushMessage does NOT learn a uid-echo as an authoritative roster name', () => {
+    // First write: wire echoes uid → nothing worth learning.
+    ctx.pushMessage('ch1', 'u1', 'u1', 'first', 1000);
+    // Second write: wire supplies the real name → resolver must return it,
+    // proving pushMessage did not lock the roster to `u1 → "u1"`.
+    expect(ctx.resolveDisplayName('ch1', 'u1', 'Alice')).toBe('Alice');
+    ctx.pushMessage('ch1', 'u1', 'Alice', 'second', 2000);
+    const out = ctx.buildContext('ch1');
+    expect(out).toContain('Alice(u1)：second');
+    expect(out).not.toContain('u1(u1)');
+  });
+});
