@@ -138,13 +138,43 @@ export class SessionStore {
       );
     }
 
+    // XIN-154: collapse any pre-existing seq236-style duplicate rows BEFORE
+    // creating the partial unique index — a unique index cannot be built over a
+    // table that already violates it. Idempotent + transactional (see the method),
+    // so it is safe to run on every startup; on an already-clean DB it deletes
+    // nothing. After this, INSERT OR IGNORE (insertMessage) keeps the table clean.
+    this.dedupeMessagesBySeq();
+
+    // Partial unique index that makes the (session_id, role, message_seq) write
+    // idempotent. Keyed on role because a user turn and the bot's reply
+    // legitimately share the inbound seq (appendAssistant is called with the
+    // inbound message_seq), so a session_id+seq-only index would wrongly forbid
+    // the reply. The predicate is `message_seq > 0` (not merely IS NOT NULL):
+    // a synthetic cron fire carries the seq=0 SENTINEL (no real wire seq; see
+    // index.ts), and multiple cron rounds legitimately share seq=0 — constraining
+    // them would silently drop real rounds via INSERT OR IGNORE. So only real
+    // positive wire seqs are deduped; NULL- and 0/negative-seq turns stay
+    // unconstrained. `> 0` matches the existing "real seq" predicate in index.ts.
+    this.adapter.exec(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_session_role_seq ' +
+        'ON messages(session_id, role, message_seq) WHERE message_seq > 0',
+    );
+
     this.selectSession = this.adapter.prepare('SELECT * FROM sessions WHERE id = ?');
     this.insertSession = this.adapter.prepare(
       'INSERT INTO sessions (id, channel_id, channel_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
     );
     this.touchSession = this.adapter.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?');
+    // XIN-145 root cause: the G4 cold-start backfill (seedHistoryFromApi) and the
+    // live inbound path both persisted the SAME triggering message, doubling the
+    // row at its message_seq (the "seq236" bug). The cure is a PARTIAL unique
+    // index (created above) plus INSERT OR IGNORE here: a re-write of an already
+    // stored (session_id, role, message_seq) is silently dropped, making append()
+    // idempotent. The index is partial on `message_seq > 0`, so NULL-seq turns
+    // AND the seq=0 cron sentinel (multiple legit rounds share it) are exempt —
+    // OR IGNORE never suppresses them.
     this.insertMessage = this.adapter.prepare(
-      'INSERT INTO messages (session_id, role, content, timestamp, message_seq, from_name) VALUES (?, ?, ?, ?, ?, ?)',
+      'INSERT OR IGNORE INTO messages (session_id, role, content, timestamp, message_seq, from_name) VALUES (?, ?, ?, ?, ?, ?)',
     );
     this.selectRecentMessages = this.adapter.prepare(
       'SELECT role, content, message_seq, from_name FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?',
@@ -173,6 +203,56 @@ export class SessionStore {
     this.deleteExpiredSdkSessions = this.adapter.prepare(
       'DELETE FROM sdk_sessions WHERE updated_at < ?',
     );
+  }
+
+  /**
+   * XIN-154 existing-row migration: collapse duplicate
+   * (session_id, role, message_seq) rows left by the pre-fix seq236 double-write,
+   * keeping the lowest id (the earliest insert) in each group.
+   *
+   * Only REAL wire seqs (message_seq > 0) participate. Rows are exempt when:
+   *   - message_seq IS NULL (assistant / legacy / no-seq turns), or
+   *   - message_seq <= 0 — notably the seq=0 SENTINEL a synthetic cron fire
+   *     carries (no real wire seq; see index.ts where the cron round stores
+   *     seq=0). Multiple cron rounds legitimately share seq=0, so folding on it
+   *     would delete real data — hence `> 0`, matching the codebase's existing
+   *     "real seq" predicate (`msg.message_seq > 0`).
+   * Rows that merely share a seq across roles (a user turn and the bot's reply)
+   * are preserved because role is part of the grouping key.
+   *
+   * Wrapped in a single transaction with explicit before/after row accounting: a
+   * mismatch between the delete count and the row delta means the table was
+   * mutated concurrently, so we throw and roll back rather than report a clean
+   * migration over an inconsistent result (防丢数据). Idempotent: a second run over
+   * already-clean data deletes nothing and leaves counts unchanged.
+   */
+  dedupeMessagesBySeq(): { before: number; removed: number; after: number } {
+    const tx = this.adapter.transaction(() => {
+      const before = (
+        this.adapter.prepare('SELECT COUNT(*) AS n FROM messages').get() as {
+          n: number;
+        }
+      ).n;
+      const result = this.adapter
+        .prepare(
+          'DELETE FROM messages WHERE message_seq > 0 AND id NOT IN (' +
+            'SELECT MIN(id) FROM messages WHERE message_seq > 0 ' +
+            'GROUP BY session_id, role, message_seq)',
+        )
+        .run();
+      const after = (
+        this.adapter.prepare('SELECT COUNT(*) AS n FROM messages').get() as {
+          n: number;
+        }
+      ).n;
+      if (before - after !== result.changes) {
+        throw new Error(
+          `session-store: dedup row accounting mismatch (before=${before}, after=${after}, deleted=${result.changes}) — rolling back`,
+        );
+      }
+      return { before, removed: result.changes, after };
+    });
+    return tx();
   }
 
   getOrCreate(id: string, channelId: string, channelType: number): Session {

@@ -333,6 +333,270 @@ describe('SessionStore G10 message_seq migration (Q1-2)', () => {
   });
 });
 
+// XIN-145 root cause / XIN-154 fix: the G4 cold-start backfill (seedHistoryFromApi)
+// and the live inbound path both persist the SAME triggering message. With a plain
+// INSERT and no uniqueness, that left two identical (session_id, role, message_seq)
+// rows (the seq236 double-write). The fix is a PARTIAL unique index on
+// (session_id, role, message_seq) WHERE message_seq IS NOT NULL + INSERT OR IGNORE.
+//
+// The index is keyed on role (not just session_id+seq): a user turn and the bot's
+// reply legitimately share the inbound seq (agent-bridge stores the assistant turn
+// with msg.message_seq — see appendAssistant at index.ts), so collapsing on seq
+// alone would drop every bot reply. The index is partial (WHERE message_seq IS NOT
+// NULL) because assistant / legacy / no-seq turns carry NULL seq and must remain
+// unconstrained.
+describe('SessionStore — seq236 double-write root-cause fix (partial unique index)', () => {
+  let adapter: DbAdapter;
+  let store: SessionStore;
+
+  beforeEach(() => {
+    adapter = createAdapter(':memory:');
+    store = new SessionStore(adapter);
+    store.init();
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  function countSeq(sessionId: string, role: string, seq: number): number {
+    return (
+      adapter
+        .prepare(
+          'SELECT COUNT(*) AS n FROM messages WHERE session_id = ? AND role = ? AND message_seq = ?',
+        )
+        .get(sessionId, role, seq) as { n: number }
+    ).n;
+  }
+
+  it('cold-start double-write of the same inbound (seq 236) collapses to ONE row', () => {
+    store.getOrCreate('g1', 'ch1', 2);
+    // Path 1 — G4 cold-start backfill seeds the just-arrived inbound from the API.
+    store.appendUser('g1', 'message at seq 236', 236, 'Alice');
+    // Path 2 — the live inbound handler appends the very same message moments later.
+    store.appendUser('g1', 'message at seq 236', 236, 'Alice');
+
+    // Pre-fix this was 2 rows (the bug). The partial unique index + INSERT OR
+    // IGNORE make the second write a no-op, so seq 236 is no longer doubled.
+    expect(countSeq('g1', 'user', 236)).toBe(1);
+  });
+
+  it('keeps the FIRST write when a duplicate seq arrives (INSERT OR IGNORE, earliest wins)', () => {
+    store.getOrCreate('g1', 'ch1', 2);
+    store.appendUser('g1', 'first copy', 236, 'Alice');
+    store.appendUser('g1', 'second copy (ignored)', 236, 'Alice');
+
+    const history = store.buildHistoryPrefix('g1', 10);
+    expect(history).toContain('first copy');
+    expect(history).not.toContain('second copy (ignored)');
+  });
+
+  it('a user turn and the bot reply may SHARE a seq — role keeps them distinct', () => {
+    store.getOrCreate('g1', 'ch1', 2);
+    store.appendUser('g1', 'the question', 236, 'Alice');
+    // The assistant reply is stored with the inbound seq (segmentation relies on
+    // this). It must NOT be swallowed by the user row at the same seq.
+    store.appendAssistant('g1', 'the answer', 236, 'OctoBot');
+
+    expect(countSeq('g1', 'user', 236)).toBe(1);
+    expect(countSeq('g1', 'assistant', 236)).toBe(1);
+  });
+
+  it('the index is genuinely PARTIAL — NULL message_seq rows are never constrained', () => {
+    store.getOrCreate('g1', 'ch1', 2);
+    // assistant / legacy / no-seq turns all carry NULL seq; any number of them
+    // must insert fine (WHERE message_seq IS NOT NULL exempts them).
+    store.appendAssistant('g1', 'reply A', undefined, 'OctoBot');
+    store.appendAssistant('g1', 'reply B', undefined, 'OctoBot');
+    store.appendUser('g1', 'no-seq one', undefined, 'Alice');
+    store.appendUser('g1', 'no-seq two', undefined, 'Alice');
+
+    const nullCount = (
+      adapter
+        .prepare('SELECT COUNT(*) AS n FROM messages WHERE message_seq IS NULL')
+        .get() as { n: number }
+    ).n;
+    expect(nullCount).toBe(4);
+  });
+
+  it('does NOT constrain the seq=0 cron sentinel — multiple cron rounds all persist', () => {
+    // A synthetic cron fire carries message_seq=0 (no real wire seq; see
+    // index.ts). Multiple rounds share seq=0 and are legitimately distinct. The
+    // partial index is `WHERE message_seq > 0`, so the sentinel is exempt and
+    // INSERT OR IGNORE must NOT collapse these (reviewer's data-loss blocker).
+    store.getOrCreate('g1', 'ch1', 2);
+    store.appendUser('g1', 'cron round 1', 0, 'Scheduler');
+    store.appendAssistant('g1', 'cron reply 1', 0, 'OctoBot');
+    store.appendUser('g1', 'cron round 2', 0, 'Scheduler');
+    store.appendAssistant('g1', 'cron reply 2', 0, 'OctoBot');
+
+    const count = (
+      adapter
+        .prepare("SELECT COUNT(*) AS n FROM messages WHERE session_id = 'g1' AND message_seq = 0")
+        .get() as { n: number }
+    ).n;
+    expect(count).toBe(4);
+  });
+});
+
+describe('SessionStore — existing-row dedup migration (seq236 backfill)', () => {
+  // Build a pre-fix messages table (current columns, NO unique index) and seed it
+  // with the duplicate rows the bug produced, so we can exercise the migration.
+  function seedDirtyDb(): DbAdapter {
+    const adapter = createAdapter(':memory:');
+    adapter.exec(`
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        channel_id TEXT NOT NULL,
+        channel_type INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        message_seq INTEGER,
+        from_name TEXT
+      );
+      INSERT INTO sessions VALUES ('g1', 'ch1', 2, 0, 0);
+      -- Doubled user inbound at seq 236 (the bug). Earliest id must survive.
+      INSERT INTO messages (session_id, role, content, timestamp, message_seq, from_name)
+        VALUES ('g1', 'user', 'seq236 first', 10, 236, 'Alice');
+      INSERT INTO messages (session_id, role, content, timestamp, message_seq, from_name)
+        VALUES ('g1', 'user', 'seq236 second', 11, 236, 'Alice');
+      -- Assistant reply sharing seq 236 — NOT a duplicate, must be preserved.
+      INSERT INTO messages (session_id, role, content, timestamp, message_seq, from_name)
+        VALUES ('g1', 'assistant', 'seq236 answer', 12, 236, 'OctoBot');
+      -- A distinct user seq — untouched.
+      INSERT INTO messages (session_id, role, content, timestamp, message_seq, from_name)
+        VALUES ('g1', 'user', 'seq237', 13, 237, 'Alice');
+      -- NULL-seq rows (assistant / legacy) — never part of the uniqueness contract.
+      INSERT INTO messages (session_id, role, content, timestamp, message_seq, from_name)
+        VALUES ('g1', 'assistant', 'no-seq A', 14, NULL, 'OctoBot');
+      INSERT INTO messages (session_id, role, content, timestamp, message_seq, from_name)
+        VALUES ('g1', 'assistant', 'no-seq B', 15, NULL, 'OctoBot');
+      -- seq=0 SENTINEL: synthetic cron fires carry message_seq=0 (no real wire
+      -- seq; see index.ts). Multiple cron rounds legitimately share seq=0 and are
+      -- DISTINCT rows. Folding them on (session, role, seq) would delete real
+      -- data — the reviewer's data-loss blocker. The migration must leave all of
+      -- these intact (predicate is message_seq > 0, not IS NOT NULL).
+      INSERT INTO messages (session_id, role, content, timestamp, message_seq, from_name)
+        VALUES ('g1', 'user', 'cron round 1', 16, 0, 'Scheduler');
+      INSERT INTO messages (session_id, role, content, timestamp, message_seq, from_name)
+        VALUES ('g1', 'user', 'cron round 2', 17, 0, 'Scheduler');
+      INSERT INTO messages (session_id, role, content, timestamp, message_seq, from_name)
+        VALUES ('g1', 'assistant', 'cron reply 1', 18, 0, 'OctoBot');
+    `);
+    return adapter;
+  }
+
+  it('collapses duplicate (session_id, role, seq) rows, preserves everything else, and is idempotent', () => {
+    const adapter = seedDirtyDb();
+    const store = new SessionStore(adapter);
+
+    // First pass: one duplicate user row removed (seq236 only); row accounting
+    // reported. The three seq=0 cron rounds are NOT touched.
+    const first = store.dedupeMessagesBySeq();
+    expect(first.before).toBe(9);
+    expect(first.removed).toBe(1);
+    expect(first.after).toBe(8);
+    expect(first.after).toBe(first.before - first.removed);
+
+    // Idempotent re-entrancy: a second pass over clean data removes nothing.
+    const second = store.dedupeMessagesBySeq();
+    expect(second.before).toBe(8);
+    expect(second.removed).toBe(0);
+    expect(second.after).toBe(8);
+
+    // The earliest (MIN id) duplicate survives.
+    const userSeq236 = adapter
+      .prepare(
+        "SELECT content FROM messages WHERE session_id = 'g1' AND role = 'user' AND message_seq = 236",
+      )
+      .all() as Array<{ content: string }>;
+    expect(userSeq236).toHaveLength(1);
+    expect(userSeq236[0].content).toBe('seq236 first');
+
+    // The assistant reply sharing seq 236 is preserved (role keeps it distinct).
+    const asstSeq236 = (
+      adapter
+        .prepare(
+          "SELECT COUNT(*) AS n FROM messages WHERE session_id = 'g1' AND role = 'assistant' AND message_seq = 236",
+        )
+        .get() as { n: number }
+    ).n;
+    expect(asstSeq236).toBe(1);
+
+    // NULL-seq rows are untouched by the migration.
+    const nullCount = (
+      adapter
+        .prepare('SELECT COUNT(*) AS n FROM messages WHERE message_seq IS NULL')
+        .get() as { n: number }
+    ).n;
+    expect(nullCount).toBe(2);
+
+    // DATA-LOSS GUARD (reviewer blocker): every seq=0 cron round survives — the
+    // migration never folds the sentinel. All three (2 user + 1 assistant) remain.
+    const cronRows = adapter
+      .prepare(
+        "SELECT content FROM messages WHERE session_id = 'g1' AND message_seq = 0 ORDER BY id",
+      )
+      .all() as Array<{ content: string }>;
+    expect(cronRows.map((r) => r.content)).toEqual([
+      'cron round 1',
+      'cron round 2',
+      'cron reply 1',
+    ]);
+
+    store.close();
+  });
+
+  it('init() dedupes a dirty DB then enforces uniqueness on subsequent writes', () => {
+    const adapter = seedDirtyDb();
+    const store = new SessionStore(adapter);
+
+    // init() must dedupe BEFORE creating the unique index (else index creation
+    // would fail on the pre-existing duplicates).
+    expect(() => store.init()).not.toThrow();
+
+    const userSeq236 = (
+      adapter
+        .prepare(
+          "SELECT COUNT(*) AS n FROM messages WHERE session_id = 'g1' AND role = 'user' AND message_seq = 236",
+        )
+        .get() as { n: number }
+    ).n;
+    expect(userSeq236).toBe(1);
+
+    // Going forward, a re-arriving duplicate inbound is ignored, not doubled.
+    store.appendUser('g1', 'seq236 re-arrival', 236, 'Alice');
+    const afterAppend = (
+      adapter
+        .prepare(
+          "SELECT COUNT(*) AS n FROM messages WHERE session_id = 'g1' AND role = 'user' AND message_seq = 236",
+        )
+        .get() as { n: number }
+    ).n;
+    expect(afterAppend).toBe(1);
+
+    // The seq=0 cron rounds survived init()'s migration AND a fresh seq=0 round
+    // appends fine afterwards (the partial index excludes the sentinel, so
+    // INSERT OR IGNORE does not suppress it).
+    store.appendUser('g1', 'cron round 3', 0, 'Scheduler');
+    const cronCount = (
+      adapter
+        .prepare("SELECT COUNT(*) AS n FROM messages WHERE session_id = 'g1' AND message_seq = 0")
+        .get() as { n: number }
+    ).n;
+    expect(cronCount).toBe(4);
+
+    store.close();
+  });
+});
+
 describe('SessionStore — v0.3 SDK session ids (persistent sessions)', () => {
   let adapter: DbAdapter;
   let store: SessionStore;
