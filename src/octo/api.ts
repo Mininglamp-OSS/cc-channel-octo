@@ -534,18 +534,41 @@ async function requestNoBody(
   }
 }
 
+/**
+ * Serialize an int64 id (e.g. a snowflake message id) into a request body as a
+ * *bare JSON number* with full precision preserved.
+ *
+ * The Octo backend requires `source_message_id` to be a JSON number — a quoted
+ * string is rejected with 400 request_invalid. But a 19-digit snowflake exceeds
+ * Number.MAX_SAFE_INTEGER (2^53-1), so the value must never pass through a JS
+ * `number`, which would silently truncate it. We therefore keep it as a string
+ * end-to-end and hand it to JSON.stringify verbatim via JSON.rawJSON (Node >=21),
+ * yielding wire JSON such as `"source_message_id":2071497871135346688`.
+ *
+ * JSON.rawJSON is not in the ES2022 lib typings yet, so it is accessed through a
+ * narrow cast rather than `any`.
+ */
+function rawInt64(value: string): unknown {
+  if (!/^-?[0-9]+$/.test(value)) {
+    throw new Error(`int64 id must be a base-10 integer string, got: ${value}`);
+  }
+  return (JSON as unknown as { rawJSON(text: string): unknown }).rawJSON(value);
+}
+
 /** Create a thread under a parent group. POST /v1/bot/groups/{groupNo}/threads */
 export async function createThread(params: {
   apiUrl: string;
   botToken: string;
   groupNo: string;
   name: string;
-  /** Optional: anchor the thread to the message it was started from. */
-  sourceMessageId?: number;
+  /** Optional: anchor the thread to the message it was started from. Accepted as
+   *  a string to stay int64-safe, but emitted on the wire as a bare JSON number
+   *  (the server rejects a quoted value); see rawInt64. */
+  sourceMessageId?: string;
   signal?: AbortSignal;
 }): Promise<Thread | undefined> {
   const body: Record<string, unknown> = { name: params.name };
-  if (params.sourceMessageId != null) body.source_message_id = params.sourceMessageId;
+  if (params.sourceMessageId != null) body.source_message_id = rawInt64(params.sourceMessageId);
   return await postJson<Thread>(
     params.apiUrl,
     params.botToken,

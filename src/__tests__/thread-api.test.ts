@@ -72,15 +72,34 @@ describe('createThread', () => {
     expect(out).toEqual({ short_id: SHORT, name: 'topic', creator_uid: 'u1' });
   });
 
-  it('includes source_message_id only when provided', async () => {
+  it('serializes source_message_id as a bare int64 number with full precision', async () => {
     fetchMock.mockResolvedValueOnce(
       mockJsonResponse({ short_id: SHORT, name: 'topic', creator_uid: 'u1' }),
     );
-    await createThread({ ...BASE, groupNo: GROUP, name: 'topic', sourceMessageId: 42 });
-    expect(JSON.parse(call().init.body as string)).toEqual({
-      name: 'topic',
-      source_message_id: 42,
-    });
+    // 19-digit snowflake well beyond Number.MAX_SAFE_INTEGER (2^53-1 = 9007199254740991).
+    const bigId = '2071497871135346688';
+    await createThread({ ...BASE, groupNo: GROUP, name: 'topic', sourceMessageId: bigId });
+
+    // Assert on the raw JSON *text* (not JSON.parse, which would itself truncate
+    // the id through a JS number): the id is a bare number literal, not quoted.
+    const rawBody = call().init.body as string;
+    expect(rawBody).toBe(`{"name":"topic","source_message_id":${bigId}}`);
+    expect(rawBody).not.toContain('"source_message_id":"');
+    const idMatch = rawBody.match(/"source_message_id":(-?\d+)/);
+    expect(idMatch?.[1]).toBe(bigId);
+  });
+
+  it('does not truncate ids that exceed 2^53 (precision boundary)', async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockJsonResponse({ short_id: SHORT, name: 'topic', creator_uid: 'u1' }),
+    );
+    // 2^53 + 1 — the canonical value a JS number rounds down to 9007199254740992.
+    const boundaryId = '9007199254740993';
+    await createThread({ ...BASE, groupNo: GROUP, name: 'topic', sourceMessageId: boundaryId });
+
+    const rawBody = call().init.body as string;
+    expect(rawBody).toContain(`"source_message_id":${boundaryId}`);
+    expect(rawBody).not.toContain('9007199254740992');
   });
 });
 
