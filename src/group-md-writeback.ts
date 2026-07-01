@@ -28,8 +28,8 @@
  * durable-trust surface.
  */
 
-import { updateGroupMd } from './octo/api.js';
-import type { GroupMdCache } from './group-md-cache.js';
+import { updateGroupMd, updateThreadMd } from './octo/api.js';
+import type { GroupMdCache, ThreadMdCache } from './group-md-cache.js';
 
 /**
  * Hard UTF-8 byte ceiling for GROUP.md content, per the XIN-201 measured
@@ -37,6 +37,15 @@ import type { GroupMdCache } from './group-md-cache.js';
  * answer 400 err.server.bot_api.content_too_large).
  */
 export const MAX_GROUP_MD_CONTENT_BYTES = 10240;
+
+/**
+ * Hard UTF-8 byte ceiling for THREAD.md content. The thread md endpoint shares
+ * the group md limit (P3-2 contract check: the official Octo web client edits
+ * both group and thread md through the SAME editor, whose `MAX_BYTES` is 10240),
+ * so this is an alias of {@link MAX_GROUP_MD_CONTENT_BYTES} rather than a second
+ * magic number — if the server limit ever diverges, the two can split here.
+ */
+export const MAX_THREAD_MD_CONTENT_BYTES = MAX_GROUP_MD_CONTENT_BYTES;
 
 /** Thrown when content exceeds {@link MAX_GROUP_MD_CONTENT_BYTES}. */
 export class GroupMdContentTooLargeError extends Error {
@@ -139,6 +148,130 @@ export class GroupMdWriteback {
         updated_at: null,
       });
       return { groupNo, version, bytes };
+    });
+  }
+}
+
+/** The `updateThreadMd` client signature, injectable for testing. */
+export type UpdateThreadMdFn = typeof updateThreadMd;
+
+/** Thrown when THREAD.md content exceeds {@link MAX_THREAD_MD_CONTENT_BYTES}. */
+export class ThreadMdContentTooLargeError extends Error {
+  constructor(public readonly bytes: number) {
+    super(
+      `THREAD.md content is ${bytes} bytes, over the ${MAX_THREAD_MD_CONTENT_BYTES}-byte UTF-8 limit`,
+    );
+    this.name = 'ThreadMdContentTooLargeError';
+  }
+}
+
+/** Outcome of a successful THREAD.md write-back. */
+export interface ThreadMdWriteResult {
+  groupNo: string;
+  shortId: string;
+  /** Server-assigned version after the PUT. */
+  version: number;
+  /** UTF-8 byte length of the content that was written. */
+  bytes: number;
+}
+
+export interface ThreadMdWriteParams {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+  content: string;
+  signal?: AbortSignal;
+}
+
+/**
+ * Thread analogue of {@link GroupMdWriteback} (P3-2): persists an agent-authored
+ * THREAD.md back to the server (PUT /v1/bot/groups/{groupNo}/threads/{shortId}/md
+ * via `updateThreadMd`), then refreshes the in-memory {@link ThreadMdCache} so
+ * the next resolve does not TTL-refetch a stale copy.
+ *
+ * Carries over every P2-C safety property, adapted to the thread key:
+ *
+ *   1. Same HARD ≤10240-byte (UTF-8) limit ({@link MAX_THREAD_MD_CONTENT_BYTES},
+ *      confirmed to equal the group limit — see that constant). Rejected locally
+ *      BEFORE the PUT so an oversized body never reaches the server.
+ *
+ *   2. The thread PUT, like the group PUT, does NOT compare-and-swap (body is
+ *      just `{ content }`, reply is `{ version }`). All write-backs for the same
+ *      thread are serialized through a per-`groupNo::shortId` promise-chain lock
+ *      so this gateway never races itself. Cross-source last-write-wins remains
+ *      possible by design, identical to the group caveat.
+ *
+ * Keyed by the COMPOSITE `groupNo::shortId` — the SAME key the thread cache and
+ * the P3-1 read side use — so a thread's write lock and cache refresh can never
+ * be confused with its parent group's (which the group coordinator locks by the
+ * bare groupNo). `::` is outside the safe-id charset, so the two key spaces are
+ * disjoint. Owner-gating lives in the MCP tool layer (group-md-tool.ts), not
+ * here. Never persists to disk — the cache it updates is the same memory-only
+ * cache the resolver reads.
+ */
+export class ThreadMdWriteback {
+  /** Tail of the in-flight write chain per composite key (serializes same-thread writes). */
+  private readonly tails = new Map<string, Promise<unknown>>();
+
+  constructor(
+    private readonly cache: ThreadMdCache,
+    /** Injectable PUT client (defaults to the real octo client). */
+    private readonly updateFn: UpdateThreadMdFn = updateThreadMd,
+  ) {}
+
+  /** Composite lock key; mirrors ThreadMdCache's `groupNo::shortId`. */
+  private lockKey(groupNo: string, shortId: string): string {
+    return `${groupNo}::${shortId}`;
+  }
+
+  /**
+   * Run `fn` after every previously-queued op for `key` has settled, so bodies
+   * for the same key never overlap. Different keys run independently. `fn`'s
+   * rejection is surfaced to its own caller; the chain tail swallows it so a
+   * failed write does not wedge later writes. Identical policy to
+   * {@link GroupMdWriteback}.
+   */
+  private withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.tails.get(key) ?? Promise.resolve();
+    const result = prev.then(fn, fn); // run regardless of prior success/failure
+    const tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.tails.set(key, tail);
+    tail.then(() => {
+      if (this.tails.get(key) === tail) this.tails.delete(key);
+    });
+    return result;
+  }
+
+  /**
+   * Persist `content` as the thread's THREAD.md and refresh the thread cache.
+   *
+   * Rejects with {@link ThreadMdContentTooLargeError} (before any server call)
+   * when content exceeds the UTF-8 byte limit; propagates the client error when
+   * the PUT itself fails (cache is left untouched in that case).
+   */
+  async writeBack(params: ThreadMdWriteParams): Promise<ThreadMdWriteResult> {
+    const { apiUrl, botToken, groupNo, shortId, content, signal } = params;
+    const bytes = Buffer.byteLength(content, 'utf-8');
+    if (bytes > MAX_THREAD_MD_CONTENT_BYTES) {
+      // Reject locally — do NOT hit the server (it would answer 400).
+      throw new ThreadMdContentTooLargeError(bytes);
+    }
+    return this.withLock(this.lockKey(groupNo, shortId), async () => {
+      const { version } = await this.updateFn({ apiUrl, botToken, groupNo, shortId, content, signal });
+      // Refresh the just-persisted content/version into the in-memory thread
+      // cache (composite-keyed) so the next resolveGroupInstructions thread
+      // branch serves what we wrote instead of re-fetching or serving a stale
+      // copy. updated_at is null because the PUT response carries only { version }.
+      this.cache.set(groupNo, shortId, {
+        content,
+        version: typeof version === 'number' ? version : 0,
+        updated_at: null,
+      });
+      return { groupNo, shortId, version, bytes };
     });
   }
 }

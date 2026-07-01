@@ -30,11 +30,18 @@ import { downloadInboundImage, MAX_IMAGES_PER_MESSAGE } from './media-inbound.js
 import { handleCommand } from './commands.js';
 import { resolveGroupInstructions } from './group-md.js';
 import { GroupMdCache, ThreadMdCache, DEFAULT_GROUP_MD_TTL_MS } from './group-md-cache.js';
-import { GroupMdWriteback } from './group-md-writeback.js';
+import { GroupMdWriteback, ThreadMdWriteback } from './group-md-writeback.js';
 import { CronStore } from './cron-store.js';
 import { CronScheduler } from './cron-scheduler.js';
 import { createCronToolServer, CRON_TOOL_SERVER_NAME, type CronSessionCoords } from './cron-tool.js';
-import { createGroupMdToolServer, GROUP_MD_TOOL_SERVER_NAME, type GroupMdSessionCoords } from './group-md-tool.js';
+import {
+  createGroupMdToolServer,
+  GROUP_MD_TOOL_SERVER_NAME,
+  createThreadMdToolServer,
+  THREAD_MD_TOOL_SERVER_NAME,
+  type GroupMdSessionCoords,
+} from './group-md-tool.js';
+import { isThreadChannelId } from './octo/channel-id.js';
 import { buildInlinedFileBody, truncateUtf8ByBytes, assembleUserMessage, MAX_USER_LLM_BYTES } from './file-inline-wrap.js';
 import { join } from 'node:path';
 import { mkdirSync, realpathSync } from 'node:fs';
@@ -239,6 +246,14 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
     // is registered (config.mdWriteback). ---
     const groupMdWriteback = new GroupMdWriteback(groupMdCache);
 
+    // --- P3-2: THREAD.md write-back coordinator. Thread analogue of
+    // groupMdWriteback, shared across turns so its per-`groupNo::shortId` write
+    // lock serializes concurrent turns writing the same thread. Updates the SAME
+    // in-memory threadMdCache above on a successful PUT (no disk surface). Cheap
+    // to construct unconditionally; only exercised when the thread write-back
+    // tool is registered (config.mdWriteback on a thread channel). ---
+    const threadMdWriteback = new ThreadMdWriteback(threadMdCache);
+
     // --- #115: cron (opt-in). ---
     if (config.sdk.cron && config.botId) {
       cronStore = new CronStore(join(config.baseDir, config.botId, 'cron.json'));
@@ -291,10 +306,11 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
     }
 
     // --- Session router ---
-    // P2-B: the router holds the GROUP.md cache so a server GROUP.md change
-    // event invalidates the affected group's entry (re-fetched authoritatively
-    // next turn — never trusting the event payload). No-op when serverMd is off.
-    const router = new SessionRouter(config, gateway.botId, gateway.ownerUid, groupMdCache);
+    // P2-B / P3-2: the router holds both md caches so a server GROUP.md or
+    // THREAD.md change event invalidates the affected entry (re-fetched
+    // authoritatively next turn — never trusting the event payload). No-op when
+    // the corresponding flag (serverMd / threadMd) is off.
+    const router = new SessionRouter(config, gateway.botId, gateway.ownerUid, groupMdCache, threadMdCache);
 
     // --- Active handler tracking (Q6: in-flight drain on shutdown) ---
     const activeHandlers = new Set<Promise<void>>();
@@ -309,7 +325,7 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
       // these on the WS path; guard here too for safety (otherwise a bot's own
       // group message could be cached into group context as un-processed chatter).
       if (msg.from_uid === gateway.botId) return;
-      const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore, groupMdCache, groupMdWriteback, threadMdCache)
+      const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore, groupMdCache, groupMdWriteback, threadMdCache, threadMdWriteback)
         .catch((err) => {
           console.error(`[cc-channel-octo] ${label}Unhandled message handler error:`, err instanceof Error ? err.message : err);
         })
@@ -330,7 +346,7 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
         cronStore,
         onFire: (msg: BotMessage): Promise<void> => {
           if (gateway.draining) return Promise.resolve();
-          const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore, groupMdCache, groupMdWriteback, threadMdCache)
+          const p = handleMessage(msg, config, store, router, groupContext, streamRelay, gateway.botId, cronStore, groupMdCache, groupMdWriteback, threadMdCache, threadMdWriteback)
             .finally(() => { activeHandlers.delete(p); });
           activeHandlers.add(p);
           return p;
@@ -393,6 +409,7 @@ export async function handleMessage(
   groupMdCache?: GroupMdCache,
   groupMdWriteback?: GroupMdWriteback,
   threadMdCache?: ThreadMdCache,
+  threadMdWriteback?: ThreadMdWriteback,
 ): Promise<void> {
   const channelId = msg.channel_id ?? '';
   const channelType = msg.channel_type ?? ChannelType.DM;
@@ -899,27 +916,47 @@ export async function handleMessage(
         };
       }
 
-      // P2-C: when GROUP.md write-back is on, inject the write-back MCP tool
-      // bound to THIS message's channel coords (so the write targets the channel's
-      // parent group) and gated to the bot owner uid. Only for group channels —
-      // a DM has no shared GROUP.md. Per-turn server (coords differ per message);
-      // it borrows the shared groupMdWriteback so the per-groupNo write lock and
-      // the cache it refreshes are process-wide, not per-turn.
-      if (config.mdWriteback && groupMdWriteback && isGroup) {
+      // P2-C / P3-2: when md write-back is on, inject the write-back MCP tool
+      // bound to THIS message's channel coords and gated to the bot owner uid.
+      // Only for group-like channels — a DM has no shared md. The tool is chosen
+      // by channel SHAPE and the two are MUTUALLY EXCLUSIVE (#88 P3 redline):
+      //   - a THREAD (CommunityTopic composite `<groupNo>____<shortId>`) gets the
+      //     thread tool, which writes the thread's OWN THREAD.md
+      //     (PUT /threads/{shortId}/md) — never the parent group's GROUP.md. This
+      //     is the XIN-230 follow-up: the write side now matches the P3-1 read
+      //     side instead of collapsing a thread to its parent groupNo.
+      //   - a plain GROUP gets the GROUP.md tool, unchanged (P2-C).
+      // Each borrows its shared writeback coordinator so the per-key write lock
+      // and the cache it refreshes are process-wide, not per-turn.
+      if (config.mdWriteback && isGroup) {
         const coords: GroupMdSessionCoords = {
           channelId,
           fromUid: msg.from_uid,
           fromName: msg.from_name,
         };
-        const groupMdServer = createGroupMdToolServer(
-          { writeback: groupMdWriteback, apiUrl: config.apiUrl, botToken: config.botToken },
-          coords,
-          router.getOwnerUid(),
-        );
-        sessionOpts = {
-          ...(sessionOpts ?? {}),
-          mcpServers: { ...(sessionOpts?.mcpServers ?? {}), [GROUP_MD_TOOL_SERVER_NAME]: groupMdServer },
-        };
+        if (isThreadChannelId(channelId)) {
+          if (threadMdWriteback) {
+            const threadMdServer = createThreadMdToolServer(
+              { writeback: threadMdWriteback, apiUrl: config.apiUrl, botToken: config.botToken },
+              coords,
+              router.getOwnerUid(),
+            );
+            sessionOpts = {
+              ...(sessionOpts ?? {}),
+              mcpServers: { ...(sessionOpts?.mcpServers ?? {}), [THREAD_MD_TOOL_SERVER_NAME]: threadMdServer },
+            };
+          }
+        } else if (groupMdWriteback) {
+          const groupMdServer = createGroupMdToolServer(
+            { writeback: groupMdWriteback, apiUrl: config.apiUrl, botToken: config.botToken },
+            coords,
+            router.getOwnerUid(),
+          );
+          sessionOpts = {
+            ...(sessionOpts ?? {}),
+            mcpServers: { ...(sessionOpts?.mcpServers ?? {}), [GROUP_MD_TOOL_SERVER_NAME]: groupMdServer },
+          };
+        }
       }
 
       const rawChunks = queryAgent(userContentForLLM, config, sessionCtx, onToolUse, sessionOpts);

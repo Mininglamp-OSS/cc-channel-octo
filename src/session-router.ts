@@ -7,9 +7,9 @@ import type { BotMessage, MentionEntity } from './octo/types.js';
 import { ChannelType, MessageType } from './octo/types.js';
 import { sendMessage } from './octo/api.js';
 import { isAuthenticCronFire } from './cron-fire-marker.js';
-import { extractParentGroupNo } from './octo/channel-id.js';
-import type { GroupMdCache } from './group-md-cache.js';
-import { isGroupMdUpdateEvent } from './group-md-events.js';
+import { extractParentGroupNo, extractThreadShortId } from './octo/channel-id.js';
+import type { GroupMdCache, ThreadMdCache } from './group-md-cache.js';
+import { isGroupMdUpdateEvent, isThreadMdUpdateEvent } from './group-md-events.js';
 
 export interface RouteResult {
   sessionKey: string;
@@ -75,12 +75,27 @@ export class SessionRouter {
    */
   private readonly groupMdCache?: GroupMdCache;
 
-  constructor(config: Config, robotId: string, ownerUid = '', groupMdCache?: GroupMdCache) {
+  /**
+   * P3-2: in-memory server THREAD.md cache (P3-1's composite-keyed cache). Held
+   * so a THREAD.md change event can invalidate the affected subarea's entry,
+   * forcing the next turn to re-fetch the authoritative copy. Optional — omitted
+   * (or with `threadMd` off) the thread event path is a harmless no-op.
+   */
+  private readonly threadMdCache?: ThreadMdCache;
+
+  constructor(
+    config: Config,
+    robotId: string,
+    ownerUid = '',
+    groupMdCache?: GroupMdCache,
+    threadMdCache?: ThreadMdCache,
+  ) {
     this.config = config;
     this.robotId = robotId;
     this.ownerUid = ownerUid;
     this.knownBotUids.add(robotId);
     this.groupMdCache = groupMdCache;
+    this.threadMdCache = threadMdCache;
   }
 
   /** G14: register another known bot uid (future multi-bot support). */
@@ -392,6 +407,55 @@ export class SessionRouter {
     }
   }
 
+  /**
+   * P3-2: thread analogue of {@link handleGroupMdEvent}. On a THREAD.md change
+   * event (update or delete) invalidate that subarea's composite-keyed
+   * (`groupNo::shortId`) cache entry, so the next turn re-fetches the
+   * authoritative copy over the bot token — never trusting the event payload as
+   * the new content (identical anti-poisoning rationale to the group side; see
+   * group-md-events.ts).
+   *
+   * Gated on `threadMd` (the flag that governs the thread server-read path): with
+   * it off the thread cache is never populated, so there is nothing to
+   * invalidate. Group and thread event literals are disjoint, so this and
+   * handleGroupMdEvent never both fire for one event.
+   *
+   * A thread is identified by the event's `group_no` + `short_id`. Both come
+   * from the untrusted event, but invalidation is non-destructive — the worst a
+   * forged thread event can do is force a redundant authenticated re-fetch of the
+   * real THREAD.md, never inject content. When the event omits `short_id` there
+   * is no subarea to key, so we fall back to invalidating nothing rather than
+   * guessing (a thread event MUST carry short_id to be actionable).
+   */
+  private handleThreadMdEvent(msg: BotMessage): void {
+    if (!this.config.threadMd || !this.threadMdCache) return;
+    const event = msg.payload.event;
+    if (!isThreadMdUpdateEvent(event, this.config.threadMdEventTypes)) return;
+
+    let groupNo = event?.group_no ?? '';
+    // The shortId only ever comes from the event body: these events are
+    // delivered on a system/DM channel (a thread event on the thread's own
+    // channel dies at the mention gate, never reaching here — XIN-173), so the
+    // arriving channel_id is the sender, not the thread. Fall back to the
+    // channel only for groupNo (never the shortId) when the event omits it AND
+    // it happened to arrive on a thread channel.
+    let shortId = event?.short_id ?? '';
+    if (this.isGroupLike(msg.channel_type)) {
+      const chan = msg.channel_id ?? '';
+      if (groupNo === '') groupNo = extractParentGroupNo(chan);
+      if (shortId === '') shortId = extractThreadShortId(chan) ?? '';
+    }
+    if (groupNo === '' || shortId === '') return;
+
+    // invalidate() is itself total (validates both ids, never throws); the guard
+    // here keeps a future non-total cache from breaking the drop path.
+    try {
+      this.threadMdCache.invalidate(groupNo, shortId);
+    } catch {
+      /* best-effort: a refresh hiccup must never block dropping the event */
+    }
+  }
+
   private async processMessage(msg: BotMessage, key: string): Promise<RouteResult | null> {
     // Skip messages from self.
     if (msg.from_uid === this.robotId) return null;
@@ -451,14 +515,17 @@ export class SessionRouter {
       }
     }
 
-    // System events (group join/leave, GROUP.md change, etc.) never produce a
-    // user-facing reply, so they always route to `null`. P2-B: before dropping,
-    // a GROUP.md change event is dispatched to invalidate that group's cached
-    // server GROUP.md (forcing the next turn to re-fetch the authoritative copy);
-    // every other system event (join/leave/...) is dropped unchanged, exactly as
-    // before — non-md events must NOT be mistaken for an md event.
+    // System events (group join/leave, GROUP.md / THREAD.md change, etc.) never
+    // produce a user-facing reply, so they always route to `null`. P2-B/P3-2:
+    // before dropping, a GROUP.md or THREAD.md change event is dispatched to
+    // invalidate the affected cache entry (forcing the next turn to re-fetch the
+    // authoritative copy); every other system event (join/leave/...) is dropped
+    // unchanged. The two md handlers key on disjoint event-type literals, so a
+    // group event never invalidates a thread entry and vice versa, and neither
+    // is mistaken for an unrelated system event.
     if (msg.payload.event) {
       this.handleGroupMdEvent(msg);
+      this.handleThreadMdEvent(msg);
       return null;
     }
 

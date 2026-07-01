@@ -139,6 +139,18 @@ export interface Config {
    * `serverMd` (which governs the group server-read path).
    */
   threadMd?: boolean;
+  /**
+   * P3-2: `event.type` literal(s) the server emits when a thread's THREAD.md
+   * changes (update or delete). On such an event the in-memory THREAD.md cache
+   * for that subarea (`groupNo::shortId`, located via the event's `short_id`) is
+   * invalidated so the next turn re-fetches the authoritative copy (never
+   * trusting the event payload — same anti-poisoning model as the group side).
+   * PROVISIONAL: the exact literal is not yet confirmed from a real captured
+   * event, so this is overridable here to calibrate without a code change.
+   * Defaults to `DEFAULT_THREAD_MD_EVENT_TYPES`. Only meaningful when `threadMd`
+   * is true.
+   */
+  threadMdEventTypes?: string[];
   sdk: {
     model?: string;
     /**
@@ -332,6 +344,7 @@ type PartialConfig = {
   serverMdEventTypes?: string[];
   mdWriteback?: boolean;
   threadMd?: boolean;
+  threadMdEventTypes?: string[];
   sdk?: Partial<Config['sdk']>;
   rateLimit?: Partial<Config['rateLimit']>;
   context?: Partial<Config['context']>;
@@ -428,6 +441,7 @@ function mergeConfig(base: Config, override: PartialConfig): Config {
     serverMdEventTypes: override.serverMdEventTypes ?? base.serverMdEventTypes,
     mdWriteback: override.mdWriteback ?? base.mdWriteback,
     threadMd: override.threadMd ?? base.threadMd,
+    threadMdEventTypes: override.threadMdEventTypes ?? base.threadMdEventTypes,
     sdk: {
       ...base.sdk,
       ...(override.sdk ?? {}),
@@ -665,6 +679,7 @@ export function resolveBotConfigs(config: Config): Config[] {
       serverMdEventTypes: perBotFile.serverMdEventTypes ?? config.serverMdEventTypes,
       mdWriteback: perBotFile.mdWriteback ?? config.mdWriteback,
       threadMd: perBotFile.threadMd ?? config.threadMd,
+      threadMdEventTypes: perBotFile.threadMdEventTypes ?? config.threadMdEventTypes,
       sdk: {
         ...config.sdk,
         ...(perBotFile.sdk ?? {}),
