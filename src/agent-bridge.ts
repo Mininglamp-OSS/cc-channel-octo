@@ -308,9 +308,14 @@ export async function* queryAgent(
 
   // Detect the SDK's stale/invalid-resume signal (verified via spike): it throws
   // an Error whose message names the missing/invalid session id.
+  // Also catches Bedrock ValidationException for orphaned tool_use blocks left
+  // by an interrupted turn (no corresponding tool_result), which surfaces as:
+  //   ValidationException: messages.N: `tool_use` ids were found without `tool_result` blocks
+  // Matching this here causes onResumeFailed() to clear the corrupt sdk_session_id
+  // and the turn to retry with fallbackRetryPrompt — same recovery path as stale sessions.
   const isResumeError = (err: unknown): boolean => {
     const m = err instanceof Error ? err.message : String(err);
-    return /No conversation found with session ID|--resume requires a valid session/i.test(m);
+    return /No conversation found with session ID|--resume requires a valid session|tool_use.*ids were found without.*tool_result|tool_result.*blocks.*immediately after/i.test(m);
   };
 
   const stream = runStream(opts?.resume, userMessage);

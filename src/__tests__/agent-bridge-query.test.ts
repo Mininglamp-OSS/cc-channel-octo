@@ -639,7 +639,72 @@ describe('queryAgent', () => {
     expect(mockQuery).toHaveBeenCalledTimes(1); // no retry after a tool_use side effect
     expect(resumeFailed).toBe(true); // but the stale id was cleared
   });
+
+  // --- Issue #154: Bedrock ValidationException for orphaned tool_use blocks ---
+
+  it('recovers from Bedrock ValidationException: orphaned tool_use blocks (no prior output)', async () => {
+    // When an agent turn is interrupted mid-execution, the SDK session is left with
+    // tool_use blocks that have no corresponding tool_result. On the next turn,
+    // Bedrock rejects with ValidationException. isResumeError() must match this
+    // so onResumeFailed() is called to clear the corrupt sdk_session_id and retry.
+    const throwing = createMockStream([]);
+    throwing[Symbol.asyncIterator] = async function* () {
+      throw new Error(
+        'ValidationException: messages.805: `tool_use` ids were found without `tool_result` blocks\n' +
+        'immediately after: toolu_757190a2ce1b41e48ebf8ebd, toolu_c6e1a12e9f234cf493debbb5.\n' +
+        'Each `tool_use` block must have a corresponding `tool_result` block.',
+      );
+    };
+    const ok = createMockStream([
+      { type: 'assistant', session_id: 'fresh-sid', message: { content: [{ type: 'text', text: 'recovered' }] } },
+    ]);
+    mockQuery.mockReturnValueOnce(throwing).mockReturnValueOnce(ok);
+
+    let resumeFailed = false;
+    const chunks: string[] = [];
+    const retryPrompt =
+      '[Prior conversation history]\nprev turn\n---\n\n[Current message — respond to this ONLY]\nhello';
+    for await (const chunk of queryAgent('hello', makeConfig(), undefined, undefined, {
+      resume: 'corrupt-sid',
+      onSessionId: () => {},
+      onResumeFailed: () => { resumeFailed = true; },
+      fallbackRetryPrompt: retryPrompt,
+    })) {
+      chunks.push(chunk);
+    }
+
+    expect(resumeFailed).toBe(true);                                  // corrupt session cleared
+    expect(chunks).toEqual(['recovered']);                             // user sees a normal reply
+    expect(mockQuery).toHaveBeenCalledTimes(2);                       // one retry
+    expect(mockQuery.mock.calls[1][0].options).not.toHaveProperty('resume'); // retry without resume
+    expect(mockQuery.mock.calls[1][0].prompt).toBe(retryPrompt);     // uses caller's retry prompt
+  });
+
+  it('does NOT recover from ValidationException after tool_use output (no double side-effect) but DOES clear the corrupt id', async () => {
+    // If the corrupt session emitted a tool_use block before throwing, the turn
+    // must not retry (would re-run the tool), but the corrupt sdk_session_id must
+    // still be cleared so the NEXT turn can start fresh.
+    const partial = createMockStream([]);
+    partial[Symbol.asyncIterator] = async function* () {
+      yield { type: 'assistant', session_id: 's', message: { content: [{ type: 'tool_use', name: 'Bash', input: {} }] } };
+      throw new Error(
+        'ValidationException: messages.805: `tool_use` ids were found without `tool_result` blocks\n' +
+        'immediately after: toolu_aabb.\nEach `tool_use` block must have a corresponding `tool_result` block.',
+      );
+    };
+    mockQuery.mockReturnValue(partial);
+    let resumeFailed = false;
+    await expect(async () => {
+      for await (const _ of queryAgent('hi', makeConfig(), undefined, undefined, {
+        resume: 'corrupt-sid', onResumeFailed: () => { resumeFailed = true; },
+      })) { void _; }
+    }).rejects.toThrow('ValidationException');
+    expect(mockQuery).toHaveBeenCalledTimes(1); // no retry after side-effect output
+    expect(resumeFailed).toBe(true);             // but corrupt id cleared for next turn
+  });
 });
+
+
 
 describe('queryAgent — sdk.env injection (#107)', () => {
   beforeEach(() => vi.clearAllMocks());
