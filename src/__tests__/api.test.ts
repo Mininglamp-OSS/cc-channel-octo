@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
-import { getUploadCredentials, sendReadReceipt } from '../octo/api.js';
+import { getUploadCredentials, sendReadReceipt, fetchUserInfo } from '../octo/api.js';
 import { ChannelType } from '../octo/types.js';
 
 // Mock global fetch
@@ -178,5 +178,35 @@ describe('sendReadReceipt — message_ids guard', () => {
     fetchMock.mockResolvedValueOnce(mockJsonResponse({}));
     await sendReadReceipt({ ...RR_BASE, messageIds: ['x', '', '  '] });
     expect(bodyOf()).toMatchObject({ message_ids: ['x'] });
+  });
+});
+
+describe('fetchUserInfo', () => {
+  const UI_BASE = { apiUrl: 'https://api.example.com', botToken: 'tok', uid: 'u1' };
+
+  it('returns the display name on a 200 with a name', async () => {
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ uid: 'u1', name: 'Alice', avatar: 'a.png' }));
+    const info = await fetchUserInfo(UI_BASE);
+    expect(info).toEqual({ uid: 'u1', name: 'Alice', avatar: 'a.png' });
+  });
+
+  it('returns null (deterministic miss) on a 200 with no name', async () => {
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ uid: 'u1' }));
+    expect(await fetchUserInfo(UI_BASE)).toBeNull();
+  });
+
+  it('returns null (deterministic miss) on 404', async () => {
+    fetchMock.mockResolvedValueOnce(mockErrorResponse(404, 'not found'));
+    expect(await fetchUserInfo(UI_BASE)).toBeNull();
+  });
+
+  it('throws (transient) on a non-404 error status so the caller only backs off briefly', async () => {
+    fetchMock.mockResolvedValueOnce(mockErrorResponse(500, 'server error'));
+    await expect(fetchUserInfo(UI_BASE)).rejects.toThrow();
+  });
+
+  it('throws (transient) on a network/timeout failure', async () => {
+    fetchMock.mockRejectedValueOnce(new Error('network'));
+    await expect(fetchUserInfo(UI_BASE)).rejects.toThrow();
   });
 });

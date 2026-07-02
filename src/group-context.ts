@@ -20,6 +20,16 @@ interface MemberRow {
 }
 
 const REFRESH_INTERVAL_MS = 60 * 60 * 1000;
+// How long to wait before re-attempting a /user/info name backfill for a uid
+// that came back without a resolvable name. Mirrors the roster refresh cadence:
+// a member who gains a display name is picked up by either path within an hour.
+const USER_INFO_RETRY_MS = 60 * 60 * 1000;
+// After a TRANSIENT /user/info failure (network/timeout/5xx) we retry this soon
+// rather than waiting the full USER_INFO_RETRY_MS — a blip shouldn't freeze a
+// sender as a bare uid for an hour.
+const USER_INFO_TRANSIENT_BACKOFF_MS = 60 * 1000;
+// Soft cap on the negative-cache map size; past this, expired entries are pruned.
+const USER_INFO_ATTEMPT_CAP = 2048;
 
 export class GroupContext {
   private readonly messageCache = new Map<string, GroupMessage[]>();
@@ -31,6 +41,12 @@ export class GroupContext {
   // (e.g. 免@ gate that should treat bot members differently).
   private readonly robotFlags = new Map<string, Map<string, boolean>>();
   private readonly lastRefresh = new Map<string, number>();
+  // Negative-cache for per-uid /user/info backfill, keyed by `channelId\u0000uid`.
+  // Bounds how often we re-hit the endpoint for a uid that has no resolvable
+  // name yet, so a stream of messages from an unnamed member can't turn into a
+  // stream of /user/info requests. A SUCCESSFUL lookup is cached in memberMap
+  // instead and short-circuits earlier, so this map only paces the miss path.
+  private readonly lastUserInfoAttempt = new Map<string, number>();
 
   private readonly adapter: DbAdapter;
   private readonly maxContextChars: number;
@@ -347,19 +363,66 @@ export class GroupContext {
     apiUrl: string,
     botToken: string,
   ): Promise<string | undefined> {
+    if (!uid) return undefined;
     const memberMap = this.getMemberMap(channelId);
     const cached = memberMap.get(uid);
-    if (cached) return cached;
+    // Only a GENUINE display name counts as a cache hit. A `name === uid` entry
+    // is an unresolved placeholder (wire from_name was missing, or a legacy row
+    // seeded from DB): treating it as a hit here is what previously suppressed
+    // the backfill for exactly the members that needed it, leaving mentions and
+    // sender prefixes rendering the raw uid forever.
+    if (cached && cached !== uid) return cached;
+
+    // Negative-cache: skip if we attempted a lookup for this uid recently, so a
+    // burst of messages from an unnamed member does not fan out into a burst of
+    // /user/info calls.
+    const key = `${channelId}\u0000${uid}`;
+    const now = Date.now();
+    const last = this.lastUserInfoAttempt.get(key) ?? 0;
+    if (now - last < USER_INFO_RETRY_MS) return undefined;
+    this.pruneUserInfoAttempts(now);
+    // Stamp before the request so that once this attempt is made, later messages
+    // for the same uid skip the lookup within the TTL. Inbound is serialized per
+    // channel, so this paces retries over time rather than guarding true
+    // concurrency. The stamp is corrected below once the outcome (resolved /
+    // miss / transient) is known.
+    this.lastUserInfoAttempt.set(key, now);
+
     try {
       const info = await fetchUserInfo({ apiUrl, botToken, uid });
-      if (info?.name) {
+      // Guard against the endpoint echoing the uid as the name too.
+      if (info?.name && info.name !== uid) {
         this.learnMember(channelId, uid, info.name);
+        this.lastUserInfoAttempt.delete(key); // resolved - drop the miss stamp
         return info.name;
       }
+      // Deterministic miss (404, or a real response carrying no usable name):
+      // the full-TTL stamp set above is correct - don't re-query for a while.
+      return undefined;
     } catch (err) {
+      // Transient failure (network / timeout / 5xx). A single blip must NOT
+      // suppress the name for a full TTL, or one hiccup freezes the sender as
+      // a bare uid for an hour. Rewind the stamp to a short backoff: still
+      // de-dupes a burst within the window, but the next message retries soon.
+      this.lastUserInfoAttempt.set(
+        key,
+        now - USER_INFO_RETRY_MS + USER_INFO_TRANSIENT_BACKOFF_MS,
+      );
       console.error(`group-context: fetchUserInfo(${uid}) failed: ${String(err)}`);
+      return undefined;
     }
-    return undefined;
+  }
+
+  // Keep the negative-cache map bounded: only entries within USER_INFO_RETRY_MS
+  // still suppress a re-query; older ones are dead weight. Prune them lazily once
+  // the map grows past a cap so a long-lived process doesn't keep a stamp per
+  // (channel, uid) ever seen. Resolved uids are removed eagerly on success in
+  // fetchAndLearnUser.
+  private pruneUserInfoAttempts(now: number): void {
+    if (this.lastUserInfoAttempt.size < USER_INFO_ATTEMPT_CAP) return;
+    for (const [k, ts] of this.lastUserInfoAttempt) {
+      if (now - ts >= USER_INFO_RETRY_MS) this.lastUserInfoAttempt.delete(k);
+    }
   }
 
   buildContext(channelId: string): string {
