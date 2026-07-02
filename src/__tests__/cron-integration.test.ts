@@ -125,6 +125,32 @@ describe('cron integration (#115)', () => {
     expect(captured!.cron).toBeDefined();
   });
 
+  it('external sdk.mcpServers reach the agent and coexist with the cron tool', async () => {
+    // A declared external server (e.g. a browser/search backend) must be offered
+    // to the agent ALONGSIDE the per-turn in-process cron tool — the cron
+    // injection must not clobber the external map (regression guard: cron used to
+    // REPLACE mcpServers rather than merge). A same-named external server is
+    // overridden by the in-process cron server (documented "built-ins win").
+    config.sdk.mcpServers = {
+      exa: { type: 'http', url: 'https://mcp.exa.ai/mcp' },
+      cron: { type: 'http', url: 'http://override-me.invalid' }, // clashes with the built-in
+    };
+    let captured: Record<string, unknown> | undefined;
+    (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
+      async function* (_u: string, _cfg: unknown, _ctx: unknown, _t: unknown, opts: { mcpServers?: Record<string, unknown> }) {
+        captured = opts?.mcpServers;
+        yield 'ok';
+      },
+    );
+    const msg = synthesizeCronMessage(task());
+    await handleMessage(msg, config, store, router, groupContext, streamRelay, BOT_ID, cronStore);
+    expect(captured).toBeDefined();
+    expect(captured!.exa).toBeDefined(); // non-clashing external survived
+    expect(captured!.cron).toBeDefined(); // cron present
+    // the in-process cron server won the name clash, not the http external
+    expect((captured!.cron as { url?: string }).url).toBeUndefined();
+  });
+
   it('a FAILED cron fire is attributed to its task at the real catch site (#A)', async () => {
     // The production failure path: queryAgent throws → handleMessage's own
     // try/catch swallows it (sends a user-facing error reply, never rethrows).

@@ -124,6 +124,44 @@ describe('config-file over defaults', () => {
   });
 });
 
+// ─── 2b. sdk.mcpServers ─────────────────────────────────────────────────────
+
+describe('sdk.mcpServers', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('loads a global sdk.mcpServers map and forwards it to every bot', () => {
+    const mcpServers = {
+      exa: { type: 'http', url: 'https://mcp.exa.ai/mcp', headers: { 'x-api-key': 'k' } },
+      'chrome-devtools': { type: 'stdio', command: 'npx', args: ['-y', 'chrome-devtools-mcp@latest'] },
+    };
+    const path = writeConfig({ botToken: 'bf', apiUrl: 'https://api.test', sdk: { mcpServers } });
+    const [bot] = resolveBotConfigs(loadConfig(path));
+    expect(bot.sdk.mcpServers).toEqual(mcpServers);
+  });
+
+  it('is undefined by default (no servers inherited from host ~/.claude.json)', () => {
+    const path = writeConfig({ botToken: 'bf', apiUrl: 'https://api.test' });
+    const [bot] = resolveBotConfigs(loadConfig(path));
+    expect(bot.sdk.mcpServers).toBeUndefined();
+  });
+
+  it('per-bot sdk.mcpServers REPLACES the global map (shallow sdk merge)', () => {
+    const path = writeConfig({
+      apiUrl: 'https://api.test',
+      bots: [{ id: 'a' }],
+      sdk: { mcpServers: { exa: { type: 'http', url: 'https://mcp.exa.ai/mcp' } } },
+    });
+    writeBotConfig('a', {
+      botToken: 'bf_a',
+      sdk: { mcpServers: { local: { type: 'stdio', command: 'my-tool' } } },
+    });
+    const [bot] = resolveBotConfigs(loadConfig(path));
+    // The bot's own sdk block wins wholesale — the global `exa` is not merged in.
+    expect(bot.sdk.mcpServers).toEqual({ local: { type: 'stdio', command: 'my-tool' } });
+  });
+});
+
 // ─── 3. Required Fields ────────────────────────────────────────────────────
 
 describe('required field validation', () => {

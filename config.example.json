@@ -21,7 +21,12 @@
     "permissionMode": "bypassPermissions",
     "_comment_tool_progress": "v0.3: set toolProgress=true to post '🔧 Running <tool>(<params>)…' notices (params truncated). Off by default.",
     "_comment_setting_sources": "#100: which host filesystem settings the SDK loads (user=~/.claude, project=.claude, local=.claude/*.local). Default [\"project\"] so the SDK discovers skills symlinked into each session sandbox's .claude/skills/. Memory stays isolated regardless (the auto-memory dir is pinned via inline settings, ranked above projectSettings). Add \"user\" only to deliberately load the operator's real ~/.claude.",
-    "settingSources": ["project"]
+    "settingSources": ["project"],
+    "_comment_mcp_servers": "External MCP servers exposed to the agent, keyed by name (tools surface as mcp__<name>__<tool>). Because settingSources is ['project'], servers in the operator's ~/.claude.json are NOT inherited — declare them here to opt a bot in. Merged with cc's in-process servers (cron, GROUP.md write-back); those win a name clash. Forwarded VERBATIM to the SDK subprocess (same trust model as env — config.json is operator-controlled). A per-bot sdk.mcpServers fully REPLACES this global map (sdk blocks merge shallowly). Omit to expose none. Example below shows one stdio (local command) and one http (remote) server.",
+    "mcpServers": {
+      "chrome-devtools": { "type": "stdio", "command": "npx", "args": ["-y", "chrome-devtools-mcp@latest", "--isolated"] },
+      "exa": { "type": "http", "url": "https://mcp.exa.ai/mcp", "headers": { "x-api-key": "<your-exa-api-key>" } }
+    }
   },
 
   "rateLimit": {
