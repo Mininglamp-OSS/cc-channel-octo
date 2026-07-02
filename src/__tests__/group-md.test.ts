@@ -249,39 +249,47 @@ describe('resolveGroupInstructions', () => {
     expect(out).toBeUndefined();
   });
 
-  it('thread channelId → server fetch uses the PARENT groupNo (P1 routing preserved)', async () => {
+  it('🔴 thread channelId + serverMd on + parent has server GROUP.md → does NOT inject the parent GROUP.md (core P3 fix)', async () => {
+    // The bug (XIN-224): the old resolver collapsed a thread to its parent
+    // groupNo and, with serverMd on, injected the parent's server GROUP.md.
+    // After the fix a thread is mutually exclusive from its parent group.
     const channelId = `${GROUP}____tid123`;
-    fetchMock.mockResolvedValueOnce(mockMd('server rules'));
+    // Any fetch that DID happen would return parent GROUP.md — its presence in
+    // the output is exactly the regression we guard against.
+    fetchMock.mockResolvedValue(mockMd('parent GROUP rules'));
     const cache = new GroupMdCache();
 
     const out = await resolveGroupInstructions({
       groupConfigDir: cfgDir,
-      serverMd: true,
+      serverMd: true, // group flag on…
+      // …but threadMd off → thread stays local; parent GROUP.md must never leak.
       ...BASE,
       channelId,
       cache,
     });
 
-    expect(out).toBe('server rules');
-    // URL is keyed by the parent group number, NOT the composite channelId.
-    expect(call0Url()).toBe(`${BASE.apiUrl}/v1/bot/groups/${GROUP}/md`);
+    expect(out).toBeUndefined(); // no thread-local file, and NO parent GROUP.md
+    // The thread branch must not touch the group GROUP.md endpoint at all.
+    expect(fetchMock).not.toHaveBeenCalled();
+    // …and it must never read or write the parent-group cache.
+    expect(cache.get(GROUP)).toBeUndefined();
   });
 
-  it('thread channelId → local fallback still routes by the thread short-id file', async () => {
+  it('thread channelId → local fallback routes by the thread short-id file, no server call', async () => {
     // Thread's own short-id instruction file (loadGroupConfig new semantics).
     writeFileSync(join(cfgDir, 'tid123.md'), 'thread-local rules');
-    fetchMock.mockResolvedValueOnce(new Response('nope', { status: 404, statusText: 'Not Found' }));
     const cache = new GroupMdCache();
 
     const out = await resolveGroupInstructions({
       groupConfigDir: cfgDir,
-      serverMd: true,
+      serverMd: true, // group flag on, but a thread ignores it
       ...BASE,
       channelId: `${GROUP}____tid123`,
       cache,
     });
 
     expect(out).toBe('thread-local rules');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
