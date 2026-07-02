@@ -809,3 +809,48 @@ export async function updateGroupMd(params: {
   if (!text) return { version: 0 };
   return parseOctoJson<{ version: number }>(text);
 }
+
+/**
+ * Update a thread's server-side THREAD.md.
+ * PUT /v1/bot/groups/{groupNo}/threads/{shortId}/md, body `{ content }` → `{ version }`.
+ *
+ * Symmetric to {@link updateGroupMd} (group md = `.../groups/{groupNo}/md`;
+ * thread md = `.../groups/{groupNo}/threads/{shortId}/md`) and to the already-
+ * wired {@link getThreadMd} GET. Path / body / response were confirmed against
+ * the official Octo web client's data source (GET/PUT/DELETE
+ * `groups/{groupNo}/threads/{shortId}/md`, body `{ content }`, reply
+ * `{ version }`) — the same trio the group md endpoint exposes. Like the group
+ * PUT there is NO compare-and-swap: the body carries only `content`, so the
+ * server is last-write-wins (the write-back coordinator serializes same-thread
+ * writes to stop this gateway racing itself — see ThreadMdWriteback).
+ *
+ * Mirrors postJson's timeout, Bearer auth and error-message format.
+ */
+export async function updateThreadMd(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+  content: string;
+  signal?: AbortSignal;
+}): Promise<{ version: number }> {
+  const path = `/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}/md`;
+  const url = `${params.apiUrl.replace(/\/+$/, "")}${path}`;
+  const effectiveSignal = params.signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const resp = await fetch(url, {
+    method: "PUT",
+    headers: {
+      ...DEFAULT_HEADERS,
+      Authorization: `Bearer ${params.botToken}`,
+    },
+    body: JSON.stringify({ content: params.content }),
+    signal: effectiveSignal,
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`Octo API ${path} failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  const text = await resp.text();
+  if (!text) return { version: 0 };
+  return parseOctoJson<{ version: number }>(text);
+}

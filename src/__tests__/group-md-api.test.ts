@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
-import { getGroupMd, getThreadMd, updateGroupMd, type GroupMd, type ThreadMd } from '../octo/api.js';
+import { getGroupMd, getThreadMd, updateGroupMd, updateThreadMd, type GroupMd, type ThreadMd } from '../octo/api.js';
 
 const fetchMock = vi.fn();
 const originalFetch = globalThis.fetch;
@@ -129,6 +129,37 @@ describe('updateGroupMd', () => {
     fetchMock.mockResolvedValueOnce(new Response('forbidden', { status: 403, statusText: 'Forbidden' }));
     await expect(
       updateGroupMd({ ...BASE, groupNo: GROUP, content: 'x' }),
+    ).rejects.toThrow(/failed \(403\)/);
+  });
+});
+
+describe('updateThreadMd', () => {
+  const SHORT = '2071488441815666688';
+
+  it('PUTs /v1/bot/groups/{groupNo}/threads/{shortId}/md with Bearer auth and a {content} body', async () => {
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ version: 4 }));
+
+    const res = await updateThreadMd({ ...BASE, groupNo: GROUP, shortId: SHORT, content: 'Thread rules.' });
+
+    const { url, init } = call();
+    expect(url).toBe(`${BASE.apiUrl}/v1/bot/groups/${GROUP}/threads/${SHORT}/md`);
+    expect(init.method).toBe('PUT');
+    expect(authHeader(init)).toBe(`Bearer ${BASE.botToken}`);
+    // No compare-and-swap: the body carries ONLY content, never a version.
+    expect(JSON.parse(init.body as string)).toEqual({ content: 'Thread rules.' });
+    expect(res).toEqual({ version: 4 });
+  });
+
+  it('url-encodes both the groupNo and shortId path segments', async () => {
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ version: 1 }));
+    await updateThreadMd({ ...BASE, groupNo: 'a/b', shortId: 'c/d', content: 'x' });
+    expect(call().url).toBe(`${BASE.apiUrl}/v1/bot/groups/a%2Fb/threads/c%2Fd/md`);
+  });
+
+  it('throws on a non-2xx', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('forbidden', { status: 403, statusText: 'Forbidden' }));
+    await expect(
+      updateThreadMd({ ...BASE, groupNo: GROUP, shortId: SHORT, content: 'x' }),
     ).rejects.toThrow(/failed \(403\)/);
   });
 });

@@ -10,7 +10,7 @@ import type { BotMessage } from '../octo/types.js';
 import { ChannelType, MessageType } from '../octo/types.js';
 import type { Config } from '../config.js';
 import { sendMessage } from '../octo/api.js';
-import { GroupMdCache } from '../group-md-cache.js';
+import { GroupMdCache, ThreadMdCache } from '../group-md-cache.js';
 import type { GroupMdEntry } from '../group-md-cache.js';
 
 const ROBOT_ID = 'bot-001';
@@ -1123,5 +1123,174 @@ describe('SessionRouter — GROUP.md event-driven cache refresh (P2-B)', () => {
     });
     await router.route(real);
     expect(cache.get(GROUP)).toBeUndefined();
+  });
+
+  it('a GROUP.md DELETE event also invalidates the cache (P3-2 deleted-event tail)', async () => {
+    const cache = new GroupMdCache();
+    cache.set(GROUP, makeEntry());
+    const router = makeRouter(cache);
+
+    const result = await router.route(
+      mdEvent({ payload: { type: MessageType.Text, content: '', event: { type: 'group_md_deleted', group_no: GROUP } } }),
+    );
+
+    expect(result).toBeNull();
+    // A server-side delete drops the cached copy → next read 404s → local fallback.
+    expect(cache.get(GROUP)).toBeUndefined();
+  });
+});
+
+// P3-2: THREAD.md event-driven cache refresh. Mirrors the P2-B group block, but
+// keyed by the COMPOSITE groupNo::shortId and gated on `threadMd`. Verifies the
+// routing (thread md event → invalidate the right subarea; group events and
+// missing short_id → never touch the thread cache) and the config-override seam.
+describe('SessionRouter — THREAD.md event-driven cache refresh (P3-2)', () => {
+  const GROUP = 'group-abc';
+  const SHORT = '2071488441815666688';
+
+  function makeEntry(): GroupMdEntry {
+    return { content: '# cached thread', version: 1, updated_at: null };
+  }
+
+  function makeRouter(cache?: ThreadMdCache, overrides?: Partial<Config>): SessionRouter {
+    // threadMd on by default here — the thread refresh path is gated on it. The
+    // group cache is passed undefined; this block exercises the thread path only.
+    return new SessionRouter(makeConfig({ threadMd: true, ...overrides }), ROBOT_ID, '', undefined, cache);
+  }
+
+  // A THREAD.md change event as it really arrives: on a DM channel, with the
+  // affected thread carried in event.group_no + event.short_id.
+  function threadEvent(overrides?: Partial<BotMessage>): BotMessage {
+    return makeMsg({
+      channel_type: ChannelType.DM,
+      channel_id: 'dm-peer',
+      from_uid: 'user-1',
+      payload: {
+        type: MessageType.Text,
+        content: '',
+        event: { type: 'thread_md_updated', group_no: GROUP, short_id: SHORT },
+      },
+      ...overrides,
+    });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('a THREAD.md update event invalidates that subarea\'s composite-keyed cache and returns null', async () => {
+    const cache = new ThreadMdCache();
+    cache.set(GROUP, SHORT, makeEntry());
+    const router = makeRouter(cache);
+
+    const result = await router.route(threadEvent());
+
+    expect(result).toBeNull();
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(cache.get(GROUP, SHORT)).toBeUndefined();
+  });
+
+  it('a THREAD.md DELETE event also invalidates the subarea cache', async () => {
+    const cache = new ThreadMdCache();
+    cache.set(GROUP, SHORT, makeEntry());
+    const router = makeRouter(cache);
+
+    await router.route(
+      threadEvent({
+        payload: { type: MessageType.Text, content: '', event: { type: 'thread_md_deleted', group_no: GROUP, short_id: SHORT } },
+      }),
+    );
+
+    expect(cache.get(GROUP, SHORT)).toBeUndefined();
+  });
+
+  it('only the targeted subarea is dropped — a sibling thread under the same group survives', async () => {
+    const cache = new ThreadMdCache();
+    cache.set(GROUP, SHORT, makeEntry());
+    cache.set(GROUP, 'sibling', makeEntry());
+    const router = makeRouter(cache);
+
+    await router.route(threadEvent());
+
+    expect(cache.get(GROUP, SHORT)).toBeUndefined();
+    expect(cache.get(GROUP, 'sibling')).toEqual(makeEntry()); // untouched
+  });
+
+  it('a GROUP.md event never touches the thread cache (disjoint literals / mutual exclusion)', async () => {
+    const cache = new ThreadMdCache();
+    cache.set(GROUP, SHORT, makeEntry());
+    const router = makeRouter(cache);
+
+    await router.route(
+      threadEvent({
+        payload: { type: MessageType.Text, content: '', event: { type: 'group_md_updated', group_no: GROUP, short_id: SHORT } },
+      }),
+    );
+
+    // A group-md literal must not invalidate a thread entry.
+    expect(cache.get(GROUP, SHORT)).toEqual(makeEntry());
+  });
+
+  it('a thread event with no short_id is a no-op (no subarea to key)', async () => {
+    const cache = new ThreadMdCache();
+    cache.set(GROUP, SHORT, makeEntry());
+    const router = makeRouter(cache);
+
+    await router.route(
+      threadEvent({ payload: { type: MessageType.Text, content: '', event: { type: 'thread_md_updated', group_no: GROUP } } }),
+    );
+
+    expect(cache.get(GROUP, SHORT)).toEqual(makeEntry());
+  });
+
+  it('with threadMd off the thread cache is never touched (rollback flag)', async () => {
+    const cache = new ThreadMdCache();
+    cache.set(GROUP, SHORT, makeEntry());
+    const router = makeRouter(cache, { threadMd: false });
+
+    await router.route(threadEvent());
+
+    expect(cache.get(GROUP, SHORT)).toEqual(makeEntry());
+  });
+
+  it('no thread cache wired → thread md event is a harmless no-op (returns null)', async () => {
+    const router = makeRouter(undefined);
+    const result = await router.route(threadEvent());
+    expect(result).toBeNull();
+  });
+
+  it('derives groupNo + shortId from the channel on a mention-free thread with no ids in the event', async () => {
+    const cache = new ThreadMdCache();
+    cache.set(GROUP, SHORT, makeEntry());
+    // Mention-free is the one group-like path that reaches the event branch.
+    const router = makeRouter(cache, { mentionFreeGroups: [`${GROUP}____${SHORT}`] });
+
+    await router.route(
+      threadEvent({
+        channel_type: ChannelType.CommunityTopic,
+        channel_id: `${GROUP}____${SHORT}`,
+        payload: { type: MessageType.Text, content: '', event: { type: 'thread_md_updated' } },
+      }),
+    );
+
+    expect(cache.get(GROUP, SHORT)).toBeUndefined();
+  });
+
+  it('the thread md event literal is overridable via threadMdEventTypes (calibration seam)', async () => {
+    const cache = new ThreadMdCache();
+    cache.set(GROUP, SHORT, makeEntry());
+    const router = makeRouter(cache, { threadMdEventTypes: ['thread.md.changed'] });
+
+    // Default provisional literal is now ignored.
+    await router.route(threadEvent());
+    expect(cache.get(GROUP, SHORT)).toEqual(makeEntry());
+
+    // The configured literal triggers invalidation.
+    await router.route(
+      threadEvent({
+        payload: { type: MessageType.Text, content: '', event: { type: 'thread.md.changed', group_no: GROUP, short_id: SHORT } },
+      }),
+    );
+    expect(cache.get(GROUP, SHORT)).toBeUndefined();
   });
 });
