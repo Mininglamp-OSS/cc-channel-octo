@@ -10,6 +10,7 @@
     "_comment_systemPrompt": "Inline personality string. A ./SOUL.md file next to this config overrides it.",
     "_comment_skills": "Per-bot skill selection: 'all' or a string[] of skill names from the shared library (~/.cc-channel-octo/skills + this bot's ./skills).",
     "_comment_env": "Extra env injected into the agent's tool subprocess, e.g. {\"OCTO_BOT_ID\":\"<robotId>\"} so a shared CLI acts as this bot.",
-    "_comment_cron": "Set cron=true to let the agent schedule tasks (cron_create/list/delete → ./cron.json, owner-gated)."
+    "_comment_cron": "Set cron=true to let the agent schedule tasks (cron_create/list/delete → ./cron.json, owner-gated).",
+    "_comment_mcp_servers": "Per-bot external MCP servers (mcp__<name>__<tool>), same shape as the global sdk.mcpServers. A per-bot map fully REPLACES the global one (sdk blocks merge shallowly), so list every server this bot needs. http header values are secrets — keep this file non-world-readable (chmod 600). Omit to inherit the global map."
   }
 }
