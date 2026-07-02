@@ -17,6 +17,7 @@
 import { readFileSync, existsSync, statSync, realpathSync } from 'node:fs';
 import { resolve as resolvePath, sep, dirname, join as pathJoin } from 'node:path';
 import { homedir } from 'node:os';
+import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 import { isAllowedApiUrl } from './url-policy.js';
 
 /**
@@ -209,6 +210,24 @@ export interface Config {
      * is gated to the bot owner uid (registerBot.owner_uid). Default off. Per-bot.
      */
     cron?: boolean;
+    /**
+     * External MCP servers exposed to the agent, keyed by server name (tools
+     * surface as `mcp__<name>__<tool>`). Merged with any in-process servers cc
+     * injects per turn (cron, GROUP.md write-back) — a name clash lets those
+     * built-ins win, since they are bound to per-turn session coords. This is
+     * how bots reach browser / search / other MCP backends: the gateway loads
+     * only `settingSources: ['project']`, so servers declared in the operator's
+     * `~/.claude.json` are deliberately NOT inherited — declare them here to opt
+     * a bot in explicitly.
+     *
+     * Trust model mirrors `env` (#107): the value is forwarded VERBATIM to the
+     * SDK subprocess with no validation — config.json is operator-controlled and
+     * outside the agent-writable sandbox, so declaring a server is an explicit
+     * operator grant. Can be set at the global layer (all bots) or per-bot in
+     * `<baseDir>/<id>/config.json` (a per-bot `sdk.mcpServers` fully REPLACES the
+     * global map — sdk blocks merge shallowly, so list every server the bot needs).
+     */
+    mcpServers?: Record<string, McpServerConfig>;
   };
   rateLimit: {
     maxPerMinute: number;

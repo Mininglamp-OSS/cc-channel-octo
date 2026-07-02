@@ -16,6 +16,7 @@ import { OctoGateway } from './gateway.js';
 import { SessionRouter } from './session-router.js';
 import { GroupContext } from './group-context.js';
 import { queryAgent } from './agent-bridge.js';
+import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 import { sanitizeDisplayName, escapeSectionMarkers, sanitizePromptBody, formatSenderLabel } from './prompt-safety.js';
 import type { SessionCtx } from './cwd-resolver.js';
 import { cleanupExpiredCwds, resolveMemoryDir, resolveSessionCwd } from './cwd-resolver.js';
@@ -815,7 +816,7 @@ export async function handleMessage(
       // queryAgent recovers by calling onResumeFailed (clear the bad id) and
       // retrying once with the pre-assembled fallbackRetryPrompt so the
       // conversation isn't lost (and assembly happens exactly once — see above).
-      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; memoryDir?: string; mcpServers?: Record<string, ReturnType<typeof createCronToolServer>>; onResumeFailed?: () => void; fallbackRetryPrompt?: string } | undefined = {
+      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; memoryDir?: string; mcpServers?: Record<string, McpServerConfig>; onResumeFailed?: () => void; fallbackRetryPrompt?: string } | undefined = {
         ...(resume ? { resume } : {}),
         onSessionId: (id: string) => store.setSdkSessionId(sessionKey, id),
         ...(resume
@@ -835,6 +836,17 @@ export async function handleMessage(
         const memBase = config.memoryBase ?? join(config.dataDir, 'memory');
         const memoryDir = resolveMemoryDir(memBase, sessionCtx);
         sessionOpts = { ...(sessionOpts ?? {}), memoryDir };
+      }
+
+      // External MCP servers declared in config (sdk.mcpServers): seed the map
+      // FIRST so the per-turn in-process servers below (cron, GROUP.md write-back)
+      // merge on top and win any name clash — those are bound to this turn's
+      // session coords and must not be shadowed by a same-named external server.
+      if (config.sdk.mcpServers && Object.keys(config.sdk.mcpServers).length > 0) {
+        sessionOpts = {
+          ...(sessionOpts ?? {}),
+          mcpServers: { ...(sessionOpts?.mcpServers ?? {}), ...config.sdk.mcpServers },
+        };
       }
 
       // GROUP.md: inject operator-provided per-group instructions into the
@@ -869,7 +881,7 @@ export async function handleMessage(
         const cronServer = createCronToolServer(cronStore, coords, router.getOwnerUid());
         sessionOpts = {
           ...(sessionOpts ?? {}),
-          mcpServers: { [CRON_TOOL_SERVER_NAME]: cronServer },
+          mcpServers: { ...(sessionOpts?.mcpServers ?? {}), [CRON_TOOL_SERVER_NAME]: cronServer },
         };
       }
 
