@@ -659,9 +659,22 @@ export async function handleMessage(
       // this, human users whose wire payload lacks from_name render as
       // `uid：body` instead of `name(uid)：body`, breaking the promised uniform
       // shape.
-      const resolvedName = isGroup && msg.channel_id
+      let resolvedName = isGroup && msg.channel_id
         ? groupContext.resolveDisplayName(msg.channel_id, msg.from_uid, msg.from_name)
         : undefined;
+      // When neither the roster nor the wire carried a real display name, try a
+      // one-shot /user/info backfill (negative-cached inside GroupContext) so the
+      // sender prefix — and the nameToUid map that outbound @mention resolution
+      // relies on — carry the human name instead of a bare uid. Best-effort: on a
+      // miss resolvedName stays undefined and formatSenderLabel falls back to uid.
+      if (isGroup && msg.channel_id && !resolvedName) {
+        resolvedName = await groupContext.fetchAndLearnUser(
+          msg.from_uid,
+          msg.channel_id,
+          config.apiUrl,
+          config.botToken,
+        );
+      }
       const senderPrefix = isGroup ? `${formatSenderLabel(msg.from_uid, resolvedName)}：` : '';
       const userBody = quotePrefix + senderPrefix + bodyText;
       // G4: Backfill history from API when local cache is empty for groups.

@@ -226,6 +226,33 @@ describe('GroupContext', () => {
     expect(fetchUserInfo).toHaveBeenCalledTimes(1);
   });
 
+  it('fetchAndLearnUser treats a name==uid placeholder as unresolved and backfills', async () => {
+    // A legacy roster row where name echoes the uid (seeded from DB) must NOT
+    // count as a cache hit — otherwise the backfill never runs for the members
+    // that still render as a bare uid.
+    adapter.prepare(
+      'INSERT INTO group_members (group_id, uid, name, updated_at) VALUES (?, ?, ?, ?)',
+    ).run('ch1', 'u9', 'u9', 1000);
+    ctx.loadMembersFromDb('ch1');
+
+    vi.mocked(fetchUserInfo).mockResolvedValue({ uid: 'u9', name: 'Nina' });
+    const name = await ctx.fetchAndLearnUser('u9', 'ch1', 'http://api', 'token');
+    expect(name).toBe('Nina');
+    expect(fetchUserInfo).toHaveBeenCalledTimes(1);
+  });
+
+  it('fetchAndLearnUser negative-caches a miss so a stream of messages is not a stream of requests', async () => {
+    vi.mocked(fetchUserInfo).mockResolvedValue(null);
+    const a = await ctx.fetchAndLearnUser('u8', 'ch1', 'http://api', 'token');
+    expect(a).toBeUndefined();
+    expect(fetchUserInfo).toHaveBeenCalledTimes(1);
+
+    // Immediate retry is within the negative-cache TTL → no second request.
+    const b = await ctx.fetchAndLearnUser('u8', 'ch1', 'http://api', 'token');
+    expect(b).toBeUndefined();
+    expect(fetchUserInfo).toHaveBeenCalledTimes(1);
+  });
+
   // --- Q15: pushMessage persists to SQLite ---
 
   it('pushMessage persists messages to group_messages table', () => {
