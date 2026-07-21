@@ -114,6 +114,25 @@ describe('buildSystemPrompt', () => {
     expect(groupIdx).toBeGreaterThan(customIdx);
   });
 
+  it('tells the agent where to persist per-bot skills', () => {
+    const result = buildSystemPrompt(undefined, undefined, {
+      perBot: '/base/default/skills',
+      global: '/base/skills',
+      claude: '/home/operator/.claude/skills',
+    });
+    expect(result).toContain('SKILL INSTALLATION:');
+    expect(result).toContain('/base/default/skills/<skill-name>/SKILL.md');
+    expect(result).toContain('under .claude/skills/ on the next agent turn');
+    expect(result).toContain('shared all-bot library is /base/skills');
+    expect(result).toContain("standard Claude skill library at /home/operator/.claude/skills");
+    expect(result).toContain('operator/owner explicitly requests it');
+  });
+
+  it('omits skill installation guidance when no per-bot directory is configured', () => {
+    const result = buildSystemPrompt('custom', undefined, { global: '/base/skills' });
+    expect(result).not.toContain('SKILL INSTALLATION:');
+  });
+
   it('FROZEN: never contains a [Group context] or [Conversation history] section header', () => {
     // B4/B5 moved to the user message. The only mentions of these markers are the
     // examples quoted inside the security prefix — never a real section header

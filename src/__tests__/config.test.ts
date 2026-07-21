@@ -11,7 +11,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { join } from 'node:path';
 import { mkdtempSync, writeFileSync, rmSync, chmodSync, mkdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { loadConfig, resolveBotConfigs, loadSoul } from '../config.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -88,6 +88,7 @@ describe('loadConfig defaults', () => {
     // #100: project-scope by default so the SDK discovers sandbox .claude/skills/.
     // Memory stays isolated via the inline autoMemoryDirectory pin.
     expect(cfg.sdk.settingSources).toEqual(['project']);
+    expect(cfg.sdk.skills).toBe('all');
     expect(cfg.sdk.anthropicBaseUrl).toBeUndefined(); // Q1: unset by default
     expect(cfg.rateLimit.maxPerMinute).toBe(5);
     expect(cfg.context.maxContextChars).toBe(6000);
@@ -103,6 +104,7 @@ describe('loadConfig defaults', () => {
     // #100: skill dirs derived (per-bot + install-wide global).
     expect(bot.skillsDir).toBe(`${tmpDir}/default/skills`);
     expect(bot.globalSkillsDir).toBe(`${tmpDir}/skills`);
+    expect(bot.claudeSkillsDir).toBe(`${homedir()}/.claude/skills`);
   });
 });
 
@@ -426,7 +428,7 @@ describe('v0.3: tool progress toggle', () => {
 
 // ─── #100: derived skill dirs ──────────────────────────────────────────
 
-describe('skill dirs (derived, two-layer)', () => {
+describe('skill dirs (derived, three-layer)', () => {
   beforeEach(setup);
   afterEach(teardown);
 
@@ -450,6 +452,8 @@ describe('skill dirs (derived, two-layer)', () => {
     // Global skills dir is install-wide (same for both).
     expect(alice.globalSkillsDir).toBe(`${tmpDir}/skills`);
     expect(bob.globalSkillsDir).toBe(`${tmpDir}/skills`);
+    expect(alice.claudeSkillsDir).toBe(`${homedir()}/.claude/skills`);
+    expect(bob.claudeSkillsDir).toBe(`${homedir()}/.claude/skills`);
   });
 });
 

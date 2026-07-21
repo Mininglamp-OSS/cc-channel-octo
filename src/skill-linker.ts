@@ -7,9 +7,9 @@
  * `<cwd>/.claude/skills/` when `settingSources` includes `project`, so for each
  * turn we symlink the operator-owned skill dirs into the session sandbox.
  *
- * Two layers, mirroring config: an install-wide `<baseDir>/skills` shared by all
- * bots, and a per-bot `<baseDir>/<id>/skills`. Per-bot overrides global on a name
- * collision (pass sources as [global, perBot] — later wins).
+ * Three layers: the operator's `~/.claude/skills`, an install-wide
+ * `<baseDir>/skills` shared by all bots, and a per-bot
+ * `<baseDir>/<id>/skills`. Later sources override earlier ones.
  *
  * The links point OUTSIDE the sandbox to the operator-owned skill dirs, so the
  * 7-day cwd TTL sweep removes only the links, never the real skills. We only ever
@@ -28,8 +28,8 @@ import {
   mkdirSync,
   readdirSync,
   readlinkSync,
-  rmSync,
   symlinkSync,
+  unlinkSync,
 } from 'node:fs';
 import { join } from 'node:path';
 
@@ -106,7 +106,7 @@ export function linkSkillsIntoSandbox(sandboxDir: string, sources: string[]): vo
     // Remove if: not wanted anymore, points elsewhere now, or target gone.
     if (!wanted || currentTarget !== wanted || !existsSync(linkPath)) {
       try {
-        rmSync(linkPath, { force: true });
+        unlinkSync(linkPath);
       } catch (err) {
         console.error(`[cc-channel-octo] failed pruning skill link ${linkPath}: ${String(err)}`);
       }
@@ -121,7 +121,7 @@ export function linkSkillsIntoSandbox(sandboxDir: string, sources: string[]): vo
     try {
       if (isSymlink(linkPath)) {
         if (readlinkSafe(linkPath) === target) continue; // already correct
-        rmSync(linkPath, { force: true }); // wrong target → replace
+        unlinkSync(linkPath); // wrong target → replace
       } else if (lstatExists(linkPath)) {
         continue; // a real dir/file shadows this skill name — respect it
       }

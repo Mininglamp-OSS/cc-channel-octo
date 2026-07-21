@@ -209,7 +209,7 @@ configurable.
 | `groupConfigDir` | *(unset)* | Directory of per-group instruction files (`<groupId>.md`). A match is injected into the system prompt as trusted custom instructions for that group. See [Per-group instructions](#per-group-instructions). |
 | `sdk.anthropicBaseUrl` | *(unset)* | Override the upstream Claude API endpoint. See [Self-hosted gateway](#self-hosted-gateway) below. |
 | `sdk.env` | *(unset)* | Extra environment variables (`{ "KEY": "value" }`) injected verbatim into the agent's tool subprocess. Per-bot. Use to give a bot's skills what their CLIs need — e.g. `{ "OCTO_BOT_ID": "<robotId>" }` so a multi-bot deploy's `octo-cli` selects the right stored profile. See [Agent skills](#agent-skills). |
-| `sdk.skills` | *(SDK default)* | Which skills this bot enables: `'all'` or a `string[]` of skill names. Per-bot **selection** over the centrally-maintained skill library (maintain once, each bot picks its subset). Omit to use the SDK default. See [Agent skills](#agent-skills). |
+| `sdk.skills` | `'all'` | Which skills this bot enables: `'all'` or a `string[]` of skill names. Defaults to all discovered skills so the model's skill list is complete. Per-bot **selection** can restrict the centrally-maintained library. See [Agent skills](#agent-skills). |
 | `sdk.cron` | `false` | When true, give the agent a `cron` tool set to register per-bot scheduled tasks (persisted to `<baseDir>/<id>/cron.json`, fired through the normal pipeline). Creation is **owner-gated**. See [Scheduled tasks](#scheduled-tasks). |
 | `rateLimit.maxPerMinute` | `5` | Max requests per minute per session |
 | `context.maxContextChars` | `6000` | Max characters of group context injected into prompts |
@@ -283,14 +283,15 @@ in cc**. A skill is a standard directory with a `SKILL.md` (plus optional
 `references/` and `scripts/`); it teaches the agent how to drive some external
 CLI (`octo-cli`, `gh`, anything on `PATH`).
 
-**Two layers** (mirroring the config model):
+**Three layers** (later rows override earlier rows on a name collision):
 
 | Location | Scope |
 |----------|-------|
+| `~/.claude/skills/<name>/` | operator's standard Claude library (lowest precedence) |
 | `~/.cc-channel-octo/skills/<name>/` | shared by **all** bots |
 | `~/.cc-channel-octo/<id>/skills/<name>/` | **one** bot (overrides a same-named global skill) |
 
-cc symlinks both layers into each session sandbox's `.claude/skills/` on every
+cc symlinks all three layers into each session sandbox's `.claude/skills/` on every
 turn, and the SDK discovers them because `sdk.settingSources` defaults to
 `['project']`. (Memory isolation is unaffected — the auto-memory directory is
 pinned via inline settings, which the SDK ranks above any project-level value.)
@@ -312,7 +313,7 @@ names:
 { "sdk": { "skills": ["octo-messaging", "github-issue-triage"] } }
 ```
 
-Omit it for the SDK default. So a `triage` bot can enable the triage + messaging
+The default is `'all'`. Set an explicit list to restrict a bot. So a `triage` bot can enable the triage + messaging
 skills while another bot enables only messaging — from the same shared library.
 
 **Per-bot identity.** Each bot's persona/rules are independent:

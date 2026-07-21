@@ -391,6 +391,7 @@ describe('queryAgent', () => {
       cwdBase: '/tmp/cwdbase',
       skillsDir: '/base/default/skills',
       globalSkillsDir: '/base/skills',
+      claudeSkillsDir: '/home/operator/.claude/skills',
       sdk: { allowedTools: '*', permissionMode: 'bypassPermissions', settingSources: ['project'] },
     });
     for await (const _ of queryAgent('t', config, { kind: 'dm', sessionKey: 'u1' })) { void _; }
@@ -399,7 +400,15 @@ describe('queryAgent', () => {
     // sandbox is the resolved per-session cwd under cwdBase
     expect(sandboxDir.startsWith('/tmp/cwdbase/')).toBe(true);
     // global first, per-bot second (later wins on name collision)
-    expect(sources).toEqual(['/base/skills', '/base/default/skills']);
+    expect(sources).toEqual([
+      '/home/operator/.claude/skills',
+      '/base/skills',
+      '/base/default/skills',
+    ]);
+    const systemPrompt = mockQuery.mock.calls[0][0].options.systemPrompt;
+    expect(systemPrompt.append).toContain('/base/default/skills/<skill-name>/SKILL.md');
+    expect(systemPrompt.append).toContain('shared all-bot library is /base/skills');
+    expect(systemPrompt.append).toContain('/home/operator/.claude/skills');
   });
 
   it('does NOT symlink skills when settingSources excludes project', async () => {

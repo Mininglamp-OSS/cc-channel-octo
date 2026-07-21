@@ -85,8 +85,9 @@ cwd isolation), media-inbound.ts / file-inline-wrap.ts (inbound media), db-adapt
   rule) fails the build despite being "just a warning".
 - **Agent skills (generic external tooling)** — external CLIs (octo-cli, gh, …)
   are integrated as DATA, not code: operators drop standard Claude skills into
-  `<baseDir>/skills/` (all bots) or `<baseDir>/<id>/skills/` (per-bot, overrides
-  global). `src/skill-linker.ts` symlinks both layers into each session sandbox's
+  `~/.claude/skills/` (operator library), `<baseDir>/skills/` (all bots), or
+  `<baseDir>/<id>/skills/` (per-bot, highest precedence). `src/skill-linker.ts`
+  symlinks all three layers into each session sandbox's
   `.claude/skills/` (per turn, in `agent-bridge.ts` after the cwd resolve), and
   the SDK discovers them because `sdk.settingSources` defaults to `['project']`.
   **No CLI name appears in cc code.** cc handles NO credentials — the operator

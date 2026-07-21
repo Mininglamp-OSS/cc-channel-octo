@@ -84,6 +84,13 @@ export interface Config {
    */
   globalSkillsDir?: string;
   /**
+   * DERIVED (not user-configurable): the operator's standard Claude skill
+   * library, `~/.claude/skills`. Loaded at the lowest precedence so cc-global
+   * and per-bot skills can override it without enabling the SDK's entire `user`
+   * setting source.
+   */
+  claudeSkillsDir?: string;
+  /**
    * v1.0: directory of per-group instruction files (`<groupId>.md`). When set,
    * a matching file's contents are injected into the system prompt as trusted
    * custom instructions for that group. Operator-controlled — must NOT be the
@@ -214,9 +221,10 @@ export interface Config {
     env?: Record<string, string>;
     /**
      * #110: which skills this bot enables, selecting a subset of the skills
-     * discovered in its session sandbox's `.claude/skills/` (the shared library
-     * `<baseDir>/skills` + per-bot `<baseDir>/<id>/skills`, symlinked in by the
-     * skill-linker). Names match each SKILL.md `name` / directory name.
+     * discovered in its session sandbox's `.claude/skills/` (the operator's
+     * `~/.claude/skills`, shared `<baseDir>/skills`, and per-bot
+     * `<baseDir>/<id>/skills`, symlinked in by the skill-linker). Names match
+     * each SKILL.md `name` / directory name.
      *   - omitted: SDK default (no explicit selection).
      *   - `'all'`: enable every discovered skill.
      *   - `string[]`: enable only the listed skills.
@@ -376,6 +384,10 @@ function defaults(): Config {
       // into the session sandbox's .claude/skills/. Memory stays isolated via the
       // inline settings.autoMemoryDirectory pin (flagSettings > projectSettings).
       settingSources: ['project'],
+      // Explicitly inject every discovered skill into the main session. Leaving
+      // this undefined delegates to CLI defaults, which can expose only a
+      // dynamically-added subset in the model's skill list after installation.
+      skills: 'all',
     },
     rateLimit: {
       maxPerMinute: 5,
@@ -631,6 +643,7 @@ export function resolveBotConfigs(config: Config): Config[] {
     // (<baseDir>/skills). Symlinked into each session sandbox by skill-linker.
     const botSkillsDir = pathJoin(botRoot, 'skills');
     const globalSkillsDir = pathJoin(config.baseDir, 'skills');
+    const claudeSkillsDir = pathJoin(homedir(), '.claude', 'skills');
 
     // Per-bot config.json (in the bot's own subtree) is the highest-priority
     // layer: global shared ⊕ inline bots[] entry ⊕ <baseDir>/<id>/config.json.
@@ -669,6 +682,7 @@ export function resolveBotConfigs(config: Config): Config[] {
       memoryBase: botMemoryBase,
       skillsDir: botSkillsDir,
       globalSkillsDir,
+      claudeSkillsDir,
       botBlocklist: perBotFile.botBlocklist ?? bot.botBlocklist ?? config.botBlocklist,
       allowedBotUids: perBotFile.allowedBotUids ?? bot.allowedBotUids ?? config.allowedBotUids,
       mentionFreeGroups:

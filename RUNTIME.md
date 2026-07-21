@@ -124,8 +124,9 @@ loses the conversation.
 
 ## 5. Skills & external tools ✅
 
-External capability is data, not code: bare `SKILL.md` dirs in a shared library
-(`<baseDir>/skills/` + per-bot `<baseDir>/<id>/skills/`), symlinked into each
+External capability is data, not code: bare `SKILL.md` dirs from the operator's
+`~/.claude/skills/`, the shared `<baseDir>/skills/`, and per-bot
+`<baseDir>/<id>/skills/`, symlinked into each
 sandbox's `.claude/skills/` by `skill-linker.ts`, discovered via the `project`
 source. A skill teaches the agent to drive any CLI on PATH (e.g. `octo-cli`,
 `gh`) through the built-in **Bash** tool. **No tool name appears in cc code.**
