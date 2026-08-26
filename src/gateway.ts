@@ -184,6 +184,17 @@ export class OctoGateway {
     // Mark draining — new messages will be dropped by handleMessage
     this._draining = true;
 
+    // Cancel any pending reconnect retry BEFORE the first await. The drain wait
+    // below can span the timer's expiry; if the timer fired mid-drain,
+    // attemptTokenRefresh() would resurrect the socket (new register + connect +
+    // heartbeat) AFTER stop() releases the lock — a zombie gateway that
+    // double-registers the bot. Clearing here (and the _draining guard in
+    // attemptTokenRefresh) closes that window.
+    if (this.refreshRetryTimer) {
+      clearTimeout(this.refreshRetryTimer);
+      this.refreshRetryTimer = null;
+    }
+
     // Wait for in-flight message handlers to complete (with timeout)
     if (activeHandlers && activeHandlers.size > 0) {
       console.log(`[cc-channel-octo] Draining ${activeHandlers.size} in-flight handler(s)...`);
@@ -196,10 +207,6 @@ export class OctoGateway {
     }
 
     this.stopHeartbeat();
-    if (this.refreshRetryTimer) {
-      clearTimeout(this.refreshRetryTimer);
-      this.refreshRetryTimer = null;
-    }
     if (this.socket) {
       await this.socket.disconnectAndWait();
       this.socket = null;
@@ -339,6 +346,11 @@ export class OctoGateway {
 
   private async attemptTokenRefresh(): Promise<void> {
     if (this.isRefreshing) return;
+    // Never start (or resume) a refresh once shutdown/removal has begun — this
+    // is the guard that makes the pre-await clear in stop() airtight even for a
+    // retry timer that already fired, and it also covers the heartbeat-driven
+    // path into refresh.
+    if (this._draining) return;
 
     const now = Date.now();
     if (now - this.lastRefreshTime < this.REFRESH_COOLDOWN_MS) {
@@ -389,6 +401,17 @@ export class OctoGateway {
       this.robotId = reg.robot_id;
       this._ownerUid = reg.owner_uid;
       this.registration = reg;
+
+      // stop() may have started while registerBot() was in flight (it can
+      // outlive the drain window on its own 30s budget). If we're draining now,
+      // do NOT connect — otherwise we'd leave a live socket after stop() has
+      // released the lock. Leave this.socket null; stop()'s disconnect is a
+      // no-op, which is correct.
+      if (this._draining) {
+        console.log('Token refresh aborted: gateway is shutting down');
+        return;
+      }
+
       console.log('Token refreshed, reconnecting...');
 
       this.socket = this.createSocket(reg.ws_url, reg.robot_id, reg.im_token);
@@ -396,7 +419,9 @@ export class OctoGateway {
       this.startHeartbeat(); // Q33: Restart API heartbeat after successful refresh
     } catch (err) {
       console.error('Token refresh failed:', String(err));
-      this.startHeartbeat(); // Q33: Restore heartbeat on failure for self-healing
+      if (!this._draining) {
+        this.startHeartbeat(); // Q33: Restore heartbeat on failure for self-healing
+      }
     } finally {
       this.isRefreshing = false;
     }

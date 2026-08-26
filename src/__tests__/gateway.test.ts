@@ -358,6 +358,55 @@ describe('Token refresh cooldown', () => {
 
     await gw.stop();
   });
+
+  it('does not resurrect the gateway when the retry fires during stop() drain', async () => {
+    // Regression: the retry timer must be cancelled at the TOP of stop() (before
+    // the drain await) and attemptTokenRefresh() must bail while draining.
+    // Otherwise a timer that expires inside the drain window reconnects AFTER
+    // stop() has released the lock — a zombie gateway that double-registers the
+    // bot (the exact kick condition this PR fixes). Also reachable from a
+    // multi-bot hot-reload removeBot(), which calls stop() without exiting.
+    const gw = new OctoGateway(makeConfig());
+    await gw.start();
+
+    const socketOpts = vi.mocked(WKSocket).mock.calls[0][0];
+
+    // Kick #1 → immediate refresh (new socket + registerBot).
+    socketOpts.onError!(new Error('Kicked by server'));
+    await vi.advanceTimersByTimeAsync(100);
+
+    // Kick #2 inside the cooldown → arms refreshRetryTimer (~55s out).
+    await vi.advanceTimersByTimeAsync(5_000);
+    const s2 = vi.mocked(WKSocket).mock.calls[vi.mocked(WKSocket).mock.calls.length - 1][0];
+    s2.onError!(new Error('Kicked by server'));
+    await vi.advanceTimersByTimeAsync(100);
+
+    const socketsBefore = vi.mocked(WKSocket).mock.calls.length;
+    const registerBefore = vi.mocked(registerBot).mock.calls.length;
+
+    // Begin shutdown with an in-flight handler so the drain wait spans the
+    // timer's expiry (drainTimeoutMs large enough to outlast it).
+    let releaseHandler!: () => void;
+    const handler = new Promise<void>((res) => { releaseHandler = res; });
+    const activeHandlers = new Set<Promise<void>>([handler]);
+    const stopPromise = gw.stop(activeHandlers, 90_000);
+
+    // Advance past the armed retry's expiry while stop() is still draining.
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    // Nothing may have been resurrected mid-drain.
+    expect(vi.mocked(registerBot).mock.calls.length).toBe(registerBefore);
+    expect(vi.mocked(WKSocket).mock.calls.length).toBe(socketsBefore);
+
+    // Finish the handler so stop() completes cleanly.
+    releaseHandler();
+    await vi.advanceTimersByTimeAsync(0);
+    await stopPromise;
+
+    // Still nothing resurrected after stop() resolved.
+    expect(vi.mocked(registerBot).mock.calls.length).toBe(registerBefore);
+    expect(vi.mocked(WKSocket).mock.calls.length).toBe(socketsBefore);
+  });
 });
 
 // ─── 4. Heartbeat Failures ──────────────────────────────────────────────────
