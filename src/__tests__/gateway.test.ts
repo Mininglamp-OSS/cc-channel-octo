@@ -325,6 +325,39 @@ describe('Token refresh cooldown', () => {
 
     await gw.stop();
   });
+
+  it('recovers when a second kick lands inside the cooldown (self-scheduled retry)', async () => {
+    // Regression: a "Kicked by server" sets the socket's needReconnect=false, so
+    // the socket will not self-reconnect — token refresh is the only recovery
+    // path. If a second kick arrives inside the 60s cooldown the refresh is
+    // deferred; previously nothing was rescheduled, so the bot stayed offline
+    // until a manual restart. The cooldown branch must now arm a retry that
+    // fires once the cooldown expires, with NO further kick event.
+    const gw = new OctoGateway(makeConfig());
+    await gw.start();
+
+    const socketOpts = vi.mocked(WKSocket).mock.calls[0][0];
+
+    // First kick → immediate refresh.
+    socketOpts.onError!(new Error('Kicked by server'));
+    await vi.advanceTimersByTimeAsync(100);
+    const afterFirst = vi.mocked(registerBot).mock.calls.length;
+
+    // Second kick 5s later — inside the cooldown. Must NOT refresh immediately.
+    await vi.advanceTimersByTimeAsync(5_000);
+    const newSocketOpts =
+      vi.mocked(WKSocket).mock.calls[vi.mocked(WKSocket).mock.calls.length - 1][0];
+    newSocketOpts.onError!(new Error('Kicked by server'));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(vi.mocked(registerBot).mock.calls.length).toBe(afterFirst);
+
+    // Let the cooldown elapse: the armed retry must reconnect on its own,
+    // without any additional kick. (Before the fix this stayed at afterFirst.)
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(vi.mocked(registerBot).mock.calls.length).toBe(afterFirst + 1);
+
+    await gw.stop();
+  });
 });
 
 // ─── 4. Heartbeat Failures ──────────────────────────────────────────────────

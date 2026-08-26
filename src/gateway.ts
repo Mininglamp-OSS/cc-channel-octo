@@ -39,6 +39,14 @@ export class OctoGateway {
   private isRefreshing = false;
   private lastRefreshTime = 0;
   private readonly REFRESH_COOLDOWN_MS = 60_000;
+  /** Pending retry armed when a kick lands inside the refresh cooldown. A
+   *  "Kicked by server" sets the socket's needReconnect=false, so the socket
+   *  will NOT self-reconnect; the token refresh is the only recovery path. If a
+   *  second kick arrives within REFRESH_COOLDOWN_MS the refresh is skipped —
+   *  without this timer nothing is left scheduled and the bot stays offline
+   *  until a manual restart. This guarantees exactly one retry once the
+   *  cooldown expires. */
+  private refreshRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Heartbeat failure tracking
   private heartbeatFailCount = 0;
@@ -188,6 +196,10 @@ export class OctoGateway {
     }
 
     this.stopHeartbeat();
+    if (this.refreshRetryTimer) {
+      clearTimeout(this.refreshRetryTimer);
+      this.refreshRetryTimer = null;
+    }
     if (this.socket) {
       await this.socket.disconnectAndWait();
       this.socket = null;
@@ -330,9 +342,26 @@ export class OctoGateway {
 
     const now = Date.now();
     if (now - this.lastRefreshTime < this.REFRESH_COOLDOWN_MS) {
-      const remaining = Math.ceil((this.REFRESH_COOLDOWN_MS - (now - this.lastRefreshTime)) / 1000);
-      console.log(`Token refresh cooldown (${remaining}s remaining)`);
+      const remainingMs = this.REFRESH_COOLDOWN_MS - (now - this.lastRefreshTime);
+      const remaining = Math.ceil(remainingMs / 1000);
+      console.log(`Token refresh cooldown (${remaining}s remaining) — scheduling retry`);
+      // The kick set needReconnect=false on the socket, so nothing else will
+      // bring the WS back. Arm a single retry for when the cooldown expires so
+      // a kick-inside-cooldown can't wedge the bot offline permanently.
+      if (!this.refreshRetryTimer) {
+        this.refreshRetryTimer = setTimeout(() => {
+          this.refreshRetryTimer = null;
+          void this.attemptTokenRefresh();
+        }, remainingMs + 250);
+      }
       return;
+    }
+
+    // Cooldown passed — a real refresh is proceeding; drop any pending retry so
+    // it can't fire a redundant refresh on top of the fresh connection.
+    if (this.refreshRetryTimer) {
+      clearTimeout(this.refreshRetryTimer);
+      this.refreshRetryTimer = null;
     }
 
     this.isRefreshing = true;
